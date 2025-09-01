@@ -55,6 +55,11 @@ type lockedKeys struct {
 	keys map[uint64]struct{}
 }
 
+type upsertNode struct {
+    next *upsertNode
+    kvs  []*Entry
+}
+
 func (lk *lockedKeys) add(key uint64) {
 	lk.Lock()
 	defer lk.Unlock()
@@ -90,9 +95,11 @@ type DB struct {
 	valueDirGuard *directoryLockGuard
 
 	closers closers
+	nextTableID uint64
 
 	mt  *memTable   // Our latest (actively written) in-memory table
 	imm []*memTable // Add here only AFTER pushing to flushChan.
+	root atomic.Pointer[upsertNode] 
 
 	// Initialized via openMemTables.
 	nextMemFid int
@@ -245,7 +252,7 @@ func Open(opt Options) (*DB, error) {
 		bannedNamespaces: &lockedKeys{keys: make(map[uint64]struct{})},
 		threshold:        initVlogThreshold(&opt),
 	}
-
+	db.root.Store(nil)
 	db.syncChan = opt.syncChan
 
 	// Cleanup all the goroutines started by badger in case of an error.
@@ -1097,65 +1104,98 @@ func (db *DB) handleMemTableFlushClassic(mt *memTable, dropPrefixes [][]byte) er
 	return err
 }
 
-func (db *DB) handleMemTableFlushPartitioned(mt *memTable) error {
-    fanOut := db.opt.PartitionFanOut
-
-    type kv struct {
-        key []byte
-        vs  y.ValueStruct
+func (db *DB) handleMemTableFlushPartitioned() error {
+    // 🚀 Atomically swap out the CAS-prepended list
+    head := db.root.Swap(nil)
+    if head == nil {
+        return nil // nothing to flush
     }
 
-    // 1) Group all entries by partition ID
-    parts := make(map[uint32][]kv, fanOut)
-    itr := mt.sl.NewUniIterator(false)
-    for itr.Rewind(); itr.Valid(); itr.Next() {
-        key := append([]byte(nil), itr.Key()...)
-        vs := itr.Value()
-        pid := getPartitionID(0, key, fanOut)
-        parts[pid] = append(parts[pid], kv{key, vs})
+    var nodes []*upsertNode
+    for n := head; n != nil; n = n.next {
+        nodes = append(nodes, n)
     }
-    itr.Close()
 
-    // 2) Build and write one SSTable per partition
-    bopts := buildTableOptions(db)
-    for pid, group := range parts {
-        if len(group) == 0 {
-            continue
-        }
-        builder := table.NewTableBuilder(bopts)
-        for _, e := range group {
-            // Decode any value-log pointer so we know how many bytes to reserve
-            var vp valuePointer
-            if e.vs.Meta&bitValuePointer != 0 {
-                vp.Decode(e.vs.Value)
-            }
-            builder.Add(e.key, e.vs, vp.Len)
-        }
-
-        // Finish building and commit
-        fileID := db.lc.reserveFileID()
-        var tbl *table.Table
-        var err error
-		fname := table.NewFilename(fileID, db.opt.Dir)
-		tbl, err = table.CreateTable(fname, builder)
-        builder.Close()
-        if err != nil {
-            return y.Wrap(err, "creating partitioned L0 table")
-        }
-
-        // Register it in the correct partition
-        if err := db.lc.addLevel0PartitionedTable(int(pid), tbl); err != nil {
-            return err
-        }
-        _ = tbl.DecrRef()
+    var entries []*Entry
+    for _, node := range nodes {
+        entries = append(entries, node.kvs...)
     }
-    return nil
+
+    if len(entries) == 0 {
+        return nil
+    }
+
+    sort.SliceStable(entries, func(i, j int) bool {
+        if cmp := bytes.Compare(entries[i].Key, entries[j].Key); cmp != 0 {
+            return cmp < 0
+        }
+        return entries[i].version < entries[j].version
+    })
+
+    // 🚀 Now hand these entries to Level-0 logic in levels.go
+    return db.lc.flushEntriesToPartitions(entries)
 }
+
+
+// func (db *DB) handleMemTableFlushPartitioned(mt *memTable) error {
+//     fanOut := db.opt.PartitionFanOut
+
+//     type kv struct {
+//         key []byte
+//         vs  y.ValueStruct
+//     }
+
+//     // 1) Group all entries by partition ID
+//     parts := make(map[uint32][]kv, fanOut)
+//     itr := mt.sl.NewUniIterator(false)
+//     for itr.Rewind(); itr.Valid(); itr.Next() {
+//         key := append([]byte(nil), itr.Key()...)
+//         vs := itr.Value()
+//         pid := getPartitionID(0, key, fanOut)
+//         parts[pid] = append(parts[pid], kv{key, vs})
+//     }
+//     itr.Close()
+
+//     // 2) Build and write one SSTable per partition
+//     bopts := buildTableOptions(db)
+//     for pid, group := range parts {
+//         if len(group) == 0 {
+//             continue
+//         }
+//         builder := table.NewTableBuilder(bopts)
+//         for _, e := range group {
+//             // Decode any value-log pointer so we know how many bytes to reserve
+//             var vp valuePointer
+//             if e.vs.Meta&bitValuePointer != 0 {
+//                 vp.Decode(e.vs.Value)
+//             }
+//             builder.Add(e.key, e.vs, vp.Len)
+//         }
+
+//         // Finish building and commit
+//         fileID := db.lc.reserveFileID()
+//         var tbl *table.Table
+//         var err error
+// 		fname := table.NewFilename(fileID, db.opt.Dir)
+// 		tbl, err = table.CreateTable(fname, builder)
+//         builder.Close()
+//         if err != nil {
+//             return y.Wrap(err, "creating partitioned L0 table")
+//         }
+
+//         // Register it in the correct partition
+//         if err := db.lc.addLevel0PartitionedTable(int(pid), tbl); err != nil {
+//             return err
+//         }
+//         _ = tbl.DecrRef()
+//     }
+//     return nil
+// }
 
 // handleMemTableFlush must be run serially.
 func (db *DB) handleMemTableFlush(mt *memTable, dropPrefixes [][]byte) error {
-    if db.opt.PartitionFanOut > 0 {
-        return db.handleMemTableFlushPartitioned(mt)
+    if db.opt.PartitionFanOut > 1 {
+        return db.handleMemTableFlushPartitioned()
     }
     return db.handleMemTableFlushClassic(mt, dropPrefixes)
 }
@@ -1178,7 +1218,7 @@ func (db *DB) flushMemtable(lc *z.Closer) {
 				continue
 			}
 			
-			if db.opt.PartitionFanOut > 0 {
+			if db.opt.PartitionFanOut > 1 {
 				db.lc.checkPartitionOverflow(0)
 			}
 

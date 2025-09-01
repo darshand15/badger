@@ -1792,6 +1792,96 @@ func (s *levelsController) verifyChecksum() error {
 	return nil
 }
 
+func (lc *levelsController) flushEntriesToPartitions(entries []*Entry) error {
+    fanout := lc.kv.opt.PartitionFanOut
+    if fanout <= 1 {
+        // Single partition: build one SSTable and insert at pid=0
+        t, err := lc.buildSSTable(entries)
+        if err != nil {
+            return err
+        }
+        if t == nil {
+            return nil
+        }
+        return lc.addLevel0PartitionedTable(0, t)
+    }
+
+    // Multi-partition: distribute entries by hash
+    parts := make([][]*Entry, fanout)
+    for _, e := range entries {
+        pid := int(z.MemHash(e.Key) % uint64(fanout))
+        parts[pid] = append(parts[pid], e)
+    }
+
+    for pid, ents := range parts {
+        if len(ents) == 0 {
+            continue
+        }
+
+        // Build SSTable for this partition
+        t, err := lc.buildSSTable(ents)
+        if err != nil {
+            return err
+        }
+        if t == nil {
+            continue
+        }
+
+        if err := lc.addLevel0PartitionedTable(pid, t); err != nil {
+            return err
+        }
+    }
+
+    // After inserting all partitions, check for overflow at Level 0
+    lc.checkPartitionOverflow(0)
+    return nil
+}
+
+func (lc *levelsController) buildSSTable(entries []*Entry) (*table.Table, error) {
+    // Construct table.Options from DB options
+    topt := table.Options{
+        BloomFalsePositive:   lc.kv.opt.BloomFalsePositive,
+        BlockSize:            lc.kv.opt.BlockSize,
+        Compression:          lc.kv.opt.Compression,
+        ZSTDCompressionLevel: lc.kv.opt.ZSTDCompressionLevel,
+    }
+
+    builder := table.NewTableBuilder(topt)
+    defer builder.Close()
+
+    for _, e := range entries {
+        vs := y.ValueStruct{
+            Value:     e.Value,
+            Meta:      e.meta,
+            UserMeta:  e.UserMeta,
+            ExpiresAt: e.ExpiresAt,
+            Version:   e.version,
+        }
+        builder.Add(e.Key, vs, 0)
+    }
+
+    data := builder.Finish()
+    if len(data) == 0 {
+        return nil, nil
+    }
+
+    // Reserve a new unique table ID
+    id := lc.reserveNextTableID()
+
+    // Create an in-memory SSTable with the new ID
+    tbl, err := table.OpenInMemoryTable(data, id, &topt)
+    if err != nil {
+        return nil, err
+    }
+    return tbl, nil
+}
+
+func (lc *levelsController) reserveNextTableID() uint64 {
+    return atomic.AddUint64(&lc.kv.nextTableID, 1)
+}
+
+
+
 // Returns the sorted list of splits for all the levels and tables based
 // on the block offsets.
 func (s *levelsController) keySplits(numPerTable int, prefix []byte) []string {
@@ -1811,7 +1901,7 @@ func (s *levelsController) keySplits(numPerTable int, prefix []byte) []string {
 // checkPartitionOverflow synchronously promotes any partition at `level` whose total size exceeds its quota.
 func (s *levelsController) checkPartitionOverflow(level int) {
     fanOut := s.kv.opt.PartitionFanOut
-    if fanOut == 0 {
+    if fanOut <=1 {
         return // not in partitioned mode
     }
     // compute per-partition quota: targetSz[level] / fanOut^(level+1)
@@ -1842,7 +1932,7 @@ func (s *levelsController) checkPartitionOverflow(level int) {
 
 func (s *levelsController) promotePartition(level, pid int) error {
     fanOut := s.kv.opt.PartitionFanOut
-    if fanOut == 0 {
+    if fanOut <=1 {
         return nil // not in partitioned mode
     }
 
