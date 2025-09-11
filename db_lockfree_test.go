@@ -172,44 +172,137 @@ func BenchmarkLockFreeIngest(b *testing.B) {
 }
 
 func TestTimestampScenarios(t *testing.T) {
+    type writeOp struct {
+        ts  uint64
+        key []byte
+        val []byte // nil = delete
+    }
+    type readOp struct {
+        ts      uint64
+        key     []byte
+        wantVal []byte
+        wantErr bool
+    }
+
     scenarios := []struct {
-        name string
-        writes []struct {
-            ts   uint64
-            key  []byte
-            val  []byte
-        }
-        reads []struct {
-            ts      uint64
-            key     []byte
-            wantVal []byte
-            wantErr bool
-        }
+        name            string
+        writes          []writeOp
+        reads           []readOp
+        triggerFlush    bool
+        triggerCompact  bool
     }{
         {
-            name: "historical reads",
-            writes: []struct{ts uint64; key, val []byte}{
-                {1, []byte("k"), []byte("v1")},
-                {2, []byte("k"), []byte("v2")},
-                {3, []byte("k"), []byte("v3")},
+            name: "basic overwrite ascending",
+            writes: []writeOp{
+                {1, []byte("a"), []byte("v1")},
+                {2, []byte("a"), []byte("v2")},
             },
-            reads: []struct{ts uint64; key, wantVal []byte; wantErr bool}{
-                {1, []byte("k"), []byte("v1"), false},
-                {2, []byte("k"), []byte("v2"), false},
-                {3, []byte("k"), []byte("v3"), false},
-                {math.MaxUint64, []byte("k"), []byte("v3"), false},
+            reads: []readOp{
+                {1, []byte("a"), []byte("v1"), false},
+                {2, []byte("a"), []byte("v2"), false},
+                {math.MaxUint64, []byte("a"), []byte("v2"), false},
+            },
+        },
+        {
+            name: "parallel overlapping timestamps",
+            writes: []writeOp{
+                {5, []byte("b"), []byte("x")},
+                {6, []byte("b"), []byte("y")},
+            },
+            reads: []readOp{
+                {5, []byte("b"), []byte("x"), false},
+                {6, []byte("b"), []byte("y"), false},
+                {math.MaxUint64, []byte("b"), []byte("y"), false},
+            },
+        },
+        {
+            name: "read snapshot in between",
+            writes: []writeOp{
+                {10, []byte("c"), []byte("v1")},
+                {20, []byte("c"), []byte("v2")},
+            },
+            reads: []readOp{
+                {15, []byte("c"), []byte("v1"), false},
+                {25, []byte("c"), []byte("v2"), false},
             },
         },
         {
             name: "delete semantics",
-            writes: []struct{ts uint64; key, val []byte}{
-                {1, []byte("k"), []byte("v1")},
-                {2, []byte("k"), nil}, // delete marker
+            writes: []writeOp{
+                {30, []byte("d"), []byte("alive")},
+                {40, []byte("d"), nil}, // tombstone
             },
-            reads: []struct{ts uint64; key, wantVal []byte; wantErr bool}{
-                {1, []byte("k"), []byte("v1"), false},
-                {2, []byte("k"), nil, true}, // deleted
-                {math.MaxUint64, []byte("k"), nil, true},
+            reads: []readOp{
+                {35, []byte("d"), []byte("alive"), false},
+                {45, []byte("d"), nil, true},
+            },
+        },
+        {
+            name: "cold vs hot compaction",
+            writes: func() []writeOp {
+                var w []writeOp
+                for i := 1; i <= 10; i++ {
+                    w = append(w, writeOp{uint64(i), []byte(fmt.Sprintf("k%d", i)), []byte("cold")})
+                }
+                for i := 100; i < 110; i++ {
+                    w = append(w, writeOp{uint64(i), []byte(fmt.Sprintf("k%d", i-99)), []byte("hot")})
+                }
+                return w
+            }(),
+            reads: []readOp{
+                {math.MaxUint64, []byte("k1"), []byte("hot"), false},
+                {5, []byte("k1"), []byte("cold"), false},
+            },
+            triggerFlush:   true,
+            triggerCompact: true,
+        },
+        {
+            name: "interleaved multi-key",
+            writes: []writeOp{
+                {50, []byte("e"), []byte("v1")},
+                {51, []byte("f"), []byte("v2")},
+                {52, []byte("e"), []byte("v3")},
+            },
+            reads: []readOp{
+                {51, []byte("e"), []byte("v1"), false},
+                {53, []byte("e"), []byte("v3"), false},
+                {math.MaxUint64, []byte("f"), []byte("v2"), false},
+            },
+        },
+        {
+            name: "partitioned fanout (if enabled)",
+            writes: []writeOp{
+                {60, []byte("p1:k"), []byte("A")},
+                {61, []byte("p2:k"), []byte("B")},
+            },
+            reads: []readOp{
+                {math.MaxUint64, []byte("p1:k"), []byte("A"), false},
+                {math.MaxUint64, []byte("p2:k"), []byte("B"), false},
+            },
+            triggerFlush: true,
+        },
+        {
+            name: "compaction preserves latest",
+            writes: []writeOp{
+                {70, []byte("g"), []byte("v70")},
+                {80, []byte("g"), []byte("v80")},
+                {90, []byte("g"), []byte("v90")},
+            },
+            reads: []readOp{
+                {math.MaxUint64, []byte("g"), []byte("v90"), false},
+                {75, []byte("g"), []byte("v70"), false},
+            },
+            triggerFlush:   true,
+            triggerCompact: true,
+        },
+        {
+            name: "concurrent conflicting writes",
+            writes: []writeOp{
+                {100, []byte("h"), []byte("v1")},
+                {101, []byte("h"), []byte("v2")},
+            },
+            reads: []readOp{
+                {math.MaxUint64, []byte("h"), []byte("v2"), false},
             },
         },
     }
@@ -229,6 +322,18 @@ func TestTimestampScenarios(t *testing.T) {
                         t.Fatalf("commit: %v", err)
                     }
                 }
+
+                if sc.triggerFlush {
+                    // simulate flush
+                    if err := db.handleMemTableFlushPartitioned(); err != nil {
+                        t.Fatalf("flush error: %v", err)
+                    }
+                }
+                if sc.triggerCompact {
+                    // simulate compaction at L0
+                    db.lc.checkPartitionOverflow(0)
+                }
+
                 // reads
                 for _, r := range sc.reads {
                     txn := db.NewTransactionAt(r.ts, false)

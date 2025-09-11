@@ -762,12 +762,45 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 	if db.IsClosed() {
 		return y.ValueStruct{}, ErrDBClosed
 	}
-	tables, decr := db.getMemTables() // Lock should be released.
+
+	// Extract logical key + snapshot timestamp from seek key
+	readTs := y.ParseTs(key)
+	logicalKey := y.ParseKey(key)
+
+	// 1. 🚀 Check the CAS-prepend root list first
+	var best y.ValueStruct
+	for n := db.root.Load(); n != nil; n = n.next {
+		for _, e := range n.kvs {
+			if !bytes.Equal(y.ParseKey(e.Key), logicalKey) {
+				continue
+			}
+			// Only consider versions <= readTs
+			if e.version <= readTs {
+				if isDeletedOrExpired(e.meta, e.ExpiresAt) {
+					return y.ValueStruct{}, ErrKeyNotFound
+				}
+				// Pick the newest visible version <= readTs
+				if e.version > best.Version {
+					best = y.ValueStruct{
+						Value:     e.Value,
+						Meta:      e.meta,
+						UserMeta:  e.UserMeta,
+						ExpiresAt: e.ExpiresAt,
+						Version:   e.version,
+					}
+				}
+			}
+		}
+	}
+	if best.Value != nil || best.Meta != 0 {
+		return best, nil
+	}
+
+	// 2. Fallback: memtables (mt + imm)
+	tables, decr := db.getMemTables()
 	defer decr()
 
 	var maxVs y.ValueStruct
-	version := y.ParseTs(key)
-
 	y.NumGetsAdd(db.opt.MetricsEnabled, 1)
 	for i := 0; i < len(tables); i++ {
 		vs := tables[i].sl.Get(key)
@@ -775,17 +808,23 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 		if vs.Meta == 0 && vs.Value == nil {
 			continue
 		}
-		// Found the required version of the key, return immediately.
-		if vs.Version == version {
+		// Found exact version match
+		if vs.Version == readTs {
 			y.NumGetsWithResultsAdd(db.opt.MetricsEnabled, 1)
 			return vs, nil
 		}
-		if maxVs.Version < vs.Version {
+		if vs.Version <= readTs && maxVs.Version < vs.Version {
 			maxVs = vs
 		}
 	}
+	if maxVs.Value != nil || maxVs.Meta != 0 {
+		return maxVs, nil
+	}
+
+	// 3. Final fallback: LSM levels
 	return db.lc.get(key, maxVs, 0)
 }
+
 
 var requestPool = sync.Pool{
 	New: func() interface{} {

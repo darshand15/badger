@@ -1626,6 +1626,66 @@ func (s *levelsController) close() error {
 // get searches for a given key in all the levels of the LSM tree. It returns
 // key version <= the expected version (version in key). If not found,
 // it returns an empty y.ValueStruct.
+// func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) (
+// 	y.ValueStruct, error) {
+
+// 	if s.kv.IsClosed() {
+// 		return y.ValueStruct{}, ErrDBClosed
+// 	}
+
+// 	readTs := y.ParseTs(key)
+// 	logicalKey := y.ParseKey(key)
+
+// 	for _, h := range s.levels {
+// 		if h.level < startLevel {
+// 			continue
+// 		}
+
+// 		// 🔑 If partitioned fanout is enabled, compute pid and restrict lookup
+// 		if s.kv.opt.PartitionFanOut > 1 && len(h.partitionedTables) > 0 {
+// 			pid := int(z.MemHash(logicalKey) % uint64(s.kv.opt.PartitionFanOut))
+
+
+// 			h.RLock()
+// 			tables := h.partitionedTables[int(pid)]
+// 			for _, tbl := range tables {
+// 				itr := tbl.NewIterator(false) // false = no prefetch
+// 				itr.Seek(key)
+// 				if itr.Valid() && bytes.Equal(y.ParseKey(itr.Item().Key()), logicalKey) {
+// 					vs := y.ValueStruct{
+// 						Value:     itr.Item().ValueCopy(nil),
+// 						Meta:      itr.Item().Meta(),
+// 						UserMeta:  itr.Item().UserMeta(),
+// 						ExpiresAt: itr.Item().ExpiresAt(),
+// 						Version:   y.ParseTs(itr.Item().Key()),
+// 					}
+// 					if vs.Version <= readTs && vs.Version > maxVs.Version {
+// 						maxVs = vs
+// 					}
+// 				}
+// 				itr.Close()
+// 			}
+// 			h.RUnlock()
+// 		} else {
+// 			// 🔎 Legacy: unpartitioned mode
+// 			vs, err := h.get(key) // already RLock() + RUnlock() inside
+// 			if err != nil {
+// 				return y.ValueStruct{}, y.Wrapf(err, "get key: %q", key)
+// 			}
+// 			if vs.Meta != 0 || vs.Value != nil {
+// 				if vs.Version <= readTs && vs.Version > maxVs.Version {
+// 					maxVs = vs
+// 				}
+// 			}
+// 		}
+// 	}
+
+// 	if len(maxVs.Value) > 0 || maxVs.Meta != 0 {
+// 		y.NumGetsWithResultsAdd(s.kv.opt.MetricsEnabled, 1)
+// 	}
+// 	return maxVs, nil
+// }
+
 func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) (
 	y.ValueStruct, error) {
 	if s.kv.IsClosed() {

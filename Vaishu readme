@@ -1,0 +1,14 @@
+Passing subtests
+
+basic_overwrite_ascending → Confirms that later timestamps overwrite earlier ones (v2 beats v1 at higher ts). Works fine.
+parallel_overlapping_timestamps → Confirms parallel conflicting writes still resolve with latest timestamp visible. Works fine.
+read_snapshot_in_between → Confirms snapshot reads return consistent values based on read timestamp. Works fine.
+delete_semantics → Confirms deletes (tombstones) are respected (read at later ts shows “deleted”). Works fine.
+interleaved_multi-key → Confirms multiple keys with interleaved timestamps preserve per-key ordering. Works fine.
+concurrent_conflicting_writes → Confirms concurrent conflicts resolve properly, one latest value visible. Works fine.
+
+Failing subtests
+
+cold_vs_hot_compaction → Fails with Key not found. This is testing whether older data pushed down by compaction is still visible. Likely your levelsController.get isn’t fully wired to read compacted SSTables yet.
+partitioned_fanout_(if_enabled) → Fails with Key not found. This tests whether keys placed in different partitions by the fanout hash are retrievable. Probably the partitioned lookup path in levelsController.get is incomplete.
+compaction_preserves_latest → Fails with Key not found. This checks if compaction preserves the latest timestamp value across levels. Again, your get isn’t reading from all levels/partitions.
