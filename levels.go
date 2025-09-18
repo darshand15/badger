@@ -6,6 +6,9 @@
 package badger
 
 import (
+	"github.com/dgraph-io/badger/v4/table"
+    
+	
 	"bytes"
 	"context"
 	"encoding/hex"
@@ -25,7 +28,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/badger/v4/table"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -1623,105 +1625,105 @@ func (s *levelsController) close() error {
 	return y.Wrap(err, "levelsController.Close")
 }
 
-// get searches for a given key in all the levels of the LSM tree. It returns
-// key version <= the expected version (version in key). If not found,
-// it returns an empty y.ValueStruct.
-// func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) (
-// 	y.ValueStruct, error) {
-
-// 	if s.kv.IsClosed() {
-// 		return y.ValueStruct{}, ErrDBClosed
-// 	}
-
-// 	readTs := y.ParseTs(key)
-// 	logicalKey := y.ParseKey(key)
-
-// 	for _, h := range s.levels {
-// 		if h.level < startLevel {
-// 			continue
-// 		}
-
-// 		// 🔑 If partitioned fanout is enabled, compute pid and restrict lookup
-// 		if s.kv.opt.PartitionFanOut > 1 && len(h.partitionedTables) > 0 {
-// 			pid := int(z.MemHash(logicalKey) % uint64(s.kv.opt.PartitionFanOut))
-
-
-// 			h.RLock()
-// 			tables := h.partitionedTables[int(pid)]
-// 			for _, tbl := range tables {
-// 				itr := tbl.NewIterator(false) // false = no prefetch
-// 				itr.Seek(key)
-// 				if itr.Valid() && bytes.Equal(y.ParseKey(itr.Item().Key()), logicalKey) {
-// 					vs := y.ValueStruct{
-// 						Value:     itr.Item().ValueCopy(nil),
-// 						Meta:      itr.Item().Meta(),
-// 						UserMeta:  itr.Item().UserMeta(),
-// 						ExpiresAt: itr.Item().ExpiresAt(),
-// 						Version:   y.ParseTs(itr.Item().Key()),
-// 					}
-// 					if vs.Version <= readTs && vs.Version > maxVs.Version {
-// 						maxVs = vs
-// 					}
-// 				}
-// 				itr.Close()
-// 			}
-// 			h.RUnlock()
-// 		} else {
-// 			// 🔎 Legacy: unpartitioned mode
-// 			vs, err := h.get(key) // already RLock() + RUnlock() inside
-// 			if err != nil {
-// 				return y.ValueStruct{}, y.Wrapf(err, "get key: %q", key)
-// 			}
-// 			if vs.Meta != 0 || vs.Value != nil {
-// 				if vs.Version <= readTs && vs.Version > maxVs.Version {
-// 					maxVs = vs
-// 				}
-// 			}
-// 		}
-// 	}
-
-// 	if len(maxVs.Value) > 0 || maxVs.Meta != 0 {
-// 		y.NumGetsWithResultsAdd(s.kv.opt.MetricsEnabled, 1)
-// 	}
-// 	return maxVs, nil
-// }
-
 func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) (
 	y.ValueStruct, error) {
+
 	if s.kv.IsClosed() {
 		return y.ValueStruct{}, ErrDBClosed
 	}
-	// It's important that we iterate the levels from 0 on upward. The reason is, if we iterated
-	// in opposite order, or in parallel (naively calling all the h.RLock() in some order) we could
-	// read level L's tables post-compaction and level L+1's tables pre-compaction. (If we do
-	// parallelize this, we will need to call the h.RLock() function by increasing order of level
-	// number.)
+
 	version := y.ParseTs(key)
+	logicalKey := y.ParseKey(key)
+
 	for _, h := range s.levels {
-		// Ignore all levels below startLevel. This is useful for GC when L0 is kept in memory.
 		if h.level < startLevel {
 			continue
 		}
-		vs, err := h.get(key) // Calls h.RLock() and h.RUnlock().
-		if err != nil {
-			return y.ValueStruct{}, y.Wrapf(err, "get key: %q", key)
+
+		h.RLock()
+		var tbls []*table.Table
+		if s.kv.opt.PartitionFanOut > 1 && len(h.partitionedTables) > 0 {
+			pid := int(z.MemHash(logicalKey) % uint64(s.kv.opt.PartitionFanOut))
+			tbls = h.partitionedTables[pid]
+		} else {
+			tbls = h.tables
 		}
-		if vs.Value == nil && vs.Meta == 0 {
-			continue
+
+		for _, tbl := range tbls {
+			// Iterator options are in the same package `table`
+			itr := tbl.NewIterator(table.NOCACHE)
+
+
+			defer itr.Close()
+		
+			// Seek to our key
+			itr.Seek(key)
+			if !itr.Valid() {
+				continue
+			}
+		
+			k := itr.Key()
+			if bytes.Equal(y.ParseKey(k), logicalKey) {
+				val := itr.ValueCopy() // already returns y.ValueStruct
+				if val.Meta == 0 && val.Value == nil {
+					continue
+				}
+				if val.Version == version {
+					return val, nil
+				}
+				if maxVs.Version < val.Version {
+					maxVs = val
+				}
+			}
 		}
-		y.NumBytesReadsLSMAdd(s.kv.opt.MetricsEnabled, int64(len(vs.Value)))
-		if vs.Version == version {
-			return vs, nil
-		}
-		if maxVs.Version < vs.Version {
-			maxVs = vs
-		}
+		
+		
+		h.RUnlock()
 	}
+
 	if len(maxVs.Value) > 0 {
 		y.NumGetsWithResultsAdd(s.kv.opt.MetricsEnabled, 1)
 	}
 	return maxVs, nil
 }
+
+
+// func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) (
+// 	y.ValueStruct, error) {
+// 	if s.kv.IsClosed() {
+// 		return y.ValueStruct{}, ErrDBClosed
+// 	}
+// 	// It's important that we iterate the levels from 0 on upward. The reason is, if we iterated
+// 	// in opposite order, or in parallel (naively calling all the h.RLock() in some order) we could
+// 	// read level L's tables post-compaction and level L+1's tables pre-compaction. (If we do
+// 	// parallelize this, we will need to call the h.RLock() function by increasing order of level
+// 	// number.)
+// 	version := y.ParseTs(key)
+// 	for _, h := range s.levels {
+// 		// Ignore all levels below startLevel. This is useful for GC when L0 is kept in memory.
+// 		if h.level < startLevel {
+// 			continue
+// 		}
+// 		vs, err := h.get(key) // Calls h.RLock() and h.RUnlock().
+// 		if err != nil {
+// 			return y.ValueStruct{}, y.Wrapf(err, "get key: %q", key)
+// 		}
+// 		if vs.Value == nil && vs.Meta == 0 {
+// 			continue
+// 		}
+// 		y.NumBytesReadsLSMAdd(s.kv.opt.MetricsEnabled, int64(len(vs.Value)))
+// 		if vs.Version == version {
+// 			return vs, nil
+// 		}
+// 		if maxVs.Version < vs.Version {
+// 			maxVs = vs
+// 		}
+// 	}
+// 	if len(maxVs.Value) > 0 {
+// 		y.NumGetsWithResultsAdd(s.kv.opt.MetricsEnabled, 1)
+// 	}
+// 	return maxVs, nil
+// }
 
 func appendIteratorsReversed(out []y.Iterator, th []*table.Table, opt int) []y.Iterator {
 	for i := len(th) - 1; i >= 0; i-- {
