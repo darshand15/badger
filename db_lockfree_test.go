@@ -55,6 +55,7 @@ func logLatest(t *testing.T, db *DB, key []byte) {
 	// Item.Version() gives the Badger version (timestamp) for the item.
 	t.Logf("LATEST key=%q ts=%d val=%q", key, it.Version(), v)
 }
+
 // --- 1) Correctness: latest timestamp wins for a key.
 
 func TestLatestWins(t *testing.T) {
@@ -104,7 +105,6 @@ func TestLatestWins(t *testing.T) {
 			t.Fatalf("latest-wins failed: expected v2, got %q", got)
 		}
 	})
-	
 
 }
 
@@ -172,188 +172,202 @@ func BenchmarkLockFreeIngest(b *testing.B) {
 }
 
 func TestTimestampScenarios(t *testing.T) {
-    type writeOp struct {
-        ts  uint64
-        key []byte
-        val []byte // nil = delete
-    }
-    type readOp struct {
-        ts      uint64
-        key     []byte
-        wantVal []byte
-        wantErr bool
-    }
+	type writeOp struct {
+		ts  uint64
+		key []byte
+		val []byte // nil = delete
+	}
+	type readOp struct {
+		ts      uint64
+		key     []byte
+		wantVal []byte
+		wantErr bool
+	}
 
-    scenarios := []struct {
-        name            string
-        writes          []writeOp
-        reads           []readOp
-        triggerFlush    bool
-        triggerCompact  bool
-    }{
-        {
-            name: "basic overwrite ascending",
-            writes: []writeOp{
-                {1, []byte("a"), []byte("v1")},
-                {2, []byte("a"), []byte("v2")},
-            },
-            reads: []readOp{
-                {1, []byte("a"), []byte("v1"), false},
-                {2, []byte("a"), []byte("v2"), false},
-                {math.MaxUint64, []byte("a"), []byte("v2"), false},
-            },
-        },
-        {
-            name: "parallel overlapping timestamps",
-            writes: []writeOp{
-                {5, []byte("b"), []byte("x")},
-                {6, []byte("b"), []byte("y")},
-            },
-            reads: []readOp{
-                {5, []byte("b"), []byte("x"), false},
-                {6, []byte("b"), []byte("y"), false},
-                {math.MaxUint64, []byte("b"), []byte("y"), false},
-            },
-        },
-        {
-            name: "read snapshot in between",
-            writes: []writeOp{
-                {10, []byte("c"), []byte("v1")},
-                {20, []byte("c"), []byte("v2")},
-            },
-            reads: []readOp{
-                {15, []byte("c"), []byte("v1"), false},
-                {25, []byte("c"), []byte("v2"), false},
-            },
-        },
-        {
-            name: "delete semantics",
-            writes: []writeOp{
-                {30, []byte("d"), []byte("alive")},
-                {40, []byte("d"), nil}, // tombstone
-            },
-            reads: []readOp{
-                {35, []byte("d"), []byte("alive"), false},
-                {45, []byte("d"), nil, true},
-            },
-        },
-        {
-            name: "cold vs hot compaction",
-            writes: func() []writeOp {
-                var w []writeOp
-                for i := 1; i <= 10; i++ {
-                    w = append(w, writeOp{uint64(i), []byte(fmt.Sprintf("k%d", i)), []byte("cold")})
-                }
-                for i := 100; i < 110; i++ {
-                    w = append(w, writeOp{uint64(i), []byte(fmt.Sprintf("k%d", i-99)), []byte("hot")})
-                }
-                return w
-            }(),
-            reads: []readOp{
-                {math.MaxUint64, []byte("k1"), []byte("hot"), false},
-                {5, []byte("k1"), []byte("cold"), false},
-            },
-            triggerFlush:   true,
-            triggerCompact: true,
-        },
-        {
-            name: "interleaved multi-key",
-            writes: []writeOp{
-                {50, []byte("e"), []byte("v1")},
-                {51, []byte("f"), []byte("v2")},
-                {52, []byte("e"), []byte("v3")},
-            },
-            reads: []readOp{
-                {51, []byte("e"), []byte("v1"), false},
-                {53, []byte("e"), []byte("v3"), false},
-                {math.MaxUint64, []byte("f"), []byte("v2"), false},
-            },
-        },
-        {
-            name: "partitioned fanout (if enabled)",
-            writes: []writeOp{
-                {60, []byte("p1:k"), []byte("A")},
-                {61, []byte("p2:k"), []byte("B")},
-            },
-            reads: []readOp{
-                {math.MaxUint64, []byte("p1:k"), []byte("A"), false},
-                {math.MaxUint64, []byte("p2:k"), []byte("B"), false},
-            },
-            triggerFlush: true,
-        },
-        {
-            name: "compaction preserves latest",
-            writes: []writeOp{
-                {70, []byte("g"), []byte("v70")},
-                {80, []byte("g"), []byte("v80")},
-                {90, []byte("g"), []byte("v90")},
-            },
-            reads: []readOp{
-                {math.MaxUint64, []byte("g"), []byte("v90"), false},
-                {75, []byte("g"), []byte("v70"), false},
-            },
-            triggerFlush:   true,
-            triggerCompact: true,
-        },
-        {
-            name: "concurrent conflicting writes",
-            writes: []writeOp{
-                {100, []byte("h"), []byte("v1")},
-                {101, []byte("h"), []byte("v2")},
-            },
-            reads: []readOp{
-                {math.MaxUint64, []byte("h"), []byte("v2"), false},
-            },
-        },
-    }
+	scenarios := []struct {
+		name           string
+		writes         []writeOp
+		reads          []readOp
+		triggerFlush   bool
+		triggerCompact bool
+	}{
+		{
+			name: "basic overwrite ascending",
+			writes: []writeOp{
+				{1, []byte("a"), []byte("v1")},
+				{2, []byte("a"), []byte("v2")},
+			},
+			reads: []readOp{
+				{1, []byte("a"), []byte("v1"), false},
+				{2, []byte("a"), []byte("v2"), false},
+				{math.MaxUint64, []byte("a"), []byte("v2"), false},
+			},
+		},
+		{
+			name: "parallel overlapping timestamps",
+			writes: []writeOp{
+				{5, []byte("b"), []byte("x")},
+				{6, []byte("b"), []byte("y")},
+			},
+			reads: []readOp{
+				{5, []byte("b"), []byte("x"), false},
+				{6, []byte("b"), []byte("y"), false},
+				{math.MaxUint64, []byte("b"), []byte("y"), false},
+			},
+		},
+		{
+			name: "read snapshot in between",
+			writes: []writeOp{
+				{10, []byte("c"), []byte("v1")},
+				{20, []byte("c"), []byte("v2")},
+			},
+			reads: []readOp{
+				{15, []byte("c"), []byte("v1"), false},
+				{25, []byte("c"), []byte("v2"), false},
+			},
+		},
+		{
+			name: "delete semantics",
+			writes: []writeOp{
+				{30, []byte("d"), []byte("alive")},
+				{40, []byte("d"), nil}, // tombstone
+			},
+			reads: []readOp{
+				{35, []byte("d"), []byte("alive"), false},
+				{45, []byte("d"), nil, true},
+			},
+		},
+		{
+			name: "cold vs hot compaction",
+			writes: func() []writeOp {
+				var w []writeOp
+				for i := 1; i <= 10; i++ {
+					w = append(w, writeOp{uint64(i), []byte(fmt.Sprintf("k%d", i)), []byte("cold")})
+				}
+				for i := 100; i < 110; i++ {
+					w = append(w, writeOp{uint64(i), []byte(fmt.Sprintf("k%d", i-99)), []byte("hot")})
+				}
+				return w
+			}(),
+			reads: []readOp{
+				{math.MaxUint64, []byte("k1"), []byte("hot"), false},
+				{5, []byte("k1"), []byte("cold"), false},
+			},
+			triggerFlush:   true,
+			triggerCompact: true,
+		},
+		{
+			name: "interleaved multi-key",
+			writes: []writeOp{
+				{50, []byte("e"), []byte("v1")},
+				{51, []byte("f"), []byte("v2")},
+				{52, []byte("e"), []byte("v3")},
+			},
+			reads: []readOp{
+				{51, []byte("e"), []byte("v1"), false},
+				{53, []byte("e"), []byte("v3"), false},
+				{math.MaxUint64, []byte("f"), []byte("v2"), false},
+			},
+		},
+		{
+			name: "partitioned fanout (if enabled)",
+			writes: []writeOp{
+				{60, []byte("p1:k"), []byte("A")},
+				{61, []byte("p2:k"), []byte("B")},
+			},
+			reads: []readOp{
+				{math.MaxUint64, []byte("p1:k"), []byte("A"), false},
+				{math.MaxUint64, []byte("p2:k"), []byte("B"), false},
+			},
+			triggerFlush: true,
+		},
+		{
+			name: "compaction preserves latest",
+			writes: []writeOp{
+				{70, []byte("g"), []byte("v70")},
+				{80, []byte("g"), []byte("v80")},
+				{90, []byte("g"), []byte("v90")},
+			},
+			reads: []readOp{
+				{math.MaxUint64, []byte("g"), []byte("v90"), false},
+				{75, []byte("g"), []byte("v70"), false},
+			},
+			triggerFlush:   true,
+			triggerCompact: true,
+		},
+		{
+			name: "concurrent conflicting writes",
+			writes: []writeOp{
+				{100, []byte("h"), []byte("v1")},
+				{101, []byte("h"), []byte("v2")},
+			},
+			reads: []readOp{
+				{math.MaxUint64, []byte("h"), []byte("v2"), false},
+			},
+		},
+	}
 
-    withDB(t, true, func(db *DB) {
-        for _, sc := range scenarios {
-            t.Run(sc.name, func(t *testing.T) {
-                // writes
-                for _, w := range sc.writes {
-                    txn := db.NewTransactionAt(w.ts, true)
-                    if w.val == nil {
-                        _ = txn.Delete(w.key)
-                    } else {
-                        _ = txn.Set(w.key, w.val)
-                    }
-                    if err := txn.CommitAt(w.ts, nil); err != nil {
-                        t.Fatalf("commit: %v", err)
-                    }
-                }
+	withDB(t, true, func(db *DB) {
+		for _, sc := range scenarios {
+			t.Run(sc.name, func(t *testing.T) {
+				// writes
+				for _, w := range sc.writes {
+					txn := db.NewTransactionAt(w.ts, true)
+					if w.val == nil {
+						_ = txn.Delete(w.key)
+					} else {
+						_ = txn.Set(w.key, w.val)
+					}
+					if err := txn.CommitAt(w.ts, nil); err != nil {
+						t.Fatalf("commit: %v", err)
+					}
+				}
 
-                if sc.triggerFlush {
-                    // simulate flush
-                    if err := db.handleMemTableFlushPartitioned(); err != nil {
-                        t.Fatalf("flush error: %v", err)
-                    }
-                }
-                if sc.triggerCompact {
-                    // simulate compaction at L0
-                    db.lc.checkPartitionOverflow(0)
-                }
+				// fmt.Println("Hello World")
+				if sc.triggerFlush {
+					// head := db.root.Load()
+					// for n := head; n != nil; n = n.next {
+					// 	// fmt.Printf("Key: %d, Value: %d",)
+					// 	for i, ele := range n.kvs {
+					// 		if ele != nil {
+					// 			userKey := ele.Key
+					// 			if len(ele.Key) > 8 {
+					// 				userKey = ele.Key[:len(ele.Key)-8]
+					// 			}
+					// 			// Now we can safely print the parsed userKey with %s.
+					// 			fmt.Printf("    - Entry %d -> Key: %-15s Value: %s\n", i, userKey, ele.Value)
+					// 		}
+					// 	}
+					// }
+					// simulate flush
+					if err := db.handleMemTableFlushPartitioned(); err != nil {
+						t.Fatalf("flush error: %v", err)
+					}
+				}
+				if sc.triggerCompact {
+					// simulate compaction at L0
+					db.lc.checkPartitionOverflow(0)
+				}
 
-                // reads
-                for _, r := range sc.reads {
-                    txn := db.NewTransactionAt(r.ts, false)
-                    itm, err := txn.Get(r.key)
-                    if r.wantErr {
-                        if err == nil {
-                            t.Fatalf("expected error at ts=%d for key=%q", r.ts, r.key)
-                        }
-                        continue
-                    }
-                    if err != nil {
-                        t.Fatalf("unexpected get error: %v", err)
-                    }
-                    got, _ := itm.ValueCopy(nil)
-                    if !bytes.Equal(got, r.wantVal) {
-                        t.Fatalf("at ts=%d: expected %q, got %q", r.ts, r.wantVal, got)
-                    }
-                }
-            })
-        }
-    })
+				// reads
+				for _, r := range sc.reads {
+					txn := db.NewTransactionAt(r.ts, false)
+					itm, err := txn.Get(r.key)
+					if r.wantErr {
+						if err == nil {
+							t.Fatalf("expected error at ts=%d for key=%q", r.ts, r.key)
+						}
+						continue
+					}
+					if err != nil {
+						t.Fatalf("unexpected get for key=%q, error: %v", r.key, err)
+					}
+					got, _ := itm.ValueCopy(nil)
+					if !bytes.Equal(got, r.wantVal) {
+						t.Fatalf("at ts=%d: expected %q, got %q", r.ts, r.wantVal, got)
+					}
+				}
+			})
+		}
+	})
 }
-

@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"fmt"
 	"math"
 	"sort"
 	"strconv"
@@ -32,7 +33,6 @@ type oracle struct {
 	writeChLock sync.Mutex
 	nextTxnTs   uint64
 	txnMarkLock sync.Mutex
-	
 
 	// Used to block NewTransaction, so all previous commits are visible to a new read.
 	txnMark *y.WaterMark
@@ -89,8 +89,6 @@ func (o *oracle) readTs() uint64 {
 	o.readMark.Begin(readTs)
 	o.Unlock()
 
-
-
 	// Wait for all txns which have no conflicts, have been assigned a commit
 	// timestamp and are going through the write to value log and LSM tree
 	// process. Not waiting here could mean that some txns which have been
@@ -121,7 +119,6 @@ func (o *oracle) setDiscardTs(ts uint64) {
 	o.discardTs = ts
 	o.cleanupCommittedTransactions()
 
-
 }
 
 func (o *oracle) discardAtOrBelow() uint64 {
@@ -131,8 +128,7 @@ func (o *oracle) discardAtOrBelow() uint64 {
 		return o.discardTs
 	}
 	return o.readMark.DoneUntil()
-	
-	
+
 }
 
 // hasConflict must be called while having a lock.
@@ -162,7 +158,7 @@ func (o *oracle) hasConflict(txn *Txn) bool {
 }
 
 func (o *oracle) newCommitTs(txn *Txn) (uint64, bool) {
-    o.Lock()
+	o.Lock()
 	defer o.Unlock()
 
 	if o.hasConflict(txn) {
@@ -193,7 +189,6 @@ func (o *oracle) newCommitTs(txn *Txn) (uint64, bool) {
 	return ts, false
 
 }
-
 
 func (o *oracle) doneRead(txn *Txn) {
 	if !txn.doneRead {
@@ -236,13 +231,12 @@ func (o *oracle) cleanupCommittedTransactions() { // Must be called under o.Lock
 }
 
 func (o *oracle) doneCommit(cts uint64) {
-    if o.isManaged {
+	if o.isManaged {
 		return
 	}
 	o.txnMark.Done(cts)
-	
-}
 
+}
 
 // Txn represents a Badger transaction.
 type Txn struct {
@@ -451,6 +445,8 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 		return nil, err
 	}
 
+	fmt.Println("Inside Get")
+
 	item = new(Item)
 	if txn.update {
 		if e, has := txn.pendingWrites[string(key)]; has && bytes.Equal(key, e.Key) {
@@ -616,74 +612,73 @@ func (txn *Txn) Discard() {
 // }
 
 func (txn *Txn) commitAndSend() (func() error, error) {
-    orc := txn.db.orc
+	orc := txn.db.orc
 
-    // assign commit timestamp
-    commitTs, conflict := orc.newCommitTs(txn)
-    if conflict {
-        return nil, ErrConflict
-    }
+	// assign commit timestamp
+	commitTs, conflict := orc.newCommitTs(txn)
+	if conflict {
+		return nil, ErrConflict
+	}
 
-    keepTogether := true
-    setVersion := func(e *Entry) {
-        if e.version == 0 {
-            e.version = commitTs
-        } else {
-            keepTogether = false
-        }
-    }
-    for _, e := range txn.pendingWrites {
-        setVersion(e)
-    }
-    for _, e := range txn.duplicateWrites {
-        setVersion(e)
-    }
+	keepTogether := true
+	setVersion := func(e *Entry) {
+		if e.version == 0 {
+			e.version = commitTs
+		} else {
+			keepTogether = false
+		}
+	}
+	for _, e := range txn.pendingWrites {
+		setVersion(e)
+	}
+	for _, e := range txn.duplicateWrites {
+		setVersion(e)
+	}
 
-    // batch all entries
-    entries := make([]*Entry, 0, len(txn.pendingWrites)+len(txn.duplicateWrites)+1)
+	// batch all entries
+	entries := make([]*Entry, 0, len(txn.pendingWrites)+len(txn.duplicateWrites)+1)
 
-    processEntry := func(e *Entry) {
-        e.Key = y.KeyWithTs(e.Key, e.version)
-        if keepTogether {
-            e.meta |= bitTxn
-        }
-        entries = append(entries, e)
-    }
+	processEntry := func(e *Entry) {
+		e.Key = y.KeyWithTs(e.Key, e.version)
+		if keepTogether {
+			e.meta |= bitTxn
+		}
+		entries = append(entries, e)
+	}
 
-    for _, e := range txn.pendingWrites {
-        processEntry(e)
-    }
-    for _, e := range txn.duplicateWrites {
-        processEntry(e)
-    }
+	for _, e := range txn.pendingWrites {
+		processEntry(e)
+	}
+	for _, e := range txn.duplicateWrites {
+		processEntry(e)
+	}
 
-    if keepTogether {
-        y.AssertTrue(commitTs != 0)
-        entries = append(entries, &Entry{
-            Key:   y.KeyWithTs(txnKey, commitTs),
-            Value: []byte(strconv.FormatUint(commitTs, 10)),
-            meta:  bitFinTxn,
-        })
-    }
+	if keepTogether {
+		y.AssertTrue(commitTs != 0)
+		entries = append(entries, &Entry{
+			Key:   y.KeyWithTs(txnKey, commitTs),
+			Value: []byte(strconv.FormatUint(commitTs, 10)),
+			meta:  bitFinTxn,
+		})
+	}
 
-    // 🚀 CAS-prepend into Level-0 root
-    node := &upsertNode{kvs: entries}
-    for {
-        old := txn.db.root.Load()
-        node.next = old
-        if txn.db.root.CompareAndSwap(old, node) {
-            break
-        }
-    }
+	// 🚀 CAS-prepend into Level-0 root
+	node := &upsertNode{kvs: entries}
+	for {
+		old := txn.db.root.Load()
+		node.next = old
+		if txn.db.root.CompareAndSwap(old, node) {
+			break
+		}
+	}
 
-    // No blocking on write channel anymore
-    ret := func() error {
-        orc.doneCommit(commitTs)
-        return nil
-    }
-    return ret, nil
+	// No blocking on write channel anymore
+	ret := func() error {
+		orc.doneCommit(commitTs)
+		return nil
+	}
+	return ret, nil
 }
-
 
 func (txn *Txn) commitPrecheck() error {
 	if txn.discarded {

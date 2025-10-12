@@ -56,8 +56,8 @@ type lockedKeys struct {
 }
 
 type upsertNode struct {
-    next *upsertNode
-    kvs  []*Entry
+	next *upsertNode
+	kvs  []*Entry
 }
 
 func (lk *lockedKeys) add(key uint64) {
@@ -94,12 +94,12 @@ type DB struct {
 	// nil if Dir and ValueDir are the same
 	valueDirGuard *directoryLockGuard
 
-	closers closers
+	closers     closers
 	nextTableID uint64
 
-	mt  *memTable   // Our latest (actively written) in-memory table
-	imm []*memTable // Add here only AFTER pushing to flushChan.
-	root atomic.Pointer[upsertNode] 
+	mt   *memTable   // Our latest (actively written) in-memory table
+	imm  []*memTable // Add here only AFTER pushing to flushChan.
+	root atomic.Pointer[upsertNode]
 
 	// Initialized via openMemTables.
 	nextMemFid int
@@ -348,10 +348,10 @@ func Open(opt Options) (*DB, error) {
 	// Initialize vlog struct.
 	db.vlog.init(db)
 
-	if !opt.ReadOnly{
+	if !opt.ReadOnly {
 		// No background compactions
 		// Other way to do is set numCompactors to zero in options
-		if opt.PartitionFanOut != 0{
+		if opt.PartitionFanOut != 0 {
 			db.closers.compactors = z.NewCloser(1)
 			db.lc.startCompact(db.closers.compactors)
 		}
@@ -814,6 +814,7 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 			return vs, nil
 		}
 		if vs.Version <= readTs && maxVs.Version < vs.Version {
+			fmt.Println("Test")
 			maxVs = vs
 		}
 	}
@@ -821,10 +822,19 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 		return maxVs, nil
 	}
 
+	fmt.Println("Get fallback to LSM")
+	fmt.Printf("MaxVS: %d", maxVs.Value)
+	userval := maxVs.Value
+	if len(userval) > 8 {
+		userval = userval[:len(userval)-8]
+	}
+	// Now we can safely print the parsed userKey with %s.
+	// fmt.Printf("    - Entry %d -> Key: %-15s Value: %s\n", i, userKey, ele.Value)
+	fmt.Printf("Value: %-15s\n", userval)
+
 	// 3. Final fallback: LSM levels
 	return db.lc.get(key, maxVs, 0)
 }
-
 
 var requestPool = sync.Pool{
 	New: func() interface{} {
@@ -1144,37 +1154,67 @@ func (db *DB) handleMemTableFlushClassic(mt *memTable, dropPrefixes [][]byte) er
 }
 
 func (db *DB) handleMemTableFlushPartitioned() error {
-    // 🚀 Atomically swap out the CAS-prepended list
-    head := db.root.Swap(nil)
-    if head == nil {
-        return nil // nothing to flush
-    }
 
-    var nodes []*upsertNode
-    for n := head; n != nil; n = n.next {
-        nodes = append(nodes, n)
-    }
+	// head2 := db.root.Load()
 
-    var entries []*Entry
-    for _, node := range nodes {
-        entries = append(entries, node.kvs...)
-    }
+	// 🚀 Atomically swap out the CAS-prepended list
+	head := db.root.Swap(nil)
+	if head == nil {
+		return nil // nothing to flush
+	}
 
-    if len(entries) == 0 {
-        return nil
-    }
+	// fmt.Println("print inside handle mem table flush")
 
-    sort.SliceStable(entries, func(i, j int) bool {
-        if cmp := bytes.Compare(entries[i].Key, entries[j].Key); cmp != 0 {
-            return cmp < 0
-        }
-        return entries[i].version < entries[j].version
-    })
+	// for n := head2; n != nil; n = n.next {
+	// 	// fmt.Printf("Key: %d, Value: %d",)
+	// 	for i, ele := range n.kvs {
+	// 		if ele != nil {
+	// 			userKey := ele.Key
+	// 			if len(ele.Key) > 8 {
+	// 				userKey = ele.Key[:len(ele.Key)-8]
+	// 			}
+	// 			// Now we can safely print the parsed userKey with %s.
+	// 			fmt.Printf("    - Entry %d -> Key: %-15s Value: %s\n", i, userKey, ele.Value)
+	// 		}
+	// 	}
+	// }
 
-    // 🚀 Now hand these entries to Level-0 logic in levels.go
-    return db.lc.flushEntriesToPartitions(entries)
+	var nodes []*upsertNode
+	for n := head; n != nil; n = n.next {
+		nodes = append(nodes, n)
+	}
+
+	var entries []*Entry
+	for _, node := range nodes {
+		entries = append(entries, node.kvs...)
+	}
+
+	if len(entries) == 0 {
+		return nil
+	}
+
+	sort.SliceStable(entries, func(i, j int) bool {
+		if cmp := bytes.Compare(entries[i].Key, entries[j].Key); cmp != 0 {
+			return cmp < 0
+		}
+		return entries[i].version < entries[j].version
+		// return entries[i].version > entries[j].version
+	})
+
+	for i, ele := range entries {
+		if ele != nil {
+			userKey := ele.Key
+			if len(ele.Key) > 8 {
+				userKey = ele.Key[:len(ele.Key)-8]
+			}
+			// Now we can safely print the parsed userKey with %s.
+			fmt.Printf("    - Entry %d -> Key: %-15s Value: %s\n", i, userKey, ele.Value)
+		}
+	}
+
+	// 🚀 Now hand these entries to Level-0 logic in levels.go
+	return db.lc.flushEntriesToPartitions(entries)
 }
-
 
 // func (db *DB) handleMemTableFlushPartitioned(mt *memTable) error {
 //     fanOut := db.opt.PartitionFanOut
@@ -1233,10 +1273,10 @@ func (db *DB) handleMemTableFlushPartitioned() error {
 
 // handleMemTableFlush must be run serially.
 func (db *DB) handleMemTableFlush(mt *memTable, dropPrefixes [][]byte) error {
-    if db.opt.PartitionFanOut > 1 {
-        return db.handleMemTableFlushPartitioned()
-    }
-    return db.handleMemTableFlushClassic(mt, dropPrefixes)
+	if db.opt.PartitionFanOut > 1 {
+		return db.handleMemTableFlushPartitioned()
+	}
+	return db.handleMemTableFlushClassic(mt, dropPrefixes)
 }
 
 // flushMemtable must keep running until we send it an empty memtable. If there
@@ -1256,7 +1296,7 @@ func (db *DB) flushMemtable(lc *z.Closer) {
 				time.Sleep(time.Second)
 				continue
 			}
-			
+
 			if db.opt.PartitionFanOut > 1 {
 				db.lc.checkPartitionOverflow(0)
 			}
