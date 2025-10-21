@@ -1682,6 +1682,7 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 
 	version := y.ParseTs(key)
 	logicalKey := y.ParseKey(key)
+	fmt.Printf("Search Key: %s\n", logicalKey)
 
 	for _, h := range s.levels {
 		if h.level < startLevel {
@@ -1733,15 +1734,21 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 				fmt.Printf("Value: %s\n", val.Value)
 				fmt.Printf("Maxvs version: %d\n", maxVs.Version)
 				fmt.Printf("Val version: %d\n", val.Version)
+				fmt.Printf("parse TS version: %d\n", y.ParseTs(k))
+				k_version := y.ParseTs(k)
+
 				if val.Meta == 0 && val.Value == nil {
 					continue
 				}
-				if val.Version == version {
+
+				// if val.Version == version {
+				if k_version == version {
+					fmt.Printf("Val version matched\n")
 					return val, nil
 				}
-				// if maxVs.Version < val.Version {
-				if maxVs.Version <= val.Version { // dd_modify
-					fmt.Printf("Maxvs version: %d\n", maxVs.Version)
+				if maxVs.Version < k_version {
+					// if maxVs.Version <= val.Version { // dd_modify
+					fmt.Printf("Maxvs version inside if: %d\n", maxVs.Version)
 					maxVs = val
 				}
 			}

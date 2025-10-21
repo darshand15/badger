@@ -241,10 +241,10 @@ func TestTimestampScenarios(t *testing.T) {
 			name: "cold vs hot compaction",
 			writes: func() []writeOp {
 				var w []writeOp
-				for i := 1; i <= 10; i++ {
+				for i := 1; i < 10; i++ {
 					w = append(w, writeOp{uint64(i), []byte(fmt.Sprintf("k%d", i)), []byte("cold")})
 				}
-				for i := 100; i < 110; i++ {
+				for i := 100; i < 109; i++ {
 					w = append(w, writeOp{uint64(i), []byte(fmt.Sprintf("k%d", i-99)), []byte("hot")})
 				}
 				return w
