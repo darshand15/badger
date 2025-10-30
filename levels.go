@@ -2092,6 +2092,9 @@ func (s *levelsController) checkPartitionOverflow(level int) {
 
 func (s *levelsController) promotePartition(level, pid int) error {
 	fanOut := s.kv.opt.PartitionFanOut
+
+	fmt.Printf("Test inside partition\n")
+
 	if fanOut <= 1 {
 		return nil // not in partitioned mode
 	}
@@ -2124,6 +2127,7 @@ func (s *levelsController) promotePartition(level, pid int) error {
 		if t.MaxTimestamp() > maxV {
 			maxV = t.MaxTimestamp()
 		}
+		fmt.Printf("Table size: %d\n", t.Size())
 	}
 	Tth := (minV + maxV) / 2
 
