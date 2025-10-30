@@ -7,8 +7,7 @@ package badger
 
 import (
 	"github.com/dgraph-io/badger/v4/table"
-    
-	
+
 	"bytes"
 	"context"
 	"encoding/hex"
@@ -186,12 +185,12 @@ func newLevelsController(db *DB, mf *Manifest) (*levelsController, error) {
 
 // getPartitionID returns which partition [0..fanOut^(level+1)-1] a key belongs to.
 func getPartitionID(level int, key []byte, fanOut int) uint32 {
-    parts := 1
-    for i := 0; i < level+1; i++ {
-        parts *= fanOut
-    }
-    h := y.Hash(key)
-    return (h % uint32(parts))
+	parts := 1
+	for i := 0; i < level+1; i++ {
+		parts *= fanOut
+	}
+	h := y.Hash(key)
+	return (h % uint32(parts))
 }
 
 // Closes the tables, for cleanup in newLevelsController.  (We Close() instead of using DecrRef()
@@ -1603,21 +1602,21 @@ func (s *levelsController) addLevel0Table(t *table.Table) error {
 
 // addLevel0PartitionedTable writes a new L0 table into partition pid.
 func (s *levelsController) addLevel0PartitionedTable(pid int, t *table.Table) error {
-    if !t.IsInmemory {
-        if err := s.kv.manifest.addChanges([]*pb.ManifestChange{
-            newCreateChange(t.ID(), 0, t.KeyID(), t.CompressionType()),
-        }); err != nil {
-            return err
-        }
-    }
-    // 2) insert into that partition’s list
-    l0 := s.levels[0]
-    l0.Lock()
-    l0.partitionedTables[pid] = append(l0.partitionedTables[pid], t)
-    l0.totalSize += int64(t.OnDiskSize())
-    l0.Unlock()
+	if !t.IsInmemory {
+		if err := s.kv.manifest.addChanges([]*pb.ManifestChange{
+			newCreateChange(t.ID(), 0, t.KeyID(), t.CompressionType()),
+		}); err != nil {
+			return err
+		}
+	}
+	// 2) insert into that partition’s list
+	l0 := s.levels[0]
+	l0.Lock()
+	l0.partitionedTables[pid] = append(l0.partitionedTables[pid], t)
+	l0.totalSize += int64(t.OnDiskSize())
+	l0.Unlock()
 	s.checkPartitionOverflow(0)
-    return nil
+	return nil
 }
 
 func (s *levelsController) close() error {
@@ -1634,6 +1633,7 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 
 	version := y.ParseTs(key)
 	logicalKey := y.ParseKey(key)
+	var maxVsVersion uint64 = 0
 
 	for _, h := range s.levels {
 		if h.level < startLevel {
@@ -1646,38 +1646,39 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 			pid := int(z.MemHash(logicalKey) % uint64(s.kv.opt.PartitionFanOut))
 			tbls = h.partitionedTables[pid]
 		} else {
-			tbls = h.tables
+			// tbls = h.tables // dd_modify
+			tbls = h.partitionedTables[0]
 		}
 
 		for _, tbl := range tbls {
 			// Iterator options are in the same package `table`
 			itr := tbl.NewIterator(table.NOCACHE)
 
-
 			defer itr.Close()
-		
+
 			// Seek to our key
 			itr.Seek(key)
 			if !itr.Valid() {
 				continue
 			}
-		
+
 			k := itr.Key()
 			if bytes.Equal(y.ParseKey(k), logicalKey) {
 				val := itr.ValueCopy() // already returns y.ValueStruct
+				val_version := y.ParseTs(k)
 				if val.Meta == 0 && val.Value == nil {
 					continue
 				}
-				if val.Version == version {
+				if val_version == version {
 					return val, nil
 				}
-				if maxVs.Version < val.Version {
+				if maxVsVersion < val_version {
 					maxVs = val
+					maxVsVersion = val_version
 				}
 			}
 		}
-		
-		
+
 		h.RUnlock()
 	}
 
@@ -1686,7 +1687,6 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 	}
 	return maxVs, nil
 }
-
 
 // func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) (
 // 	y.ValueStruct, error) {
@@ -1855,94 +1855,92 @@ func (s *levelsController) verifyChecksum() error {
 }
 
 func (lc *levelsController) flushEntriesToPartitions(entries []*Entry) error {
-    fanout := lc.kv.opt.PartitionFanOut
-    if fanout <= 1 {
-        // Single partition: build one SSTable and insert at pid=0
-        t, err := lc.buildSSTable(entries)
-        if err != nil {
-            return err
-        }
-        if t == nil {
-            return nil
-        }
-        return lc.addLevel0PartitionedTable(0, t)
-    }
+	fanout := lc.kv.opt.PartitionFanOut
+	if fanout <= 1 {
+		// Single partition: build one SSTable and insert at pid=0
+		t, err := lc.buildSSTable(entries)
+		if err != nil {
+			return err
+		}
+		if t == nil {
+			return nil
+		}
+		return lc.addLevel0PartitionedTable(0, t)
+	}
 
-    // Multi-partition: distribute entries by hash
-    parts := make([][]*Entry, fanout)
-    for _, e := range entries {
-        pid := int(z.MemHash(e.Key) % uint64(fanout))
-        parts[pid] = append(parts[pid], e)
-    }
+	// Multi-partition: distribute entries by hash
+	parts := make([][]*Entry, fanout)
+	for _, e := range entries {
+		pid := int(z.MemHash(e.Key) % uint64(fanout))
+		parts[pid] = append(parts[pid], e)
+	}
 
-    for pid, ents := range parts {
-        if len(ents) == 0 {
-            continue
-        }
+	for pid, ents := range parts {
+		if len(ents) == 0 {
+			continue
+		}
 
-        // Build SSTable for this partition
-        t, err := lc.buildSSTable(ents)
-        if err != nil {
-            return err
-        }
-        if t == nil {
-            continue
-        }
+		// Build SSTable for this partition
+		t, err := lc.buildSSTable(ents)
+		if err != nil {
+			return err
+		}
+		if t == nil {
+			continue
+		}
 
-        if err := lc.addLevel0PartitionedTable(pid, t); err != nil {
-            return err
-        }
-    }
+		if err := lc.addLevel0PartitionedTable(pid, t); err != nil {
+			return err
+		}
+	}
 
-    // After inserting all partitions, check for overflow at Level 0
-    lc.checkPartitionOverflow(0)
-    return nil
+	// After inserting all partitions, check for overflow at Level 0
+	lc.checkPartitionOverflow(0)
+	return nil
 }
 
 func (lc *levelsController) buildSSTable(entries []*Entry) (*table.Table, error) {
-    // Construct table.Options from DB options
-    topt := table.Options{
-        BloomFalsePositive:   lc.kv.opt.BloomFalsePositive,
-        BlockSize:            lc.kv.opt.BlockSize,
-        Compression:          lc.kv.opt.Compression,
-        ZSTDCompressionLevel: lc.kv.opt.ZSTDCompressionLevel,
-    }
+	// Construct table.Options from DB options
+	topt := table.Options{
+		BloomFalsePositive:   lc.kv.opt.BloomFalsePositive,
+		BlockSize:            lc.kv.opt.BlockSize,
+		Compression:          lc.kv.opt.Compression,
+		ZSTDCompressionLevel: lc.kv.opt.ZSTDCompressionLevel,
+	}
 
-    builder := table.NewTableBuilder(topt)
-    defer builder.Close()
+	builder := table.NewTableBuilder(topt)
+	defer builder.Close()
 
-    for _, e := range entries {
-        vs := y.ValueStruct{
-            Value:     e.Value,
-            Meta:      e.meta,
-            UserMeta:  e.UserMeta,
-            ExpiresAt: e.ExpiresAt,
-            Version:   e.version,
-        }
-        builder.Add(e.Key, vs, 0)
-    }
+	for _, e := range entries {
+		vs := y.ValueStruct{
+			Value:     e.Value,
+			Meta:      e.meta,
+			UserMeta:  e.UserMeta,
+			ExpiresAt: e.ExpiresAt,
+			Version:   e.version,
+		}
+		builder.Add(e.Key, vs, 0)
+	}
 
-    data := builder.Finish()
-    if len(data) == 0 {
-        return nil, nil
-    }
+	data := builder.Finish()
+	if len(data) == 0 {
+		return nil, nil
+	}
 
-    // Reserve a new unique table ID
-    id := lc.reserveNextTableID()
+	// Reserve a new unique table ID
+	id := lc.reserveNextTableID()
 
-    // Create an in-memory SSTable with the new ID
-    tbl, err := table.OpenInMemoryTable(data, id, &topt)
-    if err != nil {
-        return nil, err
-    }
-    return tbl, nil
+	// Create an in-memory SSTable with the new ID
+	tbl, err := table.OpenInMemoryTable(data, id, &topt)
+	if err != nil {
+		return nil, err
+	}
+	return tbl, nil
 }
 
 func (lc *levelsController) reserveNextTableID() uint64 {
-    return atomic.AddUint64(&lc.kv.nextTableID, 1)
+	return atomic.AddUint64(&lc.kv.nextTableID, 1)
 }
-
-
 
 // Returns the sorted list of splits for all the levels and tables based
 // on the block offsets.
@@ -1962,64 +1960,64 @@ func (s *levelsController) keySplits(numPerTable int, prefix []byte) []string {
 
 // checkPartitionOverflow synchronously promotes any partition at `level` whose total size exceeds its quota.
 func (s *levelsController) checkPartitionOverflow(level int) {
-    fanOut := s.kv.opt.PartitionFanOut
-    if fanOut <=1 {
-        return // not in partitioned mode
-    }
-    // compute per-partition quota: targetSz[level] / fanOut^(level+1)
-    targs := s.levelTargets()
-    total := targs.targetSz[level]
-    parts := 1
-    for i := 0; i < level+1; i++ {
-        parts *= fanOut
-    }
-    quota := total / int64(parts)
+	fanOut := s.kv.opt.PartitionFanOut
+	if fanOut <= 1 {
+		return // not in partitioned mode
+	}
+	// compute per-partition quota: targetSz[level] / fanOut^(level+1)
+	targs := s.levelTargets()
+	total := targs.targetSz[level]
+	parts := 1
+	for i := 0; i < level+1; i++ {
+		parts *= fanOut
+	}
+	quota := total / int64(parts)
 
-    lh := s.levels[level]
-    lh.RLock()
-    defer lh.RUnlock()
+	lh := s.levels[level]
+	lh.RLock()
+	defer lh.RUnlock()
 
-    for pid, tbls := range lh.partitionedTables {
-        var sum int64
-        for _, t := range tbls {
-            sum += int64(t.OnDiskSize())
-        }
-        if sum > quota {
-            if err := s.promotePartition(level, pid); err != nil {
-                s.kv.opt.Warningf("partition compaction failed L%d pid=%d: %v", level, pid, err)
+	for pid, tbls := range lh.partitionedTables {
+		var sum int64
+		for _, t := range tbls {
+			sum += int64(t.OnDiskSize())
+		}
+		if sum > quota {
+			if err := s.promotePartition(level, pid); err != nil {
+				s.kv.opt.Warningf("partition compaction failed L%d pid=%d: %v", level, pid, err)
 			}
-        }
-    }
+		}
+	}
 }
 
 func (s *levelsController) promotePartition(level, pid int) error {
-    fanOut := s.kv.opt.PartitionFanOut
-    if fanOut <=1 {
-        return nil // not in partitioned mode
-    }
+	fanOut := s.kv.opt.PartitionFanOut
+	if fanOut <= 1 {
+		return nil // not in partitioned mode
+	}
 
-    lh := s.levels[level]
+	lh := s.levels[level]
 
-    // Detach old tables from this partition and adjust totalSize
-    lh.Lock()
-    old := lh.partitionedTables[pid]
-    lh.partitionedTables[pid] = nil
+	// Detach old tables from this partition and adjust totalSize
+	lh.Lock()
+	old := lh.partitionedTables[pid]
+	lh.partitionedTables[pid] = nil
 
-    var totalOldSize int64
-    for _, t := range old {
-        totalOldSize += int64(t.OnDiskSize())
-    }
-    lh.totalSize -= totalOldSize
-    lh.Unlock()
+	var totalOldSize int64
+	for _, t := range old {
+		totalOldSize += int64(t.OnDiskSize())
+	}
+	lh.totalSize -= totalOldSize
+	lh.Unlock()
 
-    // If there were no tables in this partition, nothing to do.
-    if len(old) == 0 {
-        return nil
-    }
+	// If there were no tables in this partition, nothing to do.
+	if len(old) == 0 {
+		return nil
+	}
 
-    // Compute min/max versions across all detached tables
-    var minV, maxV uint64 = old[0].MinTimestamp(), old[0].MaxTimestamp()
-	for _ , t := range old[1:] {
+	// Compute min/max versions across all detached tables
+	var minV, maxV uint64 = old[0].MinTimestamp(), old[0].MaxTimestamp()
+	for _, t := range old[1:] {
 		if t.MinTimestamp() < minV {
 			minV = t.MinTimestamp()
 		}
@@ -2029,80 +2027,80 @@ func (s *levelsController) promotePartition(level, pid int) error {
 	}
 	Tth := (minV + maxV) / 2
 
-    // Build a MergeIterator over all the old tables
-    iters := make([]y.Iterator, 0, len(old))
-    for _, t := range old {
-        iters = append(iters, t.NewIterator(table.NOCACHE))
-    }
-    mit := table.NewMergeIterator(iters, false)
-    defer mit.Close()
+	// Build a MergeIterator over all the old tables
+	iters := make([]y.Iterator, 0, len(old))
+	for _, t := range old {
+		iters = append(iters, t.NewIterator(table.NOCACHE))
+	}
+	mit := table.NewMergeIterator(iters, false)
+	defer mit.Close()
 
-    bopts := buildTableOptions(s.kv)
-    coldBuilders := make([]*table.Builder, fanOut)
-    for i := range coldBuilders {
-        coldBuilders[i] = table.NewTableBuilder(bopts)
-    }
-    hotBuilder := table.NewTableBuilder(bopts)
+	bopts := buildTableOptions(s.kv)
+	coldBuilders := make([]*table.Builder, fanOut)
+	for i := range coldBuilders {
+		coldBuilders[i] = table.NewTableBuilder(bopts)
+	}
+	hotBuilder := table.NewTableBuilder(bopts)
 
-    for mit.Rewind(); mit.Valid(); mit.Next() {
-        key := mit.Key()
-        vs := mit.Value()
+	for mit.Rewind(); mit.Valid(); mit.Next() {
+		key := mit.Key()
+		vs := mit.Value()
 
-        var vp valuePointer
-        if vs.Meta&bitValuePointer != 0 {
-            vp.Decode(vs.Value)
-        }
+		var vp valuePointer
+		if vs.Meta&bitValuePointer != 0 {
+			vp.Decode(vs.Value)
+		}
 
-        if vs.Version <= Tth {
-            child := getPartitionID(level+1, key, fanOut)
-            coldBuilders[child].Add(key, vs, vp.Len)
-        } else {
-            hotBuilder.Add(key, vs, vp.Len)
-        }
-    }
+		if vs.Version <= Tth {
+			child := getPartitionID(level+1, key, fanOut)
+			coldBuilders[child].Add(key, vs, vp.Len)
+		} else {
+			hotBuilder.Add(key, vs, vp.Len)
+		}
+	}
 
-    for child, b := range coldBuilders {
-        if b.Empty() {
-            b.Close()
-            continue
-        }
-        fileID := s.kv.lc.reserveFileID()
-        var tbl *table.Table
-        var err error
+	for child, b := range coldBuilders {
+		if b.Empty() {
+			b.Close()
+			continue
+		}
+		fileID := s.kv.lc.reserveFileID()
+		var tbl *table.Table
+		var err error
 		fname := table.NewFilename(fileID, s.kv.opt.Dir)
 		tbl, err = table.CreateTable(fname, b)
-        b.Close()
-        if err != nil {
-            return y.Wrap(err, "writing cold partition table")
-        }
+		b.Close()
+		if err != nil {
+			return y.Wrap(err, "writing cold partition table")
+		}
 
-        // install into child partition
-        lhNext := s.levels[level+1]
-        lhNext.Lock()
-        lhNext.partitionedTables[child] = append(lhNext.partitionedTables[child], tbl)
-        lhNext.totalSize += int64(tbl.OnDiskSize())
-        lhNext.Unlock()
-		s.checkPartitionOverflow(level+1)
-    }
+		// install into child partition
+		lhNext := s.levels[level+1]
+		lhNext.Lock()
+		lhNext.partitionedTables[child] = append(lhNext.partitionedTables[child], tbl)
+		lhNext.totalSize += int64(tbl.OnDiskSize())
+		lhNext.Unlock()
+		s.checkPartitionOverflow(level + 1)
+	}
 
-    if !hotBuilder.Empty() {
-        fileID := s.kv.lc.reserveFileID()
-        var tbl *table.Table
-        var err error
+	if !hotBuilder.Empty() {
+		fileID := s.kv.lc.reserveFileID()
+		var tbl *table.Table
+		var err error
 		fname := table.NewFilename(fileID, s.kv.opt.Dir)
 		tbl, err = table.CreateTable(fname, hotBuilder)
-        hotBuilder.Close()
-        if err != nil {
-            return y.Wrap(err, "writing hot partition table")
-        }
+		hotBuilder.Close()
+		if err != nil {
+			return y.Wrap(err, "writing hot partition table")
+		}
 
-        lh.Lock()
-        lh.partitionedTables[pid] = append(lh.partitionedTables[pid], tbl)
-        lh.totalSize += int64(tbl.OnDiskSize())
-        lh.Unlock()
-    } else {
-        hotBuilder.Close()
-    }
+		lh.Lock()
+		lh.partitionedTables[pid] = append(lh.partitionedTables[pid], tbl)
+		lh.totalSize += int64(tbl.OnDiskSize())
+		lh.Unlock()
+	} else {
+		hotBuilder.Close()
+	}
 
-    return nil
+	return nil
 }
