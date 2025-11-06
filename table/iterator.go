@@ -260,6 +260,7 @@ func (itr *Iterator) seekFrom(key []byte, whence int) {
 		itr.reset()
 	case current:
 	}
+	fmt.Println("Test inside seek 1")
 
 	var ko fb.BlockOffset
 	idx := sort.Search(itr.t.offsetsLength(), func(idx int) bool {
@@ -271,8 +272,10 @@ func (itr *Iterator) seekFrom(key []byte, whence int) {
 		// The smallest key in our table is already strictly > key. We can return that.
 		// This is like a SeekToFirst.
 		itr.seekHelper(0, key)
+		fmt.Println("Test inside seek")
 		return
 	}
+	fmt.Println("Test inside seek 2")
 
 	// block[idx].smallest is > key.
 	// Since idx>0, we know block[idx-1].smallest is <= key.
@@ -291,6 +294,7 @@ func (itr *Iterator) seekFrom(key []byte, whence int) {
 		// Since block[idx].smallest is > key. This is essentially a block[idx].SeekToFirst.
 		itr.seekHelper(idx, key)
 	}
+	fmt.Println("Test inside seek 3")
 	// Case 2: No need to do anything. We already did the seek in block[idx-1].
 }
 

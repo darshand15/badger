@@ -1680,8 +1680,9 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 		return y.ValueStruct{}, ErrDBClosed
 	}
 
-	version := y.ParseTs(key)
+	readTs := y.ParseTs(key)
 	logicalKey := y.ParseKey(key)
+	// var maxVsVersion uint64 = 0
 	fmt.Printf("Search Key: %s\n", logicalKey)
 
 	for _, h := range s.levels {
@@ -1707,11 +1708,16 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 		fmt.Printf("Table Level: %d", h.level)
 		for _, tbl := range tbls {
 			fmt.Println("Inside tbl range")
-			fmt.Printf("Key Count in table get: %d", tbl.KeyCount())
+			fmt.Printf("Key Count in table get: %d\n", tbl.KeyCount())
 			// Iterator options are in the same package `table`
 			itr := tbl.NewIterator(table.NOCACHE)
 
 			defer itr.Close()
+
+			for itr.Valid() {
+				fmt.Printf("Itr Key: %15s, Version: %d\n", y.ParseKey(itr.Key()), y.ParseTs(itr.Key()))
+				itr.Next()
+			}
 
 			// Seek to our key
 			itr.Seek(key)
@@ -1727,6 +1733,7 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 			// Now we can safely print the parsed userKey with %s.
 			// fmt.Printf("    - Entry %d -> Key: %-15s Value: %s\n", i, userKey, ele.Value)
 			fmt.Printf("Tbl Key: %-15s\n", tbl_userkey)
+			fmt.Printf("parse TS version: %d\n", y.ParseTs(k))
 
 			if bytes.Equal(y.ParseKey(k), logicalKey) {
 				fmt.Println("Key matched")
@@ -1735,22 +1742,40 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 				fmt.Printf("Maxvs version: %d\n", maxVs.Version)
 				fmt.Printf("Val version: %d\n", val.Version)
 				fmt.Printf("parse TS version: %d\n", y.ParseTs(k))
-				k_version := y.ParseTs(k)
+				val_version := y.ParseTs(k)
 
-				if val.Meta == 0 && val.Value == nil {
-					continue
+				// Only consider versions <= readTs
+				if val_version <= readTs {
+					if isDeletedOrExpired(val.Meta, val.ExpiresAt) {
+						return y.ValueStruct{}, ErrKeyNotFound
+					}
+					// Pick the newest visible version <= readTs
+					if val_version > maxVs.Version {
+						maxVs = y.ValueStruct{
+							Value:     val.Value,
+							Meta:      val.Meta,
+							UserMeta:  val.UserMeta,
+							ExpiresAt: val.ExpiresAt,
+							Version:   val_version,
+						}
+					}
 				}
 
-				// if val.Version == version {
-				if k_version == version {
-					fmt.Printf("Val version matched\n")
-					return val, nil
-				}
-				if maxVs.Version < k_version {
-					// if maxVs.Version <= val.Version { // dd_modify
-					fmt.Printf("Maxvs version inside if: %d\n", maxVs.Version)
-					maxVs = val
-				}
+				// if val.Meta == 0 && val.Value == nil {
+				// 	continue
+				// }
+
+				// if val_version == readTs {
+				// 	fmt.Printf("Val version matched\n")
+				// 	return val, nil
+				// }
+
+				// if val_version <= readTs && maxVsVersion < val_version {
+				// 	// if maxVs.Version <= val.Version { // dd_modify
+				// 	fmt.Printf("Maxvs version inside if: %d\n", maxVs.Version)
+				// 	maxVs = val
+				// 	maxVsVersion = val_version
+				// }
 			}
 		}
 

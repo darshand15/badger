@@ -2,6 +2,7 @@ package badger
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"math/rand"
@@ -241,18 +242,28 @@ func TestTimestampScenarios(t *testing.T) {
 			name: "cold vs hot compaction",
 			writes: func() []writeOp {
 				var w []writeOp
-				for i := 1; i < 10; i++ {
-					w = append(w, writeOp{uint64(i), []byte(fmt.Sprintf("k%d", i)), []byte("cold")})
+				for i := 1; i <= 10; i++ {
+					key := make([]byte, 4)
+					binary.BigEndian.PutUint32(key, uint32(i))
+					// w = append(w, writeOp{uint64(i), []byte(fmt.Sprintf("%d", i)), []byte("cold")})
+					w = append(w, writeOp{uint64(i), key, []byte("cold")})
 				}
-				for i := 100; i < 109; i++ {
-					w = append(w, writeOp{uint64(i), []byte(fmt.Sprintf("k%d", i-99)), []byte("hot")})
+				for i := 100; i < 110; i++ {
+					key := make([]byte, 4)
+					binary.BigEndian.PutUint32(key, uint32(i-99))
+					// w = append(w, writeOp{uint64(i), []byte(fmt.Sprintf("%d", i-99)), []byte("hot")})
+					w = append(w, writeOp{uint64(i), key, []byte("hot")})
 				}
 				return w
 			}(),
-			reads: []readOp{
-				{math.MaxUint64, []byte("k1"), []byte("hot"), false},
-				{5, []byte("k1"), []byte("cold"), false},
-			},
+			reads: func() []readOp {
+				var r []readOp
+				key := make([]byte, 4)
+				binary.BigEndian.PutUint32(key, uint32(1))
+				r = append(r, readOp{math.MaxUint64, key, []byte("hot"), false})
+				r = append(r, readOp{5, key, []byte("cold"), false})
+				return r
+			}(),
 			triggerFlush:   true,
 			triggerCompact: true,
 		},
