@@ -1631,9 +1631,8 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 		return y.ValueStruct{}, ErrDBClosed
 	}
 
-	version := y.ParseTs(key)
+	readTs := y.ParseTs(key)
 	logicalKey := y.ParseKey(key)
-	var maxVsVersion uint64 = 0
 
 	for _, h := range s.levels {
 		if h.level < startLevel {
@@ -1666,15 +1665,22 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 			if bytes.Equal(y.ParseKey(k), logicalKey) {
 				val := itr.ValueCopy() // already returns y.ValueStruct
 				val_version := y.ParseTs(k)
-				if val.Meta == 0 && val.Value == nil {
-					continue
-				}
-				if val_version == version {
-					return val, nil
-				}
-				if maxVsVersion < val_version {
-					maxVs = val
-					maxVsVersion = val_version
+
+				// Only consider versions <= readTs
+				if val_version <= readTs {
+					if isDeletedOrExpired(val.Meta, val.ExpiresAt) {
+						return y.ValueStruct{}, ErrKeyNotFound
+					}
+					// Pick the newest visible version <= readTs
+					if val_version > maxVs.Version {
+						maxVs = y.ValueStruct{
+							Value:     val.Value,
+							Meta:      val.Meta,
+							UserMeta:  val.UserMeta,
+							ExpiresAt: val.ExpiresAt,
+							Version:   val_version,
+						}
+					}
 				}
 			}
 		}
