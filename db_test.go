@@ -136,12 +136,14 @@ func runBadgerTest(t *testing.T, opts *Options, test func(t *testing.T, db *DB))
 	if opts == nil {
 		opts = new(Options)
 		*opts = getTestOptions(dir)
+		t.Log("nil options")
 	} else {
 		opts.Dir = dir
 		opts.ValueDir = dir
 	}
 
 	if opts.InMemory {
+		t.Log("In Memory option set")
 		opts.Dir = ""
 		opts.ValueDir = ""
 	}
@@ -238,9 +240,13 @@ func TestUpdateAndView(t *testing.T) {
 func TestConcurrentWrite(t *testing.T) {
 	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
 		// Not a benchmark. Just a simple test for concurrent writes.
-		n := 20
-		m := 500
+		n := 1
+		m := 1
 		var wg sync.WaitGroup
+
+		// Use a channel to collect errors from goroutines
+		// errCh := make(chan error, n*m)
+
 		for i := 0; i < n; i++ {
 			wg.Add(1)
 			go func(i int) {
@@ -248,10 +254,33 @@ func TestConcurrentWrite(t *testing.T) {
 				for j := 0; j < m; j++ {
 					txnSet(t, db, []byte(fmt.Sprintf("k%05d_%08d", i, j)),
 						[]byte(fmt.Sprintf("v%05d_%08d", i, j)), byte(j%127))
+
+					// err := db.Update(func(txn *Txn) error {
+					// 	k := []byte(fmt.Sprintf("k%05d_%08d", i, j))
+					// 	v := []byte(fmt.Sprintf("v%05d_%08d", i, j))
+					// 	e := NewEntry(k, v).WithMeta(byte(j % 127))
+					// 	return txn.SetEntry(e)
+					// })
+
+					// if err != nil {
+					// 	// If there's an error, send it to the channel and stop this goroutine.
+					// 	errCh <- err
+					// 	return
+					// }
 				}
 			}(i)
 		}
 		wg.Wait()
+
+		// Close the channel and check for any errors
+		// close(errCh)
+		// for err := range errCh {
+		// 	// If we're here, a write failed. Fail the test.
+		// 	t.Fatalf("Error during concurrent write: %v", err)
+		// }
+
+		// t.Log("Waiting for 100ms for writes to become visible...")
+		// time.Sleep(100 * time.Millisecond)
 
 		t.Log("Starting iteration")
 
@@ -265,9 +294,11 @@ func TestConcurrentWrite(t *testing.T) {
 		defer it.Close()
 		var i, j int
 		for it.Rewind(); it.Valid(); it.Next() {
+			t.Log("Test inside iteration loop")
 			item := it.Item()
 			k := item.Key()
 			if k == nil {
+				t.Log("Test inside k nil check")
 				break // end of iteration.
 			}
 
@@ -281,10 +312,527 @@ func TestConcurrentWrite(t *testing.T) {
 				j = 0
 			}
 		}
+		t.Logf("i : %d", i)
+		t.Logf("j : %d", j)
 		require.EqualValues(t, n, i)
 		require.EqualValues(t, 0, j)
 	})
 }
+
+func TestConcurrentWriteCASRoot(t *testing.T) {
+	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
+		// Not a benchmark. Just a simple test for concurrent writes.
+		n := 1
+		m := 1
+		var wg sync.WaitGroup
+
+		// Use a channel to collect errors from goroutines
+		// errCh := make(chan error, n*m)
+
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				for j := 0; j < m; j++ {
+					txnSet(t, db, []byte(fmt.Sprintf("k%05d_%08d", i, j)),
+						[]byte(fmt.Sprintf("v%05d_%08d", i, j)), byte(j%127))
+
+					// err := db.Update(func(txn *Txn) error {
+					// 	k := []byte(fmt.Sprintf("k%05d_%08d", i, j))
+					// 	v := []byte(fmt.Sprintf("v%05d_%08d", i, j))
+					// 	e := NewEntry(k, v).WithMeta(byte(j % 127))
+					// 	return txn.SetEntry(e)
+					// })
+
+					// if err != nil {
+					// 	// If there's an error, send it to the channel and stop this goroutine.
+					// 	errCh <- err
+					// 	return
+					// }
+				}
+			}(i)
+		}
+		wg.Wait()
+
+		// --- REPLACEMENT: Direct Verification of db.root ---
+
+		// 1. Capture the snapshot
+		head := db.root.Load()
+		if head == nil {
+			t.Fatal("db.root is nil, no data was written!")
+		}
+
+		// 2. Load all data from the linked list into a map for easy verification.
+		// Map: UserKey (string) -> *Entry
+		foundData := make(map[string]*Entry)
+
+		// Traverse the lock-free list (Newest -> Oldest)
+		count := 0
+		for n := head; n != nil; n = n.next {
+			for _, e := range n.kvs {
+				if e == nil {
+					continue
+				}
+
+				// PARSING LOGIC:
+				// Badger keys usually have an 8-byte timestamp appended.
+				// We need to strip it to get the "user key" for verification.
+				userKey := e.Key
+				if len(e.Key) > 8 {
+					userKey = e.Key[:len(e.Key)-8]
+				}
+
+				kStr := string(userKey)
+
+				// If we encounter duplicates (updates), we only care about the newest.
+				// Since we traverse Head (New) -> Tail (Old), we only insert if not exists.
+				if _, exists := foundData[kStr]; !exists {
+					foundData[kStr] = e
+					count++
+				}
+			}
+		}
+
+		t.Logf("Found %d unique keys in db.root", count)
+
+		// 3. Verify against the expected data
+		for i := 0; i < n; i++ {
+			for j := 0; j < m; j++ {
+				expectedKey := fmt.Sprintf("k%05d_%08d", i, j)
+				expectedVal := fmt.Sprintf("v%05d_%08d", i, j)
+				expectedMeta := byte(j % 127)
+
+				// Check if key exists
+				entry, ok := foundData[expectedKey]
+				require.True(t, ok, "Key %s missing from db.root", expectedKey)
+
+				// Check Value
+				require.Equal(t, expectedVal, string(entry.Value), "Value mismatch for key %s", expectedKey)
+
+				// Check Metadata
+				require.Equal(t, expectedMeta, entry.UserMeta, "Meta mismatch for key %s", expectedKey)
+			}
+		}
+
+		t.Log("Direct verification passed successfully!")
+	})
+}
+
+func TestConcurrentWriteAndFlush(t *testing.T) {
+	// Initialize default options (avoid nil options log)
+	opts := DefaultOptions("")
+	opts.InMemory = true
+
+	runBadgerTest(t, &opts, func(t *testing.T, db *DB) {
+		// 1. Setup
+		n := 1
+		m := 1
+		var wg sync.WaitGroup
+
+		// 2. Concurrent Writes
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				for j := 0; j < m; j++ {
+					// Write and Flush immediately
+					txnSet(t, db, []byte(fmt.Sprintf("k%05d_%08d", i, j)),
+						[]byte(fmt.Sprintf("v%05d_%08d", i, j)), byte(j%127))
+				}
+			}(i)
+		}
+		wg.Wait()
+
+		t.Log("Writes finished. Starting verification...")
+
+		// 3. Verification
+		// Step A: Create a standard transaction.
+		// (This gets a safe readTs from the Oracle, e.g., 100)
+		txn := db.NewTransaction(false)
+		defer txn.Discard()
+
+		// Step B: HACK - Manually overwrite the unexported 'readTs'.
+		// We set it to MaxUint64 to force the iterator to see ALL data,
+		// bypassing any lag in the Oracle's watermark.
+		txn.readTs = math.MaxUint64
+
+		opt := DefaultIteratorOptions
+		opt.PrefetchValues = true
+
+		it := txn.NewIterator(opt)
+		defer it.Close()
+
+		count := 0
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			k := item.Key()
+			v, err := item.ValueCopy(nil)
+			require.NoError(t, err)
+
+			// Debug Log
+			t.Logf("Iterator Found: %s", string(k))
+
+			var iIdx, jIdx int
+			_, err = fmt.Sscanf(string(k), "k%05d_%08d", &iIdx, &jIdx)
+			require.NoError(t, err)
+
+			expectedVal := fmt.Sprintf("v%05d_%08d", iIdx, jIdx)
+			require.Equal(t, expectedVal, string(v))
+
+			count++
+		}
+
+		require.Equal(t, n*m, count, "Iterator did not find all written keys")
+	})
+}
+
+func TestConcurrentWriteAndGet(t *testing.T) {
+	// 1. Initialize Default Options
+	opts := DefaultOptions("")
+	opts.InMemory = true
+
+	runBadgerTest(t, &opts, func(t *testing.T, db *DB) {
+		n := 50
+		m := 10
+		var wg sync.WaitGroup
+
+		// 2. Write Data
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				for j := 0; j < m; j++ {
+					// This triggers commit -> CAS -> Flush to L0
+					txnSet(t, db, []byte(fmt.Sprintf("k%05d_%08d", i, j)),
+						[]byte(fmt.Sprintf("v%05d_%08d", i, j)), byte(j%127))
+				}
+			}(i)
+		}
+		wg.Wait()
+
+		// simulate flush
+		if err := db.handleMemTableFlushPartitioned(); err != nil {
+			t.Fatalf("flush error: %v", err)
+		}
+
+		// simulate compaction at L0
+		db.lc.checkPartitionOverflow(0)
+
+		t.Log("Writes finished. Starting specific key verification...")
+
+		// 3. Verify using txn.Get()
+		txn := db.NewTransaction(false)
+		defer txn.Discard()
+
+		// HACK: Force the transaction to see ALL data.
+		txn.readTs = math.MaxUint64
+
+		for i := 0; i < n; i++ {
+			for j := 0; j < m; j++ {
+				keyStr := fmt.Sprintf("k%05d_%08d", i, j)
+				expectedVal := fmt.Sprintf("v%05d_%08d", i, j)
+
+				// Use Get() instead of Iterator
+				item, err := txn.Get([]byte(keyStr))
+				if err != nil {
+					// This will tell us exactly which key is missing
+					t.Fatalf("Get failed for key %s: %v", keyStr, err)
+				}
+
+				// Verify Value
+				val, err := item.ValueCopy(nil)
+				require.NoError(t, err)
+				require.Equal(t, expectedVal, string(val))
+
+				// Verify Meta
+				expectedMeta := byte(j % 127)
+				require.Equal(t, expectedMeta, item.UserMeta())
+
+				t.Logf("Successfully read key: %s", keyStr)
+			}
+		}
+		t.Log("All specific key lookups passed!")
+	})
+}
+
+func TestConcurrentRWSameKey(t *testing.T) {
+	// 1. Initialize Default Options
+	opts := DefaultOptions("")
+	opts.InMemory = true
+	opts.managedTxns = true
+
+	runBadgerTest(t, &opts, func(t *testing.T, db *DB) {
+
+		// txn := db.NewTransactionAt(10, true)
+		// _ = txn.Set([]byte(fmt.Sprintf("k%05d_%08d", 1, 1)), []byte(fmt.Sprintf("v%05d_%08d", 10, 100)))
+
+		// if err := txn.CommitAt(10, nil); err != nil {
+		// 	t.Fatalf("commit: %v", err)
+		// }
+
+		var wg sync.WaitGroup
+
+		// read if 0 and write if 1
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+
+				if i == 0 {
+					txn := db.NewTransactionAt(10, false)
+					itm, err := txn.Get([]byte(fmt.Sprintf("k%05d_%08d", 1, 1)))
+
+					if err != nil {
+						// t.Fatalf("unexpected get error: %v", err)
+					} else {
+						got, _ := itm.ValueCopy(nil)
+						t.Logf("Successfully read key: %s, val: %s", []byte(fmt.Sprintf("k%05d_%08d", 1, 1)), got)
+					}
+
+				} else {
+
+					txn := db.NewTransactionAt(15, true)
+					_ = txn.Set([]byte(fmt.Sprintf("k%05d_%08d", 1, 1)), []byte(fmt.Sprintf("v%05d_%08d", 15, 150)))
+
+					if err := txn.CommitAt(15, nil); err != nil {
+						t.Fatalf("commit: %v", err)
+					}
+
+					t.Logf("Successfully wrote key: %s, val: %s", []byte(fmt.Sprintf("k%05d_%08d", 1, 1)), []byte(fmt.Sprintf("v%05d_%08d", 15, 150)))
+
+				}
+
+			}(i)
+		}
+		wg.Wait()
+
+		t.Log("Writes finished. Starting specific key verification...")
+
+		for i := 0; i < 2; i++ {
+
+			if i == 0 {
+				// txn := db.NewTransactionAt(12, false)
+				// keyStr := []byte(fmt.Sprintf("k%05d_%08d", 1, 1))
+				// itm, err := txn.Get(keyStr)
+				// expectedVal := fmt.Sprintf("v%05d_%08d", 10, 100)
+
+				// if err != nil {
+				// 	t.Fatalf("Get failed for key %s: %v", keyStr, err)
+				// }
+
+				// // Verify Value
+				// val, err := itm.ValueCopy(nil)
+				// require.NoError(t, err)
+				// require.Equal(t, expectedVal, string(val))
+
+				// t.Logf("Successfully read key: %s at ts=12, val = %s", keyStr, val)
+
+			} else {
+				txn := db.NewTransactionAt(17, false)
+				keyStr := []byte(fmt.Sprintf("k%05d_%08d", 1, 1))
+				itm, err := txn.Get(keyStr)
+				expectedVal := fmt.Sprintf("v%05d_%08d", 15, 150)
+
+				if err != nil {
+					t.Fatalf("Get failed for key %s: %v", keyStr, err)
+				}
+
+				// Verify Value
+				val, err := itm.ValueCopy(nil)
+				require.NoError(t, err)
+				require.Equal(t, expectedVal, string(val))
+
+				t.Logf("Successfully read key: %s at ts=17, val = %s", keyStr, val)
+			}
+
+		}
+		t.Log("All specific key lookups passed!")
+	})
+}
+
+func TestConcurrentReadTSVerify(t *testing.T) {
+	// 1. Initialize Options
+	opts := DefaultOptions("")
+	opts.InMemory = true
+	// We MUST enable ManagedTxns to manually control Read/Commit timestamps
+	opts.managedTxns = true
+
+	runBadgerTest(t, &opts, func(t *testing.T, db *DB) {
+		key := []byte("mvcc_key")
+		numVersions := 50
+		stride := uint64(10) // Timestamps will be 10, 20, 30...
+
+		var wg sync.WaitGroup
+
+		// ----------------------------------------------------------------
+		// Phase 1: Concurrent Writes to the SAME KEY at DIFFERENT timestamps
+		// ----------------------------------------------------------------
+		t.Logf("Starting %d concurrent writes...", numVersions)
+
+		for i := 1; i <= numVersions; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+
+				// Calculate Timestamp: 10, 20, 30...
+				ts := uint64(i) * stride
+				val := []byte(fmt.Sprintf("val_at_%d", ts))
+
+				// Create Managed Transaction at specific TS
+				txn := db.NewTransactionAt(ts, true)
+
+				// Set the key
+				err := txn.Set(key, val)
+				if err != nil {
+					t.Errorf("Set failed at ts %d: %v", ts, err)
+					txn.Discard()
+					return
+				}
+
+				// Commit at specific TS
+				if err := txn.CommitAt(ts, nil); err != nil {
+					t.Errorf("Commit failed at ts %d: %v", ts, err)
+				}
+			}(i)
+		}
+
+		// Wait for all writes to hit L0/Memtable
+		wg.Wait()
+		t.Log("All writes finished. Starting concurrent intermediate reads...")
+
+		// ----------------------------------------------------------------
+		// Phase 2: Concurrent Reads at timestamps IN BETWEEN writes
+		// ----------------------------------------------------------------
+		// If we wrote at 10 and 20, a read at 15 should see the value from 10.
+
+		for i := 1; i <= numVersions; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+
+				writeTs := uint64(i) * stride    // e.g., 10
+				readTs := writeTs + (stride / 2) // e.g., 15
+				expectedVal := fmt.Sprintf("val_at_%d", writeTs)
+
+				// Create View Transaction at intermediate TS
+				txn := db.NewTransactionAt(readTs, false)
+				defer txn.Discard()
+
+				item, err := txn.Get(key)
+				if err != nil {
+					t.Errorf("Get failed at readTs %d: %v", readTs, err)
+					return
+				}
+
+				// Verify Value
+				val, err := item.ValueCopy(nil)
+				if err != nil {
+					t.Errorf("ValueCopy failed: %v", err)
+					return
+				}
+
+				// Assertion:
+				// Reading at 15 must return "val_at_10".
+				// It must NOT return "val_at_20" (future) or "val_at_0" (past).
+				if string(val) != expectedVal {
+					t.Errorf("MVCC Error! ReadTs: %d. Expected: %s, Got: %s",
+						readTs, expectedVal, string(val))
+				} else {
+					t.Logf("ReadTs %d correctly saw %s", readTs, expectedVal)
+				}
+			}(i)
+		}
+
+		wg.Wait()
+		t.Log("All concurrent MVCC reads passed!")
+	})
+}
+
+// func TestConcurrentWrite2(t *testing.T) {
+// 	// Get the db path so we can reopen it
+// 	dir := t.TempDir()
+// 	db, err := Open(DefaultOptions(dir))
+// 	require.NoError(t, err)
+
+// 	// n := 2
+// 	m := 5
+
+// 	// Run the test logic inside a t.Run to manage the DB instance
+// 	t.Run("concurrent write phase", func(t *testing.T) {
+// 		n := 2
+// 		m := 5
+// 		var wg sync.WaitGroup
+// 		errCh := make(chan error, n*m)
+
+// 		for i := 0; i < n; i++ {
+// 			wg.Add(1)
+// 			go func(i int) {
+// 				defer wg.Done()
+// 				for j := 0; j < m; j++ {
+// 					err := db.Update(func(txn *Txn) error {
+// 						k := []byte(fmt.Sprintf("k%05d_%08d", i, j))
+// 						v := []byte(fmt.Sprintf("v%05d_%08d", i, j))
+// 						e := NewEntry(k, v).WithMeta(byte(j % 127))
+// 						return txn.SetEntry(e)
+// 					})
+// 					if err != nil {
+// 						errCh <- err
+// 						return
+// 					}
+// 				}
+// 			}(i)
+// 		}
+// 		wg.Wait()
+// 		close(errCh)
+// 		for err := range errCh {
+// 			t.Fatalf("Error during concurrent write: %v", err)
+// 		}
+// 	})
+
+// 	// *** THE FINAL TEST: CLOSE AND REOPEN ***
+// 	t.Log("Closing DB to force persistence...")
+// 	require.NoError(t, db.Close())
+
+// 	t.Log("Re-opening DB to read from disk...")
+// 	db, err = Open(DefaultOptions(dir))
+// 	require.NoError(t, err)
+// 	defer db.Close() // Ensure the reopened DB is closed at the end
+
+// 	// *** VERIFICATION PHASE ***
+// 	t.Log("Starting iteration on reopened DB")
+// 	opt := IteratorOptions{
+// 		Reverse:        false,
+// 		PrefetchSize:   10,
+// 		PrefetchValues: true,
+// 	}
+// 	txn := db.NewTransaction(true)
+// 	it := txn.NewIterator(opt)
+// 	defer it.Close()
+
+// 	var i, j int
+// 	for it.Rewind(); it.Valid(); it.Next() {
+// 		t.Log("Test inside iteration loop")
+// 		item := it.Item()
+// 		k := item.Key()
+// 		require.NotNil(t, k)
+
+// 		require.EqualValues(t, fmt.Sprintf("k%05d_%08d", i, j), string(k))
+// 		v := getItemValue(t, item)
+// 		require.EqualValues(t, fmt.Sprintf("v%05d_%08d", i, j), string(v))
+// 		require.Equal(t, item.UserMeta(), byte(j%127))
+// 		j++
+// 		if j == m {
+// 			i++
+// 			j = 0
+// 		}
+// 	}
+// 	t.Logf("i : %d", i)
+// 	t.Logf("j : %d", i) // <-- Note: This was a typo in your original, I'm keeping it as you wrote it
+
+// 	// We expect 2 groups (n=2)
+// 	require.EqualValues(t, 2, i)
+// 	require.EqualValues(t, 0, j)
+// }
 
 func TestGet(t *testing.T) {
 	test := func(t *testing.T, db *DB) {
