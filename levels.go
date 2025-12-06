@@ -1633,6 +1633,7 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 
 	readTs := y.ParseTs(key)
 	logicalKey := y.ParseKey(key)
+	hash := y.Hash(logicalKey)
 
 	for _, h := range s.levels {
 		if h.level < startLevel {
@@ -1650,9 +1651,15 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 		}
 
 		for _, tbl := range tbls {
+			if tbl.DoesNotHave(hash) {
+				fmt.Printf("%s Does not have hash\n", string(logicalKey))
+				continue
+			}
+
+			fmt.Printf("%s has hash\n", string(logicalKey))
+
 			// Iterator options are in the same package `table`
 			itr := tbl.NewIterator(table.NOCACHE)
-
 			defer itr.Close()
 
 			// Seek to our key
