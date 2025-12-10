@@ -24,6 +24,21 @@ import (
 	"github.com/dgraph-io/ristretto/v2/z"
 )
 
+const TsSize = 12
+
+type CustomTs struct {
+	EpochID    uint32
+	BrokerID   uint32
+	AssignedTS uint32
+}
+
+// MaxTs acts as the "Infinity" timestamp for iterators
+var MaxTs = CustomTs{
+	EpochID:    math.MaxUint32,
+	BrokerID:   math.MaxUint32,
+	AssignedTS: math.MaxUint32,
+}
+
 var (
 	// ErrEOF indicates an end of file when trying to read from a memory mapped file
 	// and encountering the end of slice.
@@ -52,6 +67,61 @@ var (
 	// CastagnoliCrcTable is a CRC32 polynomial table
 	CastagnoliCrcTable = crc32.MakeTable(crc32.Castagnoli)
 )
+
+// ToBytes encodes the struct into a 12-byte slice with bitwise inversion
+func (t CustomTs) ToBytes() []byte {
+	buf := make([]byte, TsSize)
+
+	// 1. Encode fields in significance order (Epoch > Broker > AssignedTS)
+	// Adjust priority based on your business logic.
+	// Usually Epoch is most significant.
+	binary.BigEndian.PutUint32(buf[0:4], t.EpochID)
+	binary.BigEndian.PutUint32(buf[4:8], t.BrokerID)
+	binary.BigEndian.PutUint32(buf[8:12], t.AssignedTS)
+
+	// 2. Invert bits for descending sort order in LSM tree
+	for i := range buf {
+		buf[i] = ^buf[i]
+	}
+	return buf
+}
+
+// ParseTsFromBytes decodes the 12 bytes back into the struct
+func ParseTsFromBytes(buf []byte) CustomTs {
+	raw := make([]byte, TsSize)
+	// 1. Invert bits back
+	for i, b := range buf {
+		raw[i] = ^b
+	}
+
+	return CustomTs{
+		EpochID:    binary.BigEndian.Uint32(raw[0:4]),
+		BrokerID:   binary.BigEndian.Uint32(raw[4:8]),
+		AssignedTS: binary.BigEndian.Uint32(raw[8:12]),
+	}
+}
+
+func (t CustomTs) Less(o CustomTs) bool {
+	if t.EpochID != o.EpochID {
+		return t.EpochID < o.EpochID
+	}
+	if t.BrokerID != o.BrokerID {
+		return t.BrokerID < o.BrokerID
+	}
+	return t.AssignedTS < o.AssignedTS
+}
+
+func (t CustomTs) Greater(o CustomTs) bool {
+	return o.Less(t)
+}
+
+func (t CustomTs) Equal(o CustomTs) bool {
+	return t.EpochID == o.EpochID && t.BrokerID == o.BrokerID && t.AssignedTS == o.AssignedTS
+}
+
+func (t CustomTs) IsZero() bool {
+	return t.EpochID == 0 && t.BrokerID == 0 && t.AssignedTS == 0
+}
 
 // OpenExistingFile opens an existing file, errors if it doesn't exist.
 func OpenExistingFile(filename string, flags Flags) (*os.File, error) {
@@ -106,19 +176,45 @@ func Copy(a []byte) []byte {
 }
 
 // KeyWithTs generates a new key by appending ts to key.
-func KeyWithTs(key []byte, ts uint64) []byte {
-	out := make([]byte, len(key)+8)
+func KeyWithTs(key []byte, ts CustomTs) []byte {
+	out := make([]byte, len(key)+TsSize)
 	copy(out, key)
-	binary.BigEndian.PutUint64(out[len(key):], math.MaxUint64-ts)
+	// Get the slice corresponding to the timestamp part
+	tsBytes := out[len(key):]
+
+	// Encode fields in significance order (Big Endian)
+	binary.BigEndian.PutUint32(tsBytes[0:4], ts.EpochID)
+	binary.BigEndian.PutUint32(tsBytes[4:8], ts.BrokerID)
+	binary.BigEndian.PutUint32(tsBytes[8:12], ts.AssignedTS)
+
+	// Invert bits for descending sort
+	// Original used (MaxUint64 - ts). Using bitwise NOT (^) which is equivalent.
+	for i := range tsBytes {
+		tsBytes[i] = ^tsBytes[i]
+	}
 	return out
 }
 
-// ParseTs parses the timestamp from the key bytes.
-func ParseTs(key []byte) uint64 {
-	if len(key) <= 8 {
-		return 0
+// ParseTs parses the CustomTs from the key bytes.
+func ParseTs(key []byte) CustomTs {
+	if len(key) <= TsSize {
+		return CustomTs{} // Return zero value
 	}
-	return math.MaxUint64 - binary.BigEndian.Uint64(key[len(key)-8:])
+
+	// Extract the encoded bytes
+	encoded := key[len(key)-TsSize:]
+
+	// Invert bits back to get the original values
+	raw := make([]byte, TsSize)
+	for i, b := range encoded {
+		raw[i] = ^b
+	}
+
+	return CustomTs{
+		EpochID:    binary.BigEndian.Uint32(raw[0:4]),
+		BrokerID:   binary.BigEndian.Uint32(raw[4:8]),
+		AssignedTS: binary.BigEndian.Uint32(raw[8:12]),
+	}
 }
 
 // CompareKeys checks the key without timestamp and checks the timestamp if keyNoTs
@@ -126,10 +222,19 @@ func ParseTs(key []byte) uint64 {
 // a<timestamp> would be sorted higher than aa<timestamp> if we use bytes.compare
 // All keys should have timestamp.
 func CompareKeys(key1, key2 []byte) int {
-	if cmp := bytes.Compare(key1[:len(key1)-8], key2[:len(key2)-8]); cmp != 0 {
+	// Compare the User Key (everything except the last 12 bytes)
+	k1Len := len(key1) - TsSize
+	k2Len := len(key2) - TsSize
+
+	if cmp := bytes.Compare(key1[:k1Len], key2[:k2Len]); cmp != 0 {
 		return cmp
 	}
-	return bytes.Compare(key1[len(key1)-8:], key2[len(key2)-8:])
+
+	// Compare the Timestamp bytes
+	// Since we stored the timestamp using bitwise inversion,
+	// a lexicographical byte compare automatically yields Descending Order.
+	// (Larger TS -> Inverted to Smaller Bytes -> Sorts earlier)
+	return bytes.Compare(key1[k1Len:], key2[k2Len:])
 }
 
 // ParseKey parses the actual key from the key bytes.
@@ -138,7 +243,10 @@ func ParseKey(key []byte) []byte {
 		return nil
 	}
 
-	return key[:len(key)-8]
+	if len(key) < TsSize {
+		return key
+	}
+	return key[:len(key)-TsSize]
 }
 
 // SameKey checks for key equality ignoring the version timestamp suffix.
