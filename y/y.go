@@ -16,6 +16,7 @@ import (
 	"os"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -151,10 +152,73 @@ func (t CustomTs) Decr() CustomTs {
 	return t
 }
 
+// Avg calculates the midpoint between t and other: (t + other) / 2
+func (t CustomTs) Avg(other CustomTs) CustomTs {
+	// Sum lowest parts (AssignedTs)
+	// Cast to uint64 to prevent overflow during addition
+	sumTS := uint64(t.AssignedTs) + uint64(other.AssignedTs)
+	carryTS := sumTS >> 32 // Get the carry (0 or 1)
+
+	// Sum middle parts (BrokerID) including carry
+	sumBroker := uint64(t.BrokerID) + uint64(other.BrokerID) + carryTS
+	carryBroker := sumBroker >> 32 // Get the carry
+
+	// Sum highest parts (EpochID) including carry
+	sumEpoch := uint64(t.EpochID) + uint64(other.EpochID) + carryBroker
+
+	// Divide total sum by 2 (Bitwise Right Shift 1)
+	// We propagate the remainder (lowest bit) of each upper field
+	// to the highest bit of the next lower field.
+
+	avgEpoch := uint32(sumEpoch >> 1)
+	remEpoch := uint32(sumEpoch & 1) // Remainder from Epoch division
+
+	// Shift Broker, OR in the bit from Epoch
+	avgBroker := (uint32(sumBroker) >> 1) | (remEpoch << 31)
+	remBroker := uint32(sumBroker & 1) // Remainder from Broker division
+
+	// Shift AssignedTs, OR in the bit from Broker
+	avgTS := (uint32(sumTS) >> 1) | (remBroker << 31)
+
+	return CustomTs{
+		EpochID:    avgEpoch,
+		BrokerID:   avgBroker,
+		AssignedTs: avgTS,
+	}
+}
+
 // String returns a readable representation of the timestamp (e.g., "1-5-100")
 func (t CustomTs) String() string {
-	// You can choose any separator (e.g., "-", "_", or ":")
 	return fmt.Sprintf("%d-%d-%d", t.EpochID, t.BrokerID, t.AssignedTs)
+}
+
+// ParseCustomTsString parses a string in "Epoch-Broker-TS" format.
+func ParseCustomTsString(s string) (CustomTs, error) {
+	parts := strings.Split(s, "-")
+	if len(parts) != 3 {
+		return CustomTs{}, fmt.Errorf("invalid custom timestamp format: %s", s)
+	}
+
+	e, err := strconv.ParseUint(parts[0], 10, 32)
+	if err != nil {
+		return CustomTs{}, err
+	}
+
+	b, err := strconv.ParseUint(parts[1], 10, 32)
+	if err != nil {
+		return CustomTs{}, err
+	}
+
+	ts, err := strconv.ParseUint(parts[2], 10, 32)
+	if err != nil {
+		return CustomTs{}, err
+	}
+
+	return CustomTs{
+		EpochID:    uint32(e),
+		BrokerID:   uint32(b),
+		AssignedTs: uint32(ts),
+	}, nil
 }
 
 // OpenExistingFile opens an existing file, errors if it doesn't exist.

@@ -763,7 +763,7 @@ func (s *levelsController) subcompact(it y.Iterator, kr keyRange, cd compactDef,
 
 			// Do not discard entries inserted by merge operator. These entries will be
 			// discarded once they're merged
-			if version <= discardTs && vs.Meta&bitMergeEntry == 0 {
+			if !(version.Greater(discardTs)) && vs.Meta&bitMergeEntry == 0 {
 				// Keep track of the number of versions encountered for this key. Only consider the
 				// versions which are below the minReadTs, otherwise, we might end up discarding the
 				// only valid version for a running transaction.
@@ -1013,7 +1013,7 @@ func containsPrefix(table *table.Table, prefix []byte) bool {
 		defer ti.Close()
 		// In table iterator's Seek, we assume that key has version in last 8 bytes. We set
 		// version=0 (ts=math.MaxUint64), so that we don't skip the key prefixed with prefix.
-		ti.Seek(y.KeyWithTs(prefix, math.MaxUint64))
+		ti.Seek(y.KeyWithTs(prefix, y.MaxTs))
 		return bytes.HasPrefix(ti.Key(), prefix)
 	}
 
@@ -1093,7 +1093,7 @@ func (s *levelsController) addSplits(cd *compactDef) {
 			// Top table is [A1...C3(deleted)]
 			// bot table is [B1....C2]
 			// It will generate a split [A1 ... C0], including any records of Key C.
-			right := y.KeyWithTs(y.ParseKey(t.Biggest()), 0)
+			right := y.KeyWithTs(y.ParseKey(t.Biggest()), y.CustomTs{})
 			addRange(right)
 		}
 	}
@@ -1274,7 +1274,7 @@ func (s *levelsController) sortByHeuristic(tables []*table.Table, cd *compactDef
 
 	// Sort tables by max version. This is what RocksDB does.
 	sort.Slice(tables, func(i, j int) bool {
-		return tables[i].MaxVersion() < tables[j].MaxVersion()
+		return tables[i].MaxVersion().Less(tables[j].MaxVersion())
 	})
 }
 
@@ -1314,7 +1314,7 @@ func (s *levelsController) fillMaxLevelTables(tables []*table.Table, cd *compact
 	for _, t := range sortedTables {
 		// If the maxVersion is above the discardTs, we won't clean anything in
 		// the compaction. So skip this table.
-		if t.MaxVersion() > s.kv.orc.discardAtOrBelow() {
+		if t.MaxVersion().Greater(s.kv.orc.discardAtOrBelow()) {
 			continue
 		}
 		if now.Sub(t.CreatedAt) < time.Hour {
@@ -1674,7 +1674,7 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 				val_version := y.ParseTs(k)
 
 				// Only consider versions <= readTs
-				if val_version <= readTs {
+				if !(val_version.Greater(readTs)) {
 					if isDeletedOrExpired(val.Meta, val.ExpiresAt) {
 						return y.ValueStruct{}, ErrKeyNotFound
 					}
@@ -1768,7 +1768,7 @@ type TableInfo struct {
 	OnDiskSize       uint32
 	StaleDataSize    uint32
 	UncompressedSize uint32
-	MaxVersion       uint64
+	MaxVersion       y.CustomTs
 	IndexSz          int
 	BloomFilterSize  int
 }
@@ -2029,16 +2029,16 @@ func (s *levelsController) promotePartition(level, pid int) error {
 	}
 
 	// Compute min/max versions across all detached tables
-	var minV, maxV uint64 = old[0].MinTimestamp(), old[0].MaxTimestamp()
+	var minV, maxV y.CustomTs = old[0].MinTimestamp(), old[0].MaxTimestamp()
 	for _, t := range old[1:] {
-		if t.MinTimestamp() < minV {
+		if t.MinTimestamp().Less(minV) {
 			minV = t.MinTimestamp()
 		}
-		if t.MaxTimestamp() > maxV {
+		if t.MaxTimestamp().Greater(maxV) {
 			maxV = t.MaxTimestamp()
 		}
 	}
-	Tth := (minV + maxV) / 2
+	Tth := minV.Avg(maxV)
 
 	// Build a MergeIterator over all the old tables
 	iters := make([]y.Iterator, 0, len(old))

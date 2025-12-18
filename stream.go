@@ -81,8 +81,8 @@ type Stream struct {
 	Send func(buf *z.Buffer) error
 
 	// Read data above the sinceTs. All keys with version =< sinceTs will be ignored.
-	SinceTs      uint64
-	readTs       uint64
+	SinceTs      y.CustomTs
+	readTs       y.CustomTs
 	db           *DB
 	rangeCh      chan keyRange
 	kvChan       chan *z.Buffer
@@ -167,7 +167,7 @@ func (st *Stream) produceKVs(ctx context.Context, threadId int) error {
 	defer st.numProducers.Add(-1)
 
 	var txn *Txn
-	if st.readTs > 0 {
+	if st.readTs.Greater(y.CustomTs{}) {
 		txn = st.db.NewTransactionAt(st.readTs, false)
 	} else {
 		txn = st.db.NewTransaction(false)
@@ -463,7 +463,7 @@ func (db *DB) NewStream() *Stream {
 }
 
 // NewStreamAt creates a new Stream at a particular timestamp. Should only be used with managed DB.
-func (db *DB) NewStreamAt(readTs uint64) *Stream {
+func (db *DB) NewStreamAt(readTs y.CustomTs) *Stream {
 	if !db.opt.managedTxns {
 		panic("This API can only be called in managed mode.")
 	}

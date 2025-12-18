@@ -424,10 +424,10 @@ func (db *DB) initBannedNamespaces() error {
 	})
 }
 
-func (db *DB) MaxVersion() uint64 {
-	var maxVersion uint64
-	update := func(a uint64) {
-		if a > maxVersion {
+func (db *DB) MaxVersion() y.CustomTs {
+	var maxVersion y.CustomTs
+	update := func(a y.CustomTs) {
+		if a.Greater(maxVersion) {
 			maxVersion = a
 		}
 	}
@@ -775,12 +775,12 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 				continue
 			}
 			// Only consider versions <= readTs
-			if e.version <= readTs {
+			if !(e.version.Greater(readTs)) {
 				if isDeletedOrExpired(e.meta, e.ExpiresAt) {
 					return y.ValueStruct{}, ErrKeyNotFound
 				}
 				// Pick the newest visible version <= readTs
-				if e.version > best.Version {
+				if e.version.Greater(best.Version) {
 					best = y.ValueStruct{
 						Value:     e.Value,
 						Meta:      e.meta,
@@ -1167,7 +1167,7 @@ func (db *DB) handleMemTableFlushPartitioned() error {
 		if cmp := bytes.Compare(entries[i].Key, entries[j].Key); cmp != 0 {
 			return cmp < 0
 		}
-		return entries[i].version < entries[j].version
+		return entries[i].version.Less(entries[j].version)
 	})
 
 	// 🚀 Now hand these entries to Level-0 logic in levels.go
@@ -1996,8 +1996,11 @@ func (db *DB) BanNamespace(ns uint64) error {
 		return ErrNamespaceMode
 	}
 	db.opt.Infof("Banning namespace: %d", ns)
+
+	systemTs := y.CustomTs{EpochID: 1, BrokerID: 1, AssignedTs: 1}
+
 	// First set the banned namespaces in DB and then update the in-memory structure.
-	key := y.KeyWithTs(append(bannedNsKey, y.U64ToBytes(ns)...), 1)
+	key := y.KeyWithTs(append(bannedNsKey, y.U64ToBytes(ns)...), systemTs)
 	entry := []*Entry{{
 		Key:   key,
 		Value: nil,

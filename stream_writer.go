@@ -36,7 +36,7 @@ type StreamWriter struct {
 	db         *DB
 	done       func()
 	throttle   *y.Throttle
-	maxVersion uint64
+	maxVersion y.CustomTs
 	writers    map[uint32]*sortedWriter
 	prevLevel  int
 }
@@ -276,7 +276,7 @@ func (sw *StreamWriter) Flush() error {
 			sw.db.orc.Stop()
 		}
 
-		if curMax := sw.db.orc.readTs(); curMax >= sw.maxVersion {
+		if curMax := sw.db.orc.readTs(); !(curMax.Less(sw.maxVersion)) {
 			sw.maxVersion = curMax
 		}
 

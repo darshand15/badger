@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"fmt"
 	"log"
-	"math"
 	"sync"
 
 	"github.com/dgraph-io/badger/v4/table"
@@ -107,8 +106,8 @@ func getKeyRange(tables ...*table.Table) keyRange {
 	// We pick all the versions of the smallest and the biggest key. Note that version zero would
 	// be the rightmost key, considering versions are default sorted in descending order.
 	return keyRange{
-		left:  y.KeyWithTs(y.ParseKey(smallest), math.MaxUint64),
-		right: y.KeyWithTs(y.ParseKey(biggest), 0),
+		left:  y.KeyWithTs(y.ParseKey(smallest), y.MaxTs),
+		right: y.KeyWithTs(y.ParseKey(biggest), y.CustomTs{}),
 	}
 }
 

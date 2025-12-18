@@ -48,7 +48,7 @@ func (db *DB) GetMergeOperator(key []byte,
 
 var errNoMerge = stderrors.New("No need for merge")
 
-func (op *MergeOperator) iterateAndMerge() (newVal []byte, latest uint64, err error) {
+func (op *MergeOperator) iterateAndMerge() (newVal []byte, latest y.CustomTs, err error) {
 	txn := op.db.NewTransaction(false)
 	defer txn.Discard()
 	opt := DefaultIteratorOptions
@@ -67,7 +67,7 @@ func (op *MergeOperator) iterateAndMerge() (newVal []byte, latest uint64, err er
 			// This should be the newVal, considering this is the latest version.
 			newVal, err = item.ValueCopy(newVal)
 			if err != nil {
-				return nil, 0, err
+				return nil, y.CustomTs{}, err
 			}
 			latest = item.Version()
 		} else {
@@ -77,7 +77,7 @@ func (op *MergeOperator) iterateAndMerge() (newVal []byte, latest uint64, err er
 				newVal = op.f(oldVal, newVal)
 				return nil
 			}); err != nil {
-				return nil, 0, err
+				return nil, y.CustomTs{}, err
 			}
 		}
 		if item.DiscardEarlierVersions() {

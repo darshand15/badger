@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"fmt"
 	"hash/crc32"
-	"math"
 	"sort"
 	"sync"
 	"time"
@@ -161,7 +160,7 @@ func (item *Item) yieldItemValue() ([]byte, func(), error) {
 			" Error: %v", key, item.version, item.meta, item.userMeta, err)
 		var txn *Txn
 		if db.opt.managedTxns {
-			txn = db.NewTransactionAt(math.MaxUint64, false)
+			txn = db.NewTransactionAt(y.MaxTs, false)
 		} else {
 			txn = db.NewTransaction(false)
 		}
@@ -355,7 +354,7 @@ func (opt *IteratorOptions) pickTable(t table.TableInterface) bool {
 // that the tables are sorted in the right order.
 func (opt *IteratorOptions) pickTables(all []*table.Table) []*table.Table {
 	filterTables := func(tables []*table.Table) []*table.Table {
-		if opt.SinceTs > 0 {
+		if opt.SinceTs.Greater(y.CustomTs{}) {
 			tmp := tables[:0]
 			for _, t := range tables {
 				if t.MaxVersion().Less(opt.SinceTs) {
@@ -626,7 +625,7 @@ func (it *Iterator) parseItem() bool {
 	// Skip any versions which are beyond the readTs.
 	version := y.ParseTs(key)
 	// Ignore everything that is above the readTs and below or at the sinceTs.
-	if version.Greater(it.readTs) || (it.opt.SinceTs > 0 && !version.Greater(it.opt.SinceTs)) {
+	if version.Greater(it.readTs) || (it.opt.SinceTs.Greater(y.CustomTs{}) && !version.Greater(it.opt.SinceTs)) {
 		mi.Next()
 		return false
 	}
