@@ -17,6 +17,21 @@ func GetRootAsBlockOffset(buf []byte, offset flatbuffers.UOffsetT) *BlockOffset 
 	return x
 }
 
+func FinishBlockOffsetBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+	builder.Finish(offset)
+}
+
+func GetSizePrefixedRootAsBlockOffset(buf []byte, offset flatbuffers.UOffsetT) *BlockOffset {
+	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+	x := &BlockOffset{}
+	x.Init(buf, n+offset+flatbuffers.SizeUint32)
+	return x
+}
+
+func FinishSizePrefixedBlockOffsetBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+	builder.FinishSizePrefixed(offset)
+}
+
 func (rcv *BlockOffset) Init(buf []byte, i flatbuffers.UOffsetT) {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i

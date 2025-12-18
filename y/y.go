@@ -29,14 +29,14 @@ const TsSize = 12
 type CustomTs struct {
 	EpochID    uint32
 	BrokerID   uint32
-	AssignedTS uint32
+	AssignedTs uint32
 }
 
 // MaxTs acts as the "Infinity" timestamp for iterators
 var MaxTs = CustomTs{
 	EpochID:    math.MaxUint32,
 	BrokerID:   math.MaxUint32,
-	AssignedTS: math.MaxUint32,
+	AssignedTs: math.MaxUint32,
 }
 
 var (
@@ -72,14 +72,12 @@ var (
 func (t CustomTs) ToBytes() []byte {
 	buf := make([]byte, TsSize)
 
-	// 1. Encode fields in significance order (Epoch > Broker > AssignedTS)
-	// Adjust priority based on your business logic.
-	// Usually Epoch is most significant.
+	// Encode fields in significance order (Epoch > Broker > AssignedTS)
 	binary.BigEndian.PutUint32(buf[0:4], t.EpochID)
 	binary.BigEndian.PutUint32(buf[4:8], t.BrokerID)
-	binary.BigEndian.PutUint32(buf[8:12], t.AssignedTS)
+	binary.BigEndian.PutUint32(buf[8:12], t.AssignedTs)
 
-	// 2. Invert bits for descending sort order in LSM tree
+	// Invert bits for descending sort order in LSM tree
 	for i := range buf {
 		buf[i] = ^buf[i]
 	}
@@ -89,7 +87,7 @@ func (t CustomTs) ToBytes() []byte {
 // ParseTsFromBytes decodes the 12 bytes back into the struct
 func ParseTsFromBytes(buf []byte) CustomTs {
 	raw := make([]byte, TsSize)
-	// 1. Invert bits back
+	// Invert bits back
 	for i, b := range buf {
 		raw[i] = ^b
 	}
@@ -97,7 +95,7 @@ func ParseTsFromBytes(buf []byte) CustomTs {
 	return CustomTs{
 		EpochID:    binary.BigEndian.Uint32(raw[0:4]),
 		BrokerID:   binary.BigEndian.Uint32(raw[4:8]),
-		AssignedTS: binary.BigEndian.Uint32(raw[8:12]),
+		AssignedTs: binary.BigEndian.Uint32(raw[8:12]),
 	}
 }
 
@@ -108,7 +106,7 @@ func (t CustomTs) Less(o CustomTs) bool {
 	if t.BrokerID != o.BrokerID {
 		return t.BrokerID < o.BrokerID
 	}
-	return t.AssignedTS < o.AssignedTS
+	return t.AssignedTs < o.AssignedTs
 }
 
 func (t CustomTs) Greater(o CustomTs) bool {
@@ -116,11 +114,47 @@ func (t CustomTs) Greater(o CustomTs) bool {
 }
 
 func (t CustomTs) Equal(o CustomTs) bool {
-	return t.EpochID == o.EpochID && t.BrokerID == o.BrokerID && t.AssignedTS == o.AssignedTS
+	return t.EpochID == o.EpochID && t.BrokerID == o.BrokerID && t.AssignedTs == o.AssignedTs
 }
 
 func (t CustomTs) IsZero() bool {
-	return t.EpochID == 0 && t.BrokerID == 0 && t.AssignedTS == 0
+	return t.EpochID == 0 && t.BrokerID == 0 && t.AssignedTs == 0
+}
+
+// Incr (equivalent to ++)
+// It increments AssignedTs. If that overflows, it increments BrokerID, then EpochID.
+func (t CustomTs) Incr() CustomTs {
+	t.AssignedTs++
+	if t.AssignedTs == 0 { // Overflow wrapped to 0
+		t.BrokerID++
+		if t.BrokerID == 0 { // Overflow wrapped to 0
+			t.EpochID++
+		}
+	}
+	return t
+}
+
+// Decr (equivalent to -1)
+// It decrements AssignedTs. If that underflows, it borrows from BrokerID, then EpochID.
+func (t CustomTs) Decr() CustomTs {
+	if t.AssignedTs == 0 {
+		t.AssignedTs = math.MaxUint32 // Wrap to max
+		if t.BrokerID == 0 {
+			t.BrokerID = math.MaxUint32 // Wrap to max
+			t.EpochID--                 // Underflow on EpochID is allowed (wraps to MaxUint32) just like uint64
+		} else {
+			t.BrokerID--
+		}
+	} else {
+		t.AssignedTs--
+	}
+	return t
+}
+
+// String returns a readable representation of the timestamp (e.g., "1-5-100")
+func (t CustomTs) String() string {
+	// You can choose any separator (e.g., "-", "_", or ":")
+	return fmt.Sprintf("%d-%d-%d", t.EpochID, t.BrokerID, t.AssignedTs)
 }
 
 // OpenExistingFile opens an existing file, errors if it doesn't exist.
@@ -185,7 +219,7 @@ func KeyWithTs(key []byte, ts CustomTs) []byte {
 	// Encode fields in significance order (Big Endian)
 	binary.BigEndian.PutUint32(tsBytes[0:4], ts.EpochID)
 	binary.BigEndian.PutUint32(tsBytes[4:8], ts.BrokerID)
-	binary.BigEndian.PutUint32(tsBytes[8:12], ts.AssignedTS)
+	binary.BigEndian.PutUint32(tsBytes[8:12], ts.AssignedTs)
 
 	// Invert bits for descending sort
 	// Original used (MaxUint64 - ts). Using bitwise NOT (^) which is equivalent.
@@ -213,7 +247,7 @@ func ParseTs(key []byte) CustomTs {
 	return CustomTs{
 		EpochID:    binary.BigEndian.Uint32(raw[0:4]),
 		BrokerID:   binary.BigEndian.Uint32(raw[4:8]),
-		AssignedTS: binary.BigEndian.Uint32(raw[8:12]),
+		AssignedTs: binary.BigEndian.Uint32(raw[8:12]),
 	}
 }
 

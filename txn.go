@@ -9,9 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"math"
 	"sort"
-	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -30,29 +28,28 @@ type oracle struct {
 	// channel in the same order as their commit timestamps.
 	sync.Mutex
 	writeChLock sync.Mutex
-	nextTxnTs   uint64
+	nextTxnTs   y.CustomTs
 	txnMarkLock sync.Mutex
-	
 
 	// Used to block NewTransaction, so all previous commits are visible to a new read.
 	txnMark *y.WaterMark
 
 	// Either of these is used to determine which versions can be permanently
 	// discarded during compaction.
-	discardTs uint64       // Used by ManagedDB.
+	discardTs y.CustomTs   // Used by ManagedDB.
 	readMark  *y.WaterMark // Used by DB.
 
 	// committedTxns contains all committed writes (contains fingerprints
 	// of keys written and their latest commit counter).
 	committedTxns []committedTxn
-	lastCleanupTs uint64
+	lastCleanupTs y.CustomTs
 
 	// closer is used to stop watermarks.
 	closer *z.Closer
 }
 
 type committedTxn struct {
-	ts uint64
+	ts y.CustomTs
 	// ConflictKeys Keeps track of the entries written at timestamp ts.
 	conflictKeys map[uint64]struct{}
 }
@@ -78,18 +75,18 @@ func (o *oracle) Stop() {
 	o.closer.SignalAndWait()
 }
 
-func (o *oracle) readTs() uint64 {
+func (o *oracle) readTs() y.CustomTs {
 	if o.isManaged {
 		panic("ReadTs should not be retrieved for managed DB")
 	}
 
-	var readTs uint64
+	var readTs y.CustomTs
 	o.Lock()
-	readTs = o.nextTxnTs - 1
+	// readTs = o.nextTxnTs - 1
+	readTs = o.nextTxnTs
+	readTs.Decr()
 	o.readMark.Begin(readTs)
 	o.Unlock()
-
-
 
 	// Wait for all txns which have no conflicts, have been assigned a commit
 	// timestamp and are going through the write to value log and LSM tree
@@ -99,7 +96,7 @@ func (o *oracle) readTs() uint64 {
 	return readTs
 }
 
-func (o *oracle) nextTs() uint64 {
+func (o *oracle) nextTs() y.CustomTs {
 	o.Lock()
 	defer o.Unlock()
 	return o.nextTxnTs
@@ -109,30 +106,29 @@ func (o *oracle) nextTs() uint64 {
 func (o *oracle) incrementNextTs() {
 	o.Lock()
 	defer o.Unlock()
-	o.nextTxnTs++
+	// o.nextTxnTs++
+	o.nextTxnTs.Incr()
 
 }
 
 // Any deleted or invalid versions at or below ts would be discarded during
 // compaction to reclaim disk space in LSM tree and thence value log.
-func (o *oracle) setDiscardTs(ts uint64) {
+func (o *oracle) setDiscardTs(ts y.CustomTs) {
 	o.Lock()
 	defer o.Unlock()
 	o.discardTs = ts
 	o.cleanupCommittedTransactions()
 
-
 }
 
-func (o *oracle) discardAtOrBelow() uint64 {
+func (o *oracle) discardAtOrBelow() y.CustomTs {
 	if o.isManaged {
 		o.Lock()
 		defer o.Unlock()
 		return o.discardTs
 	}
 	return o.readMark.DoneUntil()
-	
-	
+
 }
 
 // hasConflict must be called while having a lock.
@@ -147,7 +143,7 @@ func (o *oracle) hasConflict(txn *Txn) bool {
 		// This change assumes linearizability. Lack of linearizability could
 		// cause the read ts of a new txn to be lower than the commit ts of
 		// a txn before it (@mrjn).
-		if committedTxn.ts <= txn.readTs {
+		if !committedTxn.ts.Greater(txn.readTs) {
 			continue
 		}
 
@@ -161,27 +157,30 @@ func (o *oracle) hasConflict(txn *Txn) bool {
 	return false
 }
 
-func (o *oracle) newCommitTs(txn *Txn) (uint64, bool) {
-    o.Lock()
+func (o *oracle) newCommitTs(txn *Txn) (y.CustomTs, bool) {
+	o.Lock()
 	defer o.Unlock()
 
 	if o.hasConflict(txn) {
-		return 0, true
+		// return 0, true
+		return y.CustomTs{}, true
 	}
 
-	var ts uint64
+	var ts y.CustomTs
 	if !o.isManaged {
 		o.doneRead(txn)
 		o.cleanupCommittedTransactions()
 
 		ts = o.nextTxnTs
-		o.nextTxnTs++
+		// o.nextTxnTs++
+		o.nextTxnTs.Incr()
 		o.txnMark.Begin(ts)
 	} else {
 		ts = txn.commitTs
 	}
 
-	y.AssertTrue(ts >= o.lastCleanupTs)
+	// y.AssertTrue(ts >= o.lastCleanupTs)
+	y.AssertTrue(!ts.Less(o.lastCleanupTs))
 
 	if o.detectConflicts {
 		o.committedTxns = append(o.committedTxns, committedTxn{
@@ -193,7 +192,6 @@ func (o *oracle) newCommitTs(txn *Txn) (uint64, bool) {
 	return ts, false
 
 }
-
 
 func (o *oracle) doneRead(txn *Txn) {
 	if !txn.doneRead {
@@ -209,25 +207,27 @@ func (o *oracle) cleanupCommittedTransactions() { // Must be called under o.Lock
 		return
 	}
 	// Same logic as discardAtOrBelow but unlocked
-	var maxReadTs uint64
+	var maxReadTs y.CustomTs
 	if o.isManaged {
 		maxReadTs = o.discardTs
 	} else {
 		maxReadTs = o.readMark.DoneUntil()
 	}
 
-	y.AssertTrue(maxReadTs >= o.lastCleanupTs)
+	// y.AssertTrue(maxReadTs >= o.lastCleanupTs)
+	y.AssertTrue(!maxReadTs.Less(o.lastCleanupTs))
 
 	// do not run clean up if the maxReadTs (read timestamp of the
 	// oldest transaction that is still in flight) has not increased
-	if maxReadTs == o.lastCleanupTs {
+	if maxReadTs.Equal(o.lastCleanupTs) {
 		return
 	}
 	o.lastCleanupTs = maxReadTs
 
 	tmp := o.committedTxns[:0]
 	for _, txn := range o.committedTxns {
-		if txn.ts <= maxReadTs {
+		// if txn.ts <= maxReadTs {
+		if !txn.ts.Greater(maxReadTs) {
 			continue
 		}
 		tmp = append(tmp, txn)
@@ -235,19 +235,18 @@ func (o *oracle) cleanupCommittedTransactions() { // Must be called under o.Lock
 	o.committedTxns = tmp
 }
 
-func (o *oracle) doneCommit(cts uint64) {
-    if o.isManaged {
+func (o *oracle) doneCommit(cts y.CustomTs) {
+	if o.isManaged {
 		return
 	}
 	o.txnMark.Done(cts)
-	
-}
 
+}
 
 // Txn represents a Badger transaction.
 type Txn struct {
-	readTs   uint64
-	commitTs uint64
+	readTs   y.CustomTs
+	commitTs y.CustomTs
 	size     int64
 	count    int64
 	db       *DB
@@ -269,7 +268,7 @@ type Txn struct {
 type pendingWritesIterator struct {
 	entries  []*Entry
 	nextIdx  int
-	readTs   uint64
+	readTs   y.CustomTs
 	reversed bool
 }
 
@@ -616,74 +615,77 @@ func (txn *Txn) Discard() {
 // }
 
 func (txn *Txn) commitAndSend() (func() error, error) {
-    orc := txn.db.orc
+	orc := txn.db.orc
 
-    // assign commit timestamp
-    commitTs, conflict := orc.newCommitTs(txn)
-    if conflict {
-        return nil, ErrConflict
-    }
+	// assign commit timestamp
+	commitTs, conflict := orc.newCommitTs(txn)
+	if conflict {
+		return nil, ErrConflict
+	}
 
-    keepTogether := true
-    setVersion := func(e *Entry) {
-        if e.version == 0 {
-            e.version = commitTs
-        } else {
-            keepTogether = false
-        }
-    }
-    for _, e := range txn.pendingWrites {
-        setVersion(e)
-    }
-    for _, e := range txn.duplicateWrites {
-        setVersion(e)
-    }
+	keepTogether := true
+	setVersion := func(e *Entry) {
+		if e.version.IsZero() {
+			e.version = commitTs
+		} else {
+			keepTogether = false
+		}
+	}
+	for _, e := range txn.pendingWrites {
+		setVersion(e)
+	}
+	for _, e := range txn.duplicateWrites {
+		setVersion(e)
+	}
 
-    // batch all entries
-    entries := make([]*Entry, 0, len(txn.pendingWrites)+len(txn.duplicateWrites)+1)
+	// batch all entries
+	entries := make([]*Entry, 0, len(txn.pendingWrites)+len(txn.duplicateWrites)+1)
 
-    processEntry := func(e *Entry) {
-        e.Key = y.KeyWithTs(e.Key, e.version)
-        if keepTogether {
-            e.meta |= bitTxn
-        }
-        entries = append(entries, e)
-    }
+	processEntry := func(e *Entry) {
+		e.Key = y.KeyWithTs(e.Key, e.version)
+		if keepTogether {
+			e.meta |= bitTxn
+		}
+		entries = append(entries, e)
+	}
 
-    for _, e := range txn.pendingWrites {
-        processEntry(e)
-    }
-    for _, e := range txn.duplicateWrites {
-        processEntry(e)
-    }
+	for _, e := range txn.pendingWrites {
+		processEntry(e)
+	}
+	for _, e := range txn.duplicateWrites {
+		processEntry(e)
+	}
 
-    if keepTogether {
-        y.AssertTrue(commitTs != 0)
-        entries = append(entries, &Entry{
-            Key:   y.KeyWithTs(txnKey, commitTs),
-            Value: []byte(strconv.FormatUint(commitTs, 10)),
-            meta:  bitFinTxn,
-        })
-    }
+	if keepTogether {
+		y.AssertTrue(!commitTs.IsZero())
+		entries = append(entries, &Entry{
+			Key:   y.KeyWithTs(txnKey, commitTs),
+			Value: []byte(commitTs.String()),
+			meta:  bitFinTxn,
+		})
+	}
 
-    // 🚀 CAS-prepend into Level-0 root
-    node := &upsertNode{kvs: entries}
-    for {
-        old := txn.db.root.Load()
-        node.next = old
-        if txn.db.root.CompareAndSwap(old, node) {
-            break
-        }
-    }
+	// fmt.Printf("Performing CAS prepend\n")
+	// 🚀 CAS-prepend into Level-0 root
+	node := &upsertNode{kvs: entries}
+	for {
+		old := txn.db.root.Load()
+		node.next = old
+		if txn.db.root.CompareAndSwap(old, node) {
+			// fmt.Printf("Performed CAS\n")
+			break
+		}
+	}
 
-    // No blocking on write channel anymore
-    ret := func() error {
-        orc.doneCommit(commitTs)
-        return nil
-    }
-    return ret, nil
+	// txn.db.handleMemTableFlushPartitioned()
+
+	// No blocking on write channel anymore
+	ret := func() error {
+		orc.doneCommit(commitTs)
+		return nil
+	}
+	return ret, nil
 }
-
 
 func (txn *Txn) commitPrecheck() error {
 	if txn.discarded {
@@ -691,7 +693,7 @@ func (txn *Txn) commitPrecheck() error {
 	}
 	keepTogether := true
 	for _, e := range txn.pendingWrites {
-		if e.version != 0 {
+		if !e.version.IsZero() {
 			keepTogether = false
 		}
 	}
@@ -701,7 +703,7 @@ func (txn *Txn) commitPrecheck() error {
 	// someone uses txn.Commit instead of txn.CommitAt in managed mode.  This
 	// should happen only in managed mode. In normal mode, keepTogether will
 	// always be true.
-	if keepTogether && txn.db.opt.managedTxns && txn.commitTs == 0 {
+	if keepTogether && txn.db.opt.managedTxns && txn.commitTs.IsZero() {
 		return errors.New("CommitTs cannot be zero. Please use commitAt instead")
 	}
 	return nil
@@ -809,7 +811,7 @@ func (txn *Txn) CommitWith(cb func(error)) {
 }
 
 // ReadTs returns the read timestamp of the transaction.
-func (txn *Txn) ReadTs() uint64 {
+func (txn *Txn) ReadTs() y.CustomTs {
 	return txn.readTs
 }
 
@@ -870,7 +872,7 @@ func (db *DB) View(fn func(txn *Txn) error) error {
 	}
 	var txn *Txn
 	if db.opt.managedTxns {
-		txn = db.NewTransactionAt(math.MaxUint64, false)
+		txn = db.NewTransactionAt(y.MaxTs, false)
 	} else {
 		txn = db.NewTransaction(false)
 	}

@@ -8,6 +8,8 @@ package y
 import (
 	"bytes"
 	"encoding/binary"
+
+	"github.com/dgraph-io/badger/v4/y"
 )
 
 // ValueStruct represents the value info that can be associated with a key, but also the internal
@@ -18,7 +20,9 @@ type ValueStruct struct {
 	ExpiresAt uint64
 	Value     []byte
 
-	Version uint64 // This field is not serialized. Only for internal usage.
+	// Version uint64 // This field is not serialized. Only for internal usage.
+	Version y.CustomTs // This field is not serialized. Only for internal usage.
+
 }
 
 func sizeVarint(x uint64) (n int) {

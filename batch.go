@@ -26,7 +26,7 @@ type WriteBatch struct {
 	err      atomic.Value
 
 	isManaged bool
-	commitTs  uint64
+	commitTs  y.CustomTs
 	finished  bool
 }
 
@@ -124,7 +124,7 @@ func (wb *WriteBatch) WriteList(kvList *pb.KVList) error {
 
 // SetEntryAt is the equivalent of Txn.SetEntry but it also allows setting version for the entry.
 // SetEntryAt can be used only in managed mode.
-func (wb *WriteBatch) SetEntryAt(e *Entry, ts uint64) error {
+func (wb *WriteBatch) SetEntryAt(e *Entry, ts y.CustomTs) error {
 	if !wb.db.opt.managedTxns {
 		return errors.New("SetEntryAt can only be used in managed mode. Use SetEntry instead")
 	}
@@ -164,7 +164,7 @@ func (wb *WriteBatch) Set(k, v []byte) error {
 }
 
 // DeleteAt is equivalent of Txn.Delete but accepts a delete timestamp.
-func (wb *WriteBatch) DeleteAt(k []byte, ts uint64) error {
+func (wb *WriteBatch) DeleteAt(k []byte, ts y.CustomTs) error {
 	e := Entry{Key: k, meta: bitDelete, version: ts}
 	return wb.SetEntry(&e)
 }

@@ -17,6 +17,21 @@ func GetRootAsTableIndex(buf []byte, offset flatbuffers.UOffsetT) *TableIndex {
 	return x
 }
 
+func FinishTableIndexBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+	builder.Finish(offset)
+}
+
+func GetSizePrefixedRootAsTableIndex(buf []byte, offset flatbuffers.UOffsetT) *TableIndex {
+	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+	x := &TableIndex{}
+	x.Init(buf, n+offset+flatbuffers.SizeUint32)
+	return x
+}
+
+func FinishSizePrefixedTableIndexBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+	builder.FinishSizePrefixed(offset)
+}
+
 func (rcv *TableIndex) Init(buf []byte, i flatbuffers.UOffsetT) {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i
@@ -80,16 +95,17 @@ func (rcv *TableIndex) MutateBloomFilter(j int, n byte) bool {
 	return false
 }
 
-func (rcv *TableIndex) MaxVersion() uint64 {
+func (rcv *TableIndex) MaxVersion(obj *CustomTs) *CustomTs {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
 	if o != 0 {
-		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+		x := o + rcv._tab.Pos
+		if obj == nil {
+			obj = new(CustomTs)
+		}
+		obj.Init(rcv._tab.Bytes, x)
+		return obj
 	}
-	return 0
-}
-
-func (rcv *TableIndex) MutateMaxVersion(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(8, n)
+	return nil
 }
 
 func (rcv *TableIndex) KeyCount() uint32 {
@@ -155,8 +171,8 @@ func TableIndexAddBloomFilter(builder *flatbuffers.Builder, bloomFilter flatbuff
 func TableIndexStartBloomFilterVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
 }
-func TableIndexAddMaxVersion(builder *flatbuffers.Builder, maxVersion uint64) {
-	builder.PrependUint64Slot(2, maxVersion, 0)
+func TableIndexAddMaxVersion(builder *flatbuffers.Builder, maxVersion flatbuffers.UOffsetT) {
+	builder.PrependStructSlot(2, flatbuffers.UOffsetT(maxVersion), 0)
 }
 func TableIndexAddKeyCount(builder *flatbuffers.Builder, keyCount uint32) {
 	builder.PrependUint32Slot(3, keyCount, 0)

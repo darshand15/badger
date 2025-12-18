@@ -31,7 +31,7 @@ type Item struct {
 	key       []byte
 	vptr      []byte
 	val       []byte
-	version   uint64
+	version   y.CustomTs
 	expiresAt uint64
 
 	slice *y.Slice // Used only during prefetching.
@@ -66,7 +66,7 @@ func (item *Item) KeyCopy(dst []byte) []byte {
 }
 
 // Version returns the commit timestamp of the item.
-func (item *Item) Version() uint64 {
+func (item *Item) Version() y.CustomTs {
 	return item.version
 }
 
@@ -315,9 +315,9 @@ type IteratorOptions struct {
 	// The following option is used to narrow down the SSTables that iterator
 	// picks up. If Prefix is specified, only tables which could have this
 	// prefix are picked based on their range of keys.
-	prefixIsKey bool   // If set, use the prefix for bloom filter lookup.
-	Prefix      []byte // Only iterate over this given prefix.
-	SinceTs     uint64 // Only read data that has version > SinceTs.
+	prefixIsKey bool       // If set, use the prefix for bloom filter lookup.
+	Prefix      []byte     // Only iterate over this given prefix.
+	SinceTs     y.CustomTs // Only read data that has version > SinceTs.
 }
 
 func (opt *IteratorOptions) compareToPrefix(key []byte) int {
@@ -331,7 +331,7 @@ func (opt *IteratorOptions) compareToPrefix(key []byte) int {
 
 func (opt *IteratorOptions) pickTable(t table.TableInterface) bool {
 	// Ignore this table if its max version is less than the sinceTs.
-	if t.MaxVersion() < opt.SinceTs {
+	if t.MaxVersion().Less(opt.SinceTs) {
 		return false
 	}
 	if len(opt.Prefix) == 0 {
@@ -358,7 +358,7 @@ func (opt *IteratorOptions) pickTables(all []*table.Table) []*table.Table {
 		if opt.SinceTs > 0 {
 			tmp := tables[:0]
 			for _, t := range tables {
-				if t.MaxVersion() < opt.SinceTs {
+				if t.MaxVersion().Less(opt.SinceTs) {
 					continue
 				}
 				tmp = append(tmp, t)
@@ -426,7 +426,7 @@ var DefaultIteratorOptions = IteratorOptions{
 type Iterator struct {
 	iitr   y.Iterator
 	txn    *Txn
-	readTs uint64
+	readTs y.CustomTs
 
 	opt   IteratorOptions
 	item  *Item
@@ -626,7 +626,7 @@ func (it *Iterator) parseItem() bool {
 	// Skip any versions which are beyond the readTs.
 	version := y.ParseTs(key)
 	// Ignore everything that is above the readTs and below or at the sinceTs.
-	if version > it.readTs || (it.opt.SinceTs > 0 && version <= it.opt.SinceTs) {
+	if version.Greater(it.readTs) || (it.opt.SinceTs > 0 && !version.Greater(it.opt.SinceTs)) {
 		mi.Next()
 		return false
 	}
@@ -684,7 +684,7 @@ FILL:
 	// Reverse direction.
 	nextTs := y.ParseTs(mi.Key())
 	mik := y.ParseKey(mi.Key())
-	if nextTs <= it.readTs && bytes.Equal(mik, item.key) {
+	if !nextTs.Greater(it.readTs) && bytes.Equal(mik, item.key) {
 		// This is a valid potential candidate.
 		goto FILL
 	}
@@ -771,7 +771,7 @@ func (it *Iterator) Seek(key []byte) {
 	if !it.opt.Reverse {
 		key = y.KeyWithTs(key, it.txn.readTs)
 	} else {
-		key = y.KeyWithTs(key, 0)
+		key = y.KeyWithTs(key, y.CustomTs{})
 	}
 	it.iitr.Seek(key)
 	it.prefetch()
