@@ -29,6 +29,7 @@ import (
 	"github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/badger/v4/skl"
 	"github.com/dgraph-io/badger/v4/table"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/dgraph-io/ristretto/v2/z"
@@ -424,9 +425,9 @@ func (db *DB) initBannedNamespaces() error {
 	})
 }
 
-func (db *DB) MaxVersion() y.CustomTs {
-	var maxVersion y.CustomTs
-	update := func(a y.CustomTs) {
+func (db *DB) MaxVersion() types.CustomTs {
+	var maxVersion types.CustomTs
+	update := func(a types.CustomTs) {
 		if a.Greater(maxVersion) {
 			maxVersion = a
 		}
@@ -813,7 +814,7 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 			y.NumGetsWithResultsAdd(db.opt.MetricsEnabled, 1)
 			return vs, nil
 		}
-		if vs.Version <= readTs && maxVs.Version < vs.Version {
+		if !(vs.Version.Greater(readTs)) && maxVs.Version.Less(vs.Version) {
 			maxVs = vs
 		}
 	}
@@ -1997,7 +1998,7 @@ func (db *DB) BanNamespace(ns uint64) error {
 	}
 	db.opt.Infof("Banning namespace: %d", ns)
 
-	systemTs := y.CustomTs{EpochID: 1, BrokerID: 1, AssignedTs: 1}
+	systemTs := types.CustomTs{EpochID: 1, BrokerID: 1, AssignedTs: 1}
 
 	// First set the banned namespaces in DB and then update the in-memory structure.
 	key := y.KeyWithTs(append(bannedNsKey, y.U64ToBytes(ns)...), systemTs)
@@ -2143,7 +2144,7 @@ func (db *DB) StreamDB(outOptions Options) error {
 	}
 
 	// Stream contents of DB to the output DB.
-	stream := db.NewStreamAt(math.MaxUint64)
+	stream := db.NewStreamAt(types.MaxTs)
 	stream.LogPrefix = fmt.Sprintf("Streaming DB to new DB at %s", outDir)
 
 	stream.Send = func(buf *z.Buffer) error {

@@ -26,6 +26,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/badger/v4/skl"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -37,7 +38,7 @@ type memTable struct {
 	// TODO: Give skiplist z.Calloc'd []byte.
 	sl         *skl.Skiplist
 	wal        *logFile
-	maxVersion y.CustomTs
+	maxVersion types.CustomTs
 	opt        Options
 	buf        *bytes.Buffer
 }
@@ -447,7 +448,7 @@ func (lf *logFile) iterate(readOnly bool, offset uint32, fn logEntry) (uint32, e
 		lf:           lf,
 	}
 
-	var lastCommit y.CustomTs
+	var lastCommit types.CustomTs
 	var validEndOffset uint32 = offset
 
 	var entries []*Entry
@@ -492,12 +493,12 @@ loop:
 			vptrs = append(vptrs, vp)
 
 		case e.meta&bitFinTxn > 0:
-			txnTs, err := y.ParseCustomTsString(string(e.Value))
+			txnTs, err := types.ParseCustomTsString(string(e.Value))
 			if err != nil || !(lastCommit.Equal(txnTs)) {
 				break loop
 			}
 			// Got the end of txn. Now we can store them.
-			lastCommit = y.CustomTs{}
+			lastCommit = types.CustomTs{}
 			validEndOffset = read.recordOffset
 
 			for i, e := range entries {

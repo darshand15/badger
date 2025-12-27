@@ -25,6 +25,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/pb"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -239,8 +240,8 @@ func seekTotal(txn *badger.Txn) ([]account, error) {
 }
 
 // Range is [lowTs, highTs).
-func findFirstInvalidTxn(db *badger.DB, lowTs, highTs uint64) uint64 {
-	checkAt := func(ts uint64) error {
+func findFirstInvalidTxn(db *badger.DB, lowTs, highTs types.CustomTs) uint64 {
+	checkAt := func(ts types.CustomTs) error {
 		txn := db.NewTransactionAt(ts, false)
 		_, err := seekTotal(txn)
 		txn.Discard()

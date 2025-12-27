@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dgraph-io/badger/v4/y"
+	"github.com/dgraph-io/badger/v4/types"
 )
 
 // withDB opens a DB for the duration of fn. Works for *testing.T and *testing.B.
@@ -43,7 +43,7 @@ func logLatest(t *testing.T, db *DB, key []byte) {
 	t.Helper()
 
 	// Read at "now" to see the latest committed version.
-	rtxn := db.NewTransactionAt(y.MaxTs, false)
+	rtxn := db.NewTransactionAt(types.MaxTs, false)
 	defer rtxn.Discard()
 
 	it, err := rtxn.Get(key)
@@ -68,7 +68,7 @@ func TestLatestWins(t *testing.T) {
 
 		// Write at ts=1
 		{
-			var ts = y.CustomTs{
+			var ts = types.CustomTs{
 				EpochID:    1,
 				BrokerID:   1,
 				AssignedTs: 1,
@@ -84,7 +84,7 @@ func TestLatestWins(t *testing.T) {
 		}
 		// Write at ts=2
 		{
-			var ts = y.CustomTs{
+			var ts = types.CustomTs{
 				EpochID:    1,
 				BrokerID:   1,
 				AssignedTs: 2,
@@ -101,7 +101,7 @@ func TestLatestWins(t *testing.T) {
 		logLatest(t, db, k)
 
 		// Read at max timestamp—should see v2.
-		rtx := db.NewTransactionAt(y.MaxTs, false)
+		rtx := db.NewTransactionAt(types.MaxTs, false)
 		itm, err := rtx.Get(k)
 		if err != nil {
 			t.Fatalf("get: %v", err)
@@ -172,7 +172,7 @@ func BenchmarkLockFreeIngest(b *testing.B) {
 			for pb.Next() {
 				// 2-byte key to avoid huge bloom filters; still causes overwrites.
 				k := []byte{byte(id), byte(time.Now().Nanosecond())}
-				var ts = y.CustomTs{
+				var ts = types.CustomTs{
 					EpochID:    1,
 					BrokerID:   1,
 					AssignedTs: uint32(time.Now().UnixMilli()),
@@ -190,12 +190,12 @@ func BenchmarkLockFreeIngest(b *testing.B) {
 
 func TestTimestampScenarios(t *testing.T) {
 	type writeOp struct {
-		ts  y.CustomTs
+		ts  types.CustomTs
 		key []byte
 		val []byte // nil = delete
 	}
 	type readOp struct {
-		ts      y.CustomTs
+		ts      types.CustomTs
 		key     []byte
 		wantVal []byte
 		wantErr bool
@@ -211,47 +211,47 @@ func TestTimestampScenarios(t *testing.T) {
 		{
 			name: "basic overwrite ascending",
 			writes: []writeOp{
-				{y.CustomTs{AssignedTs: 1}, []byte("a"), []byte("v1")},
-				{y.CustomTs{AssignedTs: 2}, []byte("a"), []byte("v2")},
+				{types.CustomTs{AssignedTs: 1}, []byte("a"), []byte("v1")},
+				{types.CustomTs{AssignedTs: 2}, []byte("a"), []byte("v2")},
 			},
 			reads: []readOp{
-				{y.CustomTs{AssignedTs: 1}, []byte("a"), []byte("v1"), false},
-				{y.CustomTs{AssignedTs: 2}, []byte("a"), []byte("v2"), false},
-				{y.MaxTs, []byte("a"), []byte("v2"), false},
+				{types.CustomTs{AssignedTs: 1}, []byte("a"), []byte("v1"), false},
+				{types.CustomTs{AssignedTs: 2}, []byte("a"), []byte("v2"), false},
+				{types.MaxTs, []byte("a"), []byte("v2"), false},
 			},
 		},
 		{
 			name: "parallel overlapping timestamps",
 			writes: []writeOp{
-				{y.CustomTs{AssignedTs: 5}, []byte("b"), []byte("x")},
-				{y.CustomTs{AssignedTs: 6}, []byte("b"), []byte("y")},
+				{types.CustomTs{AssignedTs: 5}, []byte("b"), []byte("x")},
+				{types.CustomTs{AssignedTs: 6}, []byte("b"), []byte("y")},
 			},
 			reads: []readOp{
-				{y.CustomTs{AssignedTs: 5}, []byte("b"), []byte("x"), false},
-				{y.CustomTs{AssignedTs: 6}, []byte("b"), []byte("y"), false},
-				{y.MaxTs, []byte("b"), []byte("y"), false},
+				{types.CustomTs{AssignedTs: 5}, []byte("b"), []byte("x"), false},
+				{types.CustomTs{AssignedTs: 6}, []byte("b"), []byte("y"), false},
+				{types.MaxTs, []byte("b"), []byte("y"), false},
 			},
 		},
 		{
 			name: "read snapshot in between",
 			writes: []writeOp{
-				{y.CustomTs{AssignedTs: 10}, []byte("c"), []byte("v1")},
-				{y.CustomTs{AssignedTs: 20}, []byte("c"), []byte("v2")},
+				{types.CustomTs{AssignedTs: 10}, []byte("c"), []byte("v1")},
+				{types.CustomTs{AssignedTs: 20}, []byte("c"), []byte("v2")},
 			},
 			reads: []readOp{
-				{y.CustomTs{AssignedTs: 15}, []byte("c"), []byte("v1"), false},
-				{y.CustomTs{AssignedTs: 25}, []byte("c"), []byte("v2"), false},
+				{types.CustomTs{AssignedTs: 15}, []byte("c"), []byte("v1"), false},
+				{types.CustomTs{AssignedTs: 25}, []byte("c"), []byte("v2"), false},
 			},
 		},
 		{
 			name: "delete semantics",
 			writes: []writeOp{
-				{y.CustomTs{AssignedTs: 30}, []byte("d"), []byte("alive")},
-				{y.CustomTs{AssignedTs: 40}, []byte("d"), nil}, // tombstone
+				{types.CustomTs{AssignedTs: 30}, []byte("d"), []byte("alive")},
+				{types.CustomTs{AssignedTs: 40}, []byte("d"), nil}, // tombstone
 			},
 			reads: []readOp{
-				{y.CustomTs{AssignedTs: 35}, []byte("d"), []byte("alive"), false},
-				{y.CustomTs{AssignedTs: 45}, []byte("d"), nil, true},
+				{types.CustomTs{AssignedTs: 35}, []byte("d"), []byte("alive"), false},
+				{types.CustomTs{AssignedTs: 45}, []byte("d"), nil, true},
 			},
 		},
 		{
@@ -262,13 +262,13 @@ func TestTimestampScenarios(t *testing.T) {
 					key := make([]byte, 4)
 					binary.BigEndian.PutUint32(key, uint32(i))
 					// w = append(w, writeOp{uint64(i), []byte(fmt.Sprintf("%d", i)), []byte("cold")})
-					w = append(w, writeOp{y.CustomTs{AssignedTs: uint32(i)}, key, []byte("cold")})
+					w = append(w, writeOp{types.CustomTs{AssignedTs: uint32(i)}, key, []byte("cold")})
 				}
 				for i := 100; i < 110; i++ {
 					key := make([]byte, 4)
 					binary.BigEndian.PutUint32(key, uint32(i-99))
 					// w = append(w, writeOp{uint64(i), []byte(fmt.Sprintf("%d", i-99)), []byte("hot")})
-					w = append(w, writeOp{y.CustomTs{AssignedTs: uint32(i)}, key, []byte("hot")})
+					w = append(w, writeOp{types.CustomTs{AssignedTs: uint32(i)}, key, []byte("hot")})
 				}
 				return w
 			}(),
@@ -276,8 +276,8 @@ func TestTimestampScenarios(t *testing.T) {
 				var r []readOp
 				key := make([]byte, 4)
 				binary.BigEndian.PutUint32(key, uint32(1))
-				r = append(r, readOp{y.MaxTs, key, []byte("hot"), false})
-				r = append(r, readOp{y.CustomTs{AssignedTs: 5}, key, []byte("cold"), false})
+				r = append(r, readOp{types.MaxTs, key, []byte("hot"), false})
+				r = append(r, readOp{types.CustomTs{AssignedTs: 5}, key, []byte("cold"), false})
 				return r
 			}(),
 			triggerFlush:   true,
@@ -286,38 +286,38 @@ func TestTimestampScenarios(t *testing.T) {
 		{
 			name: "interleaved multi-key",
 			writes: []writeOp{
-				{y.CustomTs{AssignedTs: 50}, []byte("e"), []byte("v1")},
-				{y.CustomTs{AssignedTs: 51}, []byte("f"), []byte("v2")},
-				{y.CustomTs{AssignedTs: 52}, []byte("e"), []byte("v3")},
+				{types.CustomTs{AssignedTs: 50}, []byte("e"), []byte("v1")},
+				{types.CustomTs{AssignedTs: 51}, []byte("f"), []byte("v2")},
+				{types.CustomTs{AssignedTs: 52}, []byte("e"), []byte("v3")},
 			},
 			reads: []readOp{
-				{y.CustomTs{AssignedTs: 51}, []byte("e"), []byte("v1"), false},
-				{y.CustomTs{AssignedTs: 53}, []byte("e"), []byte("v3"), false},
-				{y.MaxTs, []byte("f"), []byte("v2"), false},
+				{types.CustomTs{AssignedTs: 51}, []byte("e"), []byte("v1"), false},
+				{types.CustomTs{AssignedTs: 53}, []byte("e"), []byte("v3"), false},
+				{types.MaxTs, []byte("f"), []byte("v2"), false},
 			},
 		},
 		{
 			name: "partitioned fanout (if enabled)",
 			writes: []writeOp{
-				{y.CustomTs{AssignedTs: 60}, []byte("p1:k"), []byte("A")},
-				{y.CustomTs{AssignedTs: 61}, []byte("p2:k"), []byte("B")},
+				{types.CustomTs{AssignedTs: 60}, []byte("p1:k"), []byte("A")},
+				{types.CustomTs{AssignedTs: 61}, []byte("p2:k"), []byte("B")},
 			},
 			reads: []readOp{
-				{y.MaxTs, []byte("p1:k"), []byte("A"), false},
-				{y.MaxTs, []byte("p2:k"), []byte("B"), false},
+				{types.MaxTs, []byte("p1:k"), []byte("A"), false},
+				{types.MaxTs, []byte("p2:k"), []byte("B"), false},
 			},
 			triggerFlush: true,
 		},
 		{
 			name: "compaction preserves latest",
 			writes: []writeOp{
-				{y.CustomTs{AssignedTs: 70}, []byte("g"), []byte("v70")},
-				{y.CustomTs{AssignedTs: 80}, []byte("g"), []byte("v80")},
-				{y.CustomTs{AssignedTs: 90}, []byte("g"), []byte("v90")},
+				{types.CustomTs{AssignedTs: 70}, []byte("g"), []byte("v70")},
+				{types.CustomTs{AssignedTs: 80}, []byte("g"), []byte("v80")},
+				{types.CustomTs{AssignedTs: 90}, []byte("g"), []byte("v90")},
 			},
 			reads: []readOp{
-				{y.MaxTs, []byte("g"), []byte("v90"), false},
-				{y.CustomTs{AssignedTs: 75}, []byte("g"), []byte("v70"), false},
+				{types.MaxTs, []byte("g"), []byte("v90"), false},
+				{types.CustomTs{AssignedTs: 75}, []byte("g"), []byte("v70"), false},
 			},
 			triggerFlush:   true,
 			triggerCompact: true,
@@ -325,11 +325,11 @@ func TestTimestampScenarios(t *testing.T) {
 		{
 			name: "concurrent conflicting writes",
 			writes: []writeOp{
-				{y.CustomTs{AssignedTs: 100}, []byte("h"), []byte("v1")},
-				{y.CustomTs{AssignedTs: 101}, []byte("h"), []byte("v2")},
+				{types.CustomTs{AssignedTs: 100}, []byte("h"), []byte("v1")},
+				{types.CustomTs{AssignedTs: 101}, []byte("h"), []byte("v2")},
 			},
 			reads: []readOp{
-				{y.MaxTs, []byte("h"), []byte("v2"), false},
+				{types.MaxTs, []byte("h"), []byte("v2"), false},
 			},
 		},
 	}

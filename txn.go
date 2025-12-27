@@ -15,6 +15,7 @@ import (
 
 	"github.com/pkg/errors"
 
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -28,7 +29,7 @@ type oracle struct {
 	// channel in the same order as their commit timestamps.
 	sync.Mutex
 	writeChLock sync.Mutex
-	nextTxnTs   y.CustomTs
+	nextTxnTs   types.CustomTs
 	txnMarkLock sync.Mutex
 
 	// Used to block NewTransaction, so all previous commits are visible to a new read.
@@ -36,20 +37,20 @@ type oracle struct {
 
 	// Either of these is used to determine which versions can be permanently
 	// discarded during compaction.
-	discardTs y.CustomTs   // Used by ManagedDB.
-	readMark  *y.WaterMark // Used by DB.
+	discardTs types.CustomTs // Used by ManagedDB.
+	readMark  *y.WaterMark   // Used by DB.
 
 	// committedTxns contains all committed writes (contains fingerprints
 	// of keys written and their latest commit counter).
 	committedTxns []committedTxn
-	lastCleanupTs y.CustomTs
+	lastCleanupTs types.CustomTs
 
 	// closer is used to stop watermarks.
 	closer *z.Closer
 }
 
 type committedTxn struct {
-	ts y.CustomTs
+	ts types.CustomTs
 	// ConflictKeys Keeps track of the entries written at timestamp ts.
 	conflictKeys map[uint64]struct{}
 }
@@ -75,12 +76,12 @@ func (o *oracle) Stop() {
 	o.closer.SignalAndWait()
 }
 
-func (o *oracle) readTs() y.CustomTs {
+func (o *oracle) readTs() types.CustomTs {
 	if o.isManaged {
 		panic("ReadTs should not be retrieved for managed DB")
 	}
 
-	var readTs y.CustomTs
+	var readTs types.CustomTs
 	o.Lock()
 	// readTs = o.nextTxnTs - 1
 	readTs = o.nextTxnTs
@@ -96,7 +97,7 @@ func (o *oracle) readTs() y.CustomTs {
 	return readTs
 }
 
-func (o *oracle) nextTs() y.CustomTs {
+func (o *oracle) nextTs() types.CustomTs {
 	o.Lock()
 	defer o.Unlock()
 	return o.nextTxnTs
@@ -113,7 +114,7 @@ func (o *oracle) incrementNextTs() {
 
 // Any deleted or invalid versions at or below ts would be discarded during
 // compaction to reclaim disk space in LSM tree and thence value log.
-func (o *oracle) setDiscardTs(ts y.CustomTs) {
+func (o *oracle) setDiscardTs(ts types.CustomTs) {
 	o.Lock()
 	defer o.Unlock()
 	o.discardTs = ts
@@ -121,7 +122,7 @@ func (o *oracle) setDiscardTs(ts y.CustomTs) {
 
 }
 
-func (o *oracle) discardAtOrBelow() y.CustomTs {
+func (o *oracle) discardAtOrBelow() types.CustomTs {
 	if o.isManaged {
 		o.Lock()
 		defer o.Unlock()
@@ -157,16 +158,16 @@ func (o *oracle) hasConflict(txn *Txn) bool {
 	return false
 }
 
-func (o *oracle) newCommitTs(txn *Txn) (y.CustomTs, bool) {
+func (o *oracle) newCommitTs(txn *Txn) (types.CustomTs, bool) {
 	o.Lock()
 	defer o.Unlock()
 
 	if o.hasConflict(txn) {
 		// return 0, true
-		return y.CustomTs{}, true
+		return types.CustomTs{}, true
 	}
 
-	var ts y.CustomTs
+	var ts types.CustomTs
 	if !o.isManaged {
 		o.doneRead(txn)
 		o.cleanupCommittedTransactions()
@@ -207,7 +208,7 @@ func (o *oracle) cleanupCommittedTransactions() { // Must be called under o.Lock
 		return
 	}
 	// Same logic as discardAtOrBelow but unlocked
-	var maxReadTs y.CustomTs
+	var maxReadTs types.CustomTs
 	if o.isManaged {
 		maxReadTs = o.discardTs
 	} else {
@@ -235,7 +236,7 @@ func (o *oracle) cleanupCommittedTransactions() { // Must be called under o.Lock
 	o.committedTxns = tmp
 }
 
-func (o *oracle) doneCommit(cts y.CustomTs) {
+func (o *oracle) doneCommit(cts types.CustomTs) {
 	if o.isManaged {
 		return
 	}
@@ -245,8 +246,8 @@ func (o *oracle) doneCommit(cts y.CustomTs) {
 
 // Txn represents a Badger transaction.
 type Txn struct {
-	readTs   y.CustomTs
-	commitTs y.CustomTs
+	readTs   types.CustomTs
+	commitTs types.CustomTs
 	size     int64
 	count    int64
 	db       *DB
@@ -268,7 +269,7 @@ type Txn struct {
 type pendingWritesIterator struct {
 	entries  []*Entry
 	nextIdx  int
-	readTs   y.CustomTs
+	readTs   types.CustomTs
 	reversed bool
 }
 
@@ -811,7 +812,7 @@ func (txn *Txn) CommitWith(cb func(error)) {
 }
 
 // ReadTs returns the read timestamp of the transaction.
-func (txn *Txn) ReadTs() y.CustomTs {
+func (txn *Txn) ReadTs() types.CustomTs {
 	return txn.readTs
 }
 
@@ -872,7 +873,7 @@ func (db *DB) View(fn func(txn *Txn) error) error {
 	}
 	var txn *Txn
 	if db.opt.managedTxns {
-		txn = db.NewTransactionAt(y.MaxTs, false)
+		txn = db.NewTransactionAt(types.MaxTs, false)
 	} else {
 		txn = db.NewTransaction(false)
 	}

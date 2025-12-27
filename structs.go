@@ -11,7 +11,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/dgraph-io/badger/v4/y"
+	"github.com/dgraph-io/badger/v4/types"
 )
 
 type valuePointer struct {
@@ -132,7 +132,7 @@ type Entry struct {
 	Key       []byte
 	Value     []byte
 	ExpiresAt uint64 // time.Unix
-	version   y.CustomTs
+	version   types.CustomTs
 	offset    uint32 // offset is an internal field.
 	UserMeta  byte
 	meta      byte

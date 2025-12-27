@@ -21,6 +21,7 @@ import (
 	"github.com/dgraph-io/badger/v4/fb"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/pb"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -75,8 +76,8 @@ type Builder struct {
 	lenOffsets    uint32
 	keyHashes     []uint32 // Used for building the bloomfilter.
 	opts          *Options
-	maxVersion    y.CustomTs
-	minVersion    y.CustomTs
+	maxVersion    types.CustomTs
+	minVersion    types.CustomTs
 	onDiskSize    uint32
 	staleDataSize int
 
@@ -123,7 +124,7 @@ func NewTableBuilder(opts Options) *Builder {
 	b := &Builder{
 		alloc:      opts.AllocPool.Get(sz, "TableBuilder"),
 		opts:       &opts,
-		minVersion: y.MaxTs,
+		minVersion: types.MaxTs,
 	}
 	b.alloc.Tag = "Builder"
 	b.curBlock = &bblock{

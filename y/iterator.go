@@ -9,7 +9,7 @@ import (
 	"bytes"
 	"encoding/binary"
 
-	"github.com/dgraph-io/badger/v4/y"
+	"github.com/dgraph-io/badger/v4/types"
 )
 
 // ValueStruct represents the value info that can be associated with a key, but also the internal
@@ -21,7 +21,7 @@ type ValueStruct struct {
 	Value     []byte
 
 	// Version uint64 // This field is not serialized. Only for internal usage.
-	Version y.CustomTs // This field is not serialized. Only for internal usage.
+	Version types.CustomTs // This field is not serialized. Only for internal usage.
 
 }
 

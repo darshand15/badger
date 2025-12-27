@@ -7,6 +7,7 @@ package badger
 
 import (
 	"github.com/dgraph-io/badger/v4/table"
+	"github.com/dgraph-io/badger/v4/types"
 
 	"bytes"
 	"context"
@@ -1013,7 +1014,7 @@ func containsPrefix(table *table.Table, prefix []byte) bool {
 		defer ti.Close()
 		// In table iterator's Seek, we assume that key has version in last 8 bytes. We set
 		// version=0 (ts=math.MaxUint64), so that we don't skip the key prefixed with prefix.
-		ti.Seek(y.KeyWithTs(prefix, y.MaxTs))
+		ti.Seek(y.KeyWithTs(prefix, types.MaxTs))
 		return bytes.HasPrefix(ti.Key(), prefix)
 	}
 
@@ -1093,7 +1094,7 @@ func (s *levelsController) addSplits(cd *compactDef) {
 			// Top table is [A1...C3(deleted)]
 			// bot table is [B1....C2]
 			// It will generate a split [A1 ... C0], including any records of Key C.
-			right := y.KeyWithTs(y.ParseKey(t.Biggest()), y.CustomTs{})
+			right := y.KeyWithTs(y.ParseKey(t.Biggest()), types.CustomTs{})
 			addRange(right)
 		}
 	}
@@ -1679,7 +1680,7 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 						return y.ValueStruct{}, ErrKeyNotFound
 					}
 					// Pick the newest visible version <= readTs
-					if val_version > maxVs.Version {
+					if val_version.Greater(maxVs.Version) {
 						maxVs = y.ValueStruct{
 							Value:     val.Value,
 							Meta:      val.Meta,
@@ -1768,7 +1769,7 @@ type TableInfo struct {
 	OnDiskSize       uint32
 	StaleDataSize    uint32
 	UncompressedSize uint32
-	MaxVersion       y.CustomTs
+	MaxVersion       types.CustomTs
 	IndexSz          int
 	BloomFilterSize  int
 }
@@ -2029,7 +2030,7 @@ func (s *levelsController) promotePartition(level, pid int) error {
 	}
 
 	// Compute min/max versions across all detached tables
-	var minV, maxV y.CustomTs = old[0].MinTimestamp(), old[0].MaxTimestamp()
+	var minV, maxV types.CustomTs = old[0].MinTimestamp(), old[0].MaxTimestamp()
 	for _, t := range old[1:] {
 		if t.MinTimestamp().Less(minV) {
 			minV = t.MinTimestamp()
@@ -2064,7 +2065,7 @@ func (s *levelsController) promotePartition(level, pid int) error {
 			vp.Decode(vs.Value)
 		}
 
-		if vs.Version <= Tth {
+		if !(vs.Version.Greater(Tth)) {
 			child := getPartitionID(level+1, key, fanOut)
 			coldBuilders[child].Add(key, vs, vp.Len)
 		} else {

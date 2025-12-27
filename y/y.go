@@ -16,29 +16,14 @@ import (
 	"os"
 	"reflect"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 	"unsafe"
 
 	"github.com/dgraph-io/badger/v4/pb"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
-
-const TsSize = 12
-
-type CustomTs struct {
-	EpochID    uint32
-	BrokerID   uint32
-	AssignedTs uint32
-}
-
-// MaxTs acts as the "Infinity" timestamp for iterators
-var MaxTs = CustomTs{
-	EpochID:    math.MaxUint32,
-	BrokerID:   math.MaxUint32,
-	AssignedTs: math.MaxUint32,
-}
 
 var (
 	// ErrEOF indicates an end of file when trying to read from a memory mapped file
@@ -68,158 +53,6 @@ var (
 	// CastagnoliCrcTable is a CRC32 polynomial table
 	CastagnoliCrcTable = crc32.MakeTable(crc32.Castagnoli)
 )
-
-// ToBytes encodes the struct into a 12-byte slice with bitwise inversion
-func (t CustomTs) ToBytes() []byte {
-	buf := make([]byte, TsSize)
-
-	// Encode fields in significance order (Epoch > Broker > AssignedTS)
-	binary.BigEndian.PutUint32(buf[0:4], t.EpochID)
-	binary.BigEndian.PutUint32(buf[4:8], t.BrokerID)
-	binary.BigEndian.PutUint32(buf[8:12], t.AssignedTs)
-
-	// Invert bits for descending sort order in LSM tree
-	for i := range buf {
-		buf[i] = ^buf[i]
-	}
-	return buf
-}
-
-// ParseTsFromBytes decodes the 12 bytes back into the struct
-func ParseTsFromBytes(buf []byte) CustomTs {
-	raw := make([]byte, TsSize)
-	// Invert bits back
-	for i, b := range buf {
-		raw[i] = ^b
-	}
-
-	return CustomTs{
-		EpochID:    binary.BigEndian.Uint32(raw[0:4]),
-		BrokerID:   binary.BigEndian.Uint32(raw[4:8]),
-		AssignedTs: binary.BigEndian.Uint32(raw[8:12]),
-	}
-}
-
-func (t CustomTs) Less(o CustomTs) bool {
-	if t.EpochID != o.EpochID {
-		return t.EpochID < o.EpochID
-	}
-	if t.BrokerID != o.BrokerID {
-		return t.BrokerID < o.BrokerID
-	}
-	return t.AssignedTs < o.AssignedTs
-}
-
-func (t CustomTs) Greater(o CustomTs) bool {
-	return o.Less(t)
-}
-
-func (t CustomTs) Equal(o CustomTs) bool {
-	return t.EpochID == o.EpochID && t.BrokerID == o.BrokerID && t.AssignedTs == o.AssignedTs
-}
-
-func (t CustomTs) IsZero() bool {
-	return t.EpochID == 0 && t.BrokerID == 0 && t.AssignedTs == 0
-}
-
-// Incr (equivalent to ++)
-// It increments AssignedTs. If that overflows, it increments BrokerID, then EpochID.
-func (t CustomTs) Incr() CustomTs {
-	t.AssignedTs++
-	if t.AssignedTs == 0 { // Overflow wrapped to 0
-		t.BrokerID++
-		if t.BrokerID == 0 { // Overflow wrapped to 0
-			t.EpochID++
-		}
-	}
-	return t
-}
-
-// Decr (equivalent to -1)
-// It decrements AssignedTs. If that underflows, it borrows from BrokerID, then EpochID.
-func (t CustomTs) Decr() CustomTs {
-	if t.AssignedTs == 0 {
-		t.AssignedTs = math.MaxUint32 // Wrap to max
-		if t.BrokerID == 0 {
-			t.BrokerID = math.MaxUint32 // Wrap to max
-			t.EpochID--                 // Underflow on EpochID is allowed (wraps to MaxUint32) just like uint64
-		} else {
-			t.BrokerID--
-		}
-	} else {
-		t.AssignedTs--
-	}
-	return t
-}
-
-// Avg calculates the midpoint between t and other: (t + other) / 2
-func (t CustomTs) Avg(other CustomTs) CustomTs {
-	// Sum lowest parts (AssignedTs)
-	// Cast to uint64 to prevent overflow during addition
-	sumTS := uint64(t.AssignedTs) + uint64(other.AssignedTs)
-	carryTS := sumTS >> 32 // Get the carry (0 or 1)
-
-	// Sum middle parts (BrokerID) including carry
-	sumBroker := uint64(t.BrokerID) + uint64(other.BrokerID) + carryTS
-	carryBroker := sumBroker >> 32 // Get the carry
-
-	// Sum highest parts (EpochID) including carry
-	sumEpoch := uint64(t.EpochID) + uint64(other.EpochID) + carryBroker
-
-	// Divide total sum by 2 (Bitwise Right Shift 1)
-	// We propagate the remainder (lowest bit) of each upper field
-	// to the highest bit of the next lower field.
-
-	avgEpoch := uint32(sumEpoch >> 1)
-	remEpoch := uint32(sumEpoch & 1) // Remainder from Epoch division
-
-	// Shift Broker, OR in the bit from Epoch
-	avgBroker := (uint32(sumBroker) >> 1) | (remEpoch << 31)
-	remBroker := uint32(sumBroker & 1) // Remainder from Broker division
-
-	// Shift AssignedTs, OR in the bit from Broker
-	avgTS := (uint32(sumTS) >> 1) | (remBroker << 31)
-
-	return CustomTs{
-		EpochID:    avgEpoch,
-		BrokerID:   avgBroker,
-		AssignedTs: avgTS,
-	}
-}
-
-// String returns a readable representation of the timestamp (e.g., "1-5-100")
-func (t CustomTs) String() string {
-	return fmt.Sprintf("%d-%d-%d", t.EpochID, t.BrokerID, t.AssignedTs)
-}
-
-// ParseCustomTsString parses a string in "Epoch-Broker-TS" format.
-func ParseCustomTsString(s string) (CustomTs, error) {
-	parts := strings.Split(s, "-")
-	if len(parts) != 3 {
-		return CustomTs{}, fmt.Errorf("invalid custom timestamp format: %s", s)
-	}
-
-	e, err := strconv.ParseUint(parts[0], 10, 32)
-	if err != nil {
-		return CustomTs{}, err
-	}
-
-	b, err := strconv.ParseUint(parts[1], 10, 32)
-	if err != nil {
-		return CustomTs{}, err
-	}
-
-	ts, err := strconv.ParseUint(parts[2], 10, 32)
-	if err != nil {
-		return CustomTs{}, err
-	}
-
-	return CustomTs{
-		EpochID:    uint32(e),
-		BrokerID:   uint32(b),
-		AssignedTs: uint32(ts),
-	}, nil
-}
 
 // OpenExistingFile opens an existing file, errors if it doesn't exist.
 func OpenExistingFile(filename string, flags Flags) (*os.File, error) {
@@ -274,8 +107,8 @@ func Copy(a []byte) []byte {
 }
 
 // KeyWithTs generates a new key by appending ts to key.
-func KeyWithTs(key []byte, ts CustomTs) []byte {
-	out := make([]byte, len(key)+TsSize)
+func KeyWithTs(key []byte, ts types.CustomTs) []byte {
+	out := make([]byte, len(key)+types.TsSize)
 	copy(out, key)
 	// Get the slice corresponding to the timestamp part
 	tsBytes := out[len(key):]
@@ -293,22 +126,22 @@ func KeyWithTs(key []byte, ts CustomTs) []byte {
 	return out
 }
 
-// ParseTs parses the CustomTs from the key bytes.
-func ParseTs(key []byte) CustomTs {
-	if len(key) <= TsSize {
-		return CustomTs{} // Return zero value
+// ParseTs parses the types.CustomTs from the key bytes.
+func ParseTs(key []byte) types.CustomTs {
+	if len(key) <= types.TsSize {
+		return types.CustomTs{} // Return zero value
 	}
 
 	// Extract the encoded bytes
-	encoded := key[len(key)-TsSize:]
+	encoded := key[len(key)-types.TsSize:]
 
 	// Invert bits back to get the original values
-	raw := make([]byte, TsSize)
+	raw := make([]byte, types.TsSize)
 	for i, b := range encoded {
 		raw[i] = ^b
 	}
 
-	return CustomTs{
+	return types.CustomTs{
 		EpochID:    binary.BigEndian.Uint32(raw[0:4]),
 		BrokerID:   binary.BigEndian.Uint32(raw[4:8]),
 		AssignedTs: binary.BigEndian.Uint32(raw[8:12]),
@@ -321,8 +154,8 @@ func ParseTs(key []byte) CustomTs {
 // All keys should have timestamp.
 func CompareKeys(key1, key2 []byte) int {
 	// Compare the User Key (everything except the last 12 bytes)
-	k1Len := len(key1) - TsSize
-	k2Len := len(key2) - TsSize
+	k1Len := len(key1) - types.TsSize
+	k2Len := len(key2) - types.TsSize
 
 	if cmp := bytes.Compare(key1[:k1Len], key2[:k2Len]); cmp != 0 {
 		return cmp
@@ -341,10 +174,10 @@ func ParseKey(key []byte) []byte {
 		return nil
 	}
 
-	if len(key) < TsSize {
+	if len(key) < types.TsSize {
 		return key
 	}
-	return key[:len(key)-TsSize]
+	return key[:len(key)-types.TsSize]
 }
 
 // SameKey checks for key equality ignoring the version timestamp suffix.

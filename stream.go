@@ -17,6 +17,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4/pb"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -81,8 +82,8 @@ type Stream struct {
 	Send func(buf *z.Buffer) error
 
 	// Read data above the sinceTs. All keys with version =< sinceTs will be ignored.
-	SinceTs      y.CustomTs
-	readTs       y.CustomTs
+	SinceTs      types.CustomTs
+	readTs       types.CustomTs
 	db           *DB
 	rangeCh      chan keyRange
 	kvChan       chan *z.Buffer
@@ -167,7 +168,7 @@ func (st *Stream) produceKVs(ctx context.Context, threadId int) error {
 	defer st.numProducers.Add(-1)
 
 	var txn *Txn
-	if st.readTs.Greater(y.CustomTs{}) {
+	if st.readTs.Greater(types.CustomTs{}) {
 		txn = st.db.NewTransactionAt(st.readTs, false)
 	} else {
 		txn = st.db.NewTransaction(false)
@@ -463,7 +464,7 @@ func (db *DB) NewStream() *Stream {
 }
 
 // NewStreamAt creates a new Stream at a particular timestamp. Should only be used with managed DB.
-func (db *DB) NewStreamAt(readTs y.CustomTs) *Stream {
+func (db *DB) NewStreamAt(readTs types.CustomTs) *Stream {
 	if !db.opt.managedTxns {
 		panic("This API can only be called in managed mode.")
 	}

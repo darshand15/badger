@@ -16,6 +16,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/badger/v4/table"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -36,7 +37,7 @@ type StreamWriter struct {
 	db         *DB
 	done       func()
 	throttle   *y.Throttle
-	maxVersion y.CustomTs
+	maxVersion types.CustomTs
 	writers    map[uint32]*sortedWriter
 	prevLevel  int
 }
@@ -156,7 +157,7 @@ func (sw *StreamWriter) Write(buf *z.Buffer) error {
 		}
 
 		sw.writeLock.Lock()
-		if sw.maxVersion < kv.Version {
+		if sw.maxVersion.Less(kv.Version) {
 			sw.maxVersion = kv.Version
 		}
 		if sw.prevLevel == 0 {
