@@ -8,7 +8,6 @@ package badger
 import (
 	"bytes"
 	"fmt"
-	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/table"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 )
 
@@ -29,7 +29,7 @@ type tableMock struct {
 func (tm *tableMock) Smallest() []byte             { return tm.left }
 func (tm *tableMock) Biggest() []byte              { return tm.right }
 func (tm *tableMock) DoesNotHave(hash uint32) bool { return false }
-func (tm *tableMock) MaxVersion() uint64           { return math.MaxUint64 }
+func (tm *tableMock) MaxVersion() types.CustomTs   { return types.MaxTs }
 
 func TestPickTables(t *testing.T) {
 	opt := DefaultIteratorOptions
@@ -37,13 +37,13 @@ func TestPickTables(t *testing.T) {
 	within := func(prefix, left, right []byte) {
 		opt.Prefix = prefix
 		// PickTable expects smallest and biggest to contain timestamps.
-		tm := &tableMock{left: y.KeyWithTs(left, 1), right: y.KeyWithTs(right, 1)}
+		tm := &tableMock{left: y.KeyWithTs(left, types.CustomTs{AssignedTs: 1}), right: y.KeyWithTs(right, types.CustomTs{AssignedTs: 1})}
 		require.True(t, opt.pickTable(tm), "within failed for %b %b %b\n", prefix, left, right)
 	}
 	outside := func(prefix, left, right string) {
 		opt.Prefix = []byte(prefix)
 		// PickTable expects smallest and biggest to contain timestamps.
-		tm := &tableMock{left: y.KeyWithTs([]byte(left), 1), right: y.KeyWithTs([]byte(right), 1)}
+		tm := &tableMock{left: y.KeyWithTs([]byte(left), types.CustomTs{AssignedTs: 1}), right: y.KeyWithTs([]byte(right), types.CustomTs{AssignedTs: 1})}
 		require.False(t, opt.pickTable(tm), "outside failed for %b %b %b", prefix, left, right)
 	}
 	within([]byte("abc"), []byte("ab"), []byte("ad"))
@@ -132,7 +132,21 @@ func TestIterateSinceTs(t *testing.T) {
 		require.NoError(t, batch.Flush())
 
 		maxVs := db.MaxVersion()
-		sinceTs := maxVs - maxVs/10
+
+		// Calculate sinceTs.
+		// Original logic: sinceTs := maxVs - maxVs/10
+		// Logic with CustomTs: We only care about decreasing the AssignedTs part
+		// because that's what likely increments in this test.
+		// We'll approximate "maxVs/10" by dividing the AssignedTs component.
+		// NOTE: This assumes Epoch/Broker are static or handled elsewhere.
+
+		decrement := maxVs.AssignedTs / 10
+		sinceTs := types.CustomTs{
+			EpochID:    maxVs.EpochID,
+			BrokerID:   maxVs.BrokerID,
+			AssignedTs: maxVs.AssignedTs - decrement,
+		}
+
 		iopt := DefaultIteratorOptions
 		iopt.SinceTs = sinceTs
 
@@ -142,7 +156,12 @@ func TestIterateSinceTs(t *testing.T) {
 
 			for it.Rewind(); it.Valid(); it.Next() {
 				i := it.Item()
-				require.GreaterOrEqual(t, i.Version(), sinceTs)
+				// Use .Greater or .Equal for comparison (Assuming GreaterOrEqual helper isn't available)
+				// Or construct the assertion logic manually if require.GreaterOrEqual doesn't support the struct directly.
+				// Since require uses reflection, it *might* panic on struct comparison if they aren't standard ordered types.
+				// Safer to use bool check:
+				isGreaterOrEqual := i.Version().Greater(sinceTs) || i.Version().Equal(sinceTs)
+				require.True(t, isGreaterOrEqual, "Version %s should be >= sinceTs %s", i.Version(), sinceTs)
 			}
 			return nil
 		}))

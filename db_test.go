@@ -25,6 +25,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/pb"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -454,7 +455,7 @@ func TestConcurrentWriteAndFlush(t *testing.T) {
 		// Step B: HACK - Manually overwrite the unexported 'readTs'.
 		// We set it to MaxUint64 to force the iterator to see ALL data,
 		// bypassing any lag in the Oracle's watermark.
-		txn.readTs = math.MaxUint64
+		txn.readTs = types.MaxTs
 
 		opt := DefaultIteratorOptions
 		opt.PrefetchValues = true
@@ -525,7 +526,7 @@ func TestConcurrentWriteAndGet(t *testing.T) {
 		defer txn.Discard()
 
 		// HACK: Force the transaction to see ALL data.
-		txn.readTs = math.MaxUint64
+		txn.readTs = types.MaxTs
 
 		for i := 0; i < n; i++ {
 			for j := 0; j < m; j++ {
@@ -579,7 +580,7 @@ func TestConcurrentRWSameKey(t *testing.T) {
 				defer wg.Done()
 
 				if i == 0 {
-					txn := db.NewTransactionAt(10, false)
+					txn := db.NewTransactionAt(types.CustomTs{AssignedTs: 10}, false)
 					itm, err := txn.Get([]byte(fmt.Sprintf("k%05d_%08d", 1, 1)))
 
 					if err != nil {
@@ -591,10 +592,10 @@ func TestConcurrentRWSameKey(t *testing.T) {
 
 				} else {
 
-					txn := db.NewTransactionAt(15, true)
+					txn := db.NewTransactionAt(types.CustomTs{AssignedTs: 15}, true)
 					_ = txn.Set([]byte(fmt.Sprintf("k%05d_%08d", 1, 1)), []byte(fmt.Sprintf("v%05d_%08d", 15, 150)))
 
-					if err := txn.CommitAt(15, nil); err != nil {
+					if err := txn.CommitAt(types.CustomTs{AssignedTs: 15}, nil); err != nil {
 						t.Fatalf("commit: %v", err)
 					}
 
@@ -628,7 +629,7 @@ func TestConcurrentRWSameKey(t *testing.T) {
 				// t.Logf("Successfully read key: %s at ts=12, val = %s", keyStr, val)
 
 			} else {
-				txn := db.NewTransactionAt(17, false)
+				txn := db.NewTransactionAt(types.CustomTs{AssignedTs: 17}, false)
 				keyStr := []byte(fmt.Sprintf("k%05d_%08d", 1, 1))
 				itm, err := txn.Get(keyStr)
 				expectedVal := fmt.Sprintf("v%05d_%08d", 15, 150)
@@ -660,7 +661,7 @@ func TestConcurrentReadTSVerify(t *testing.T) {
 	runBadgerTest(t, &opts, func(t *testing.T, db *DB) {
 		key := []byte("mvcc_key")
 		numVersions := 50
-		stride := uint64(10) // Timestamps will be 10, 20, 30...
+		stride := uint32(10) // Stride is now uint32 to fit into AssignedTS
 
 		var wg sync.WaitGroup
 
@@ -675,8 +676,11 @@ func TestConcurrentReadTSVerify(t *testing.T) {
 				defer wg.Done()
 
 				// Calculate Timestamp: 10, 20, 30...
-				ts := uint64(i) * stride
-				val := []byte(fmt.Sprintf("val_at_%d", ts))
+				// Construct CustomTs. We use Epoch=1, Broker=1 for simplicity.
+				tsVal := uint32(i) * stride
+				ts := types.CustomTs{EpochID: 1, BrokerID: 1, AssignedTs: tsVal}
+
+				val := []byte(fmt.Sprintf("val_at_%s", ts.String()))
 
 				// Create Managed Transaction at specific TS
 				txn := db.NewTransactionAt(ts, true)
@@ -684,14 +688,14 @@ func TestConcurrentReadTSVerify(t *testing.T) {
 				// Set the key
 				err := txn.Set(key, val)
 				if err != nil {
-					t.Errorf("Set failed at ts %d: %v", ts, err)
+					t.Errorf("Set failed at ts %s: %v", ts, err)
 					txn.Discard()
 					return
 				}
 
 				// Commit at specific TS
 				if err := txn.CommitAt(ts, nil); err != nil {
-					t.Errorf("Commit failed at ts %d: %v", ts, err)
+					t.Errorf("Commit failed at ts %s: %v", ts, err)
 				}
 			}(i)
 		}
@@ -710,9 +714,16 @@ func TestConcurrentReadTSVerify(t *testing.T) {
 			go func(i int) {
 				defer wg.Done()
 
-				writeTs := uint64(i) * stride    // e.g., 10
-				readTs := writeTs + (stride / 2) // e.g., 15
-				expectedVal := fmt.Sprintf("val_at_%d", writeTs)
+				// Reconstruct the Write TS
+				writeTsVal := uint32(i) * stride
+				writeTs := types.CustomTs{EpochID: 1, BrokerID: 1, AssignedTs: writeTsVal}
+
+				// Calculate Read TS (Write TS + Half Stride)
+				// e.g. Write at 10, Read at 15
+				readTsVal := writeTsVal + (stride / 2)
+				readTs := types.CustomTs{EpochID: 1, BrokerID: 1, AssignedTs: readTsVal}
+
+				expectedVal := fmt.Sprintf("val_at_%s", writeTs.String())
 
 				// Create View Transaction at intermediate TS
 				txn := db.NewTransactionAt(readTs, false)
@@ -720,7 +731,7 @@ func TestConcurrentReadTSVerify(t *testing.T) {
 
 				item, err := txn.Get(key)
 				if err != nil {
-					t.Errorf("Get failed at readTs %d: %v", readTs, err)
+					t.Errorf("Get failed at readTs %s: %v", readTs, err)
 					return
 				}
 
@@ -733,12 +744,11 @@ func TestConcurrentReadTSVerify(t *testing.T) {
 
 				// Assertion:
 				// Reading at 15 must return "val_at_10".
-				// It must NOT return "val_at_20" (future) or "val_at_0" (past).
 				if string(val) != expectedVal {
-					t.Errorf("MVCC Error! ReadTs: %d. Expected: %s, Got: %s",
+					t.Errorf("MVCC Error! ReadTs: %s. Expected: %s, Got: %s",
 						readTs, expectedVal, string(val))
 				} else {
-					t.Logf("ReadTs %d correctly saw %s", readTs, expectedVal)
+					t.Logf("ReadTs %s correctly saw %s", readTs, expectedVal)
 				}
 			}(i)
 		}
@@ -964,19 +974,23 @@ func TestForceCompactL0(t *testing.T) {
 	m := 45 // Increasing would cause ErrTxnTooBig
 	sz := 32 << 10
 	v := make([]byte, sz)
+
 	for i := 0; i < n; i += 2 {
-		version := uint64(i)
+		version := types.CustomTs{AssignedTs: uint32(i)}
+
 		txn := db.NewTransactionAt(version, true)
 		for j := 0; j < m; j++ {
 			require.NoError(t, txn.SetEntry(NewEntry(data(j), v)))
 		}
-		require.NoError(t, txn.CommitAt(version+1, nil))
+
+		require.NoError(t, txn.CommitAt(version.Incr(), nil))
 	}
 	db.Close()
 
 	opts.managedTxns = true
 	db, err = Open(opts)
 	require.NoError(t, err)
+	// Verify compaction happened
 	require.Equal(t, len(db.lc.levels[0].tables), 0)
 	require.NoError(t, db.Close())
 }
@@ -986,7 +1000,7 @@ func TestStreamDB(t *testing.T) {
 		for i := 0; i < 100; i++ {
 			key := []byte(fmt.Sprintf("key%d", i))
 			val := []byte(fmt.Sprintf("val%d", i))
-			txn := db.NewTransactionAt(1, false)
+			txn := db.NewTransactionAt(types.CustomTs{AssignedTs: 1}, false)
 			item, err := txn.Get(key)
 			require.NoError(t, err)
 			require.EqualValues(t, val, getItemValue(t, item))
@@ -1012,7 +1026,7 @@ func TestStreamDB(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		key := []byte(fmt.Sprintf("key%d", i))
 		val := []byte(fmt.Sprintf("val%d", i))
-		require.NoError(t, writer.SetEntryAt(NewEntry(key, val).WithMeta(0x00), 1))
+		require.NoError(t, writer.SetEntryAt(NewEntry(key, val).WithMeta(0x00), types.CustomTs{AssignedTs: 1}))
 	}
 	require.NoError(t, writer.Flush())
 	check(db)
@@ -1190,7 +1204,7 @@ func TestGetMore(t *testing.T) {
 			got := string(getItemValue(t, item))
 			if expectedValue != got {
 
-				vs, err := db.get(y.KeyWithTs(k, math.MaxUint64))
+				vs, err := db.get(y.KeyWithTs(k, types.MaxTs))
 				require.NoError(t, err)
 				fmt.Printf("wanted=%q Item: %s\n", k, item)
 				fmt.Printf("on re-run, got version: %+v\n", vs)
@@ -1408,12 +1422,12 @@ func TestLoad(t *testing.T) {
 				k := []byte(fmt.Sprintf("%09d", i))
 				txnSet(t, kv, k, k, 0x00)
 			}
-			require.Equal(t, 10000, int(kv.orc.readTs()))
+			require.Equal(t, 10000, kv.orc.readTs().AssignedTs)
 			kv.Close()
 		}
 		kv, err := Open(opt)
 		require.NoError(t, err)
-		require.Equal(t, 10000, int(kv.orc.readTs()))
+		require.Equal(t, 10000, kv.orc.readTs().AssignedTs)
 
 		for i := 0; i < n; i++ {
 			if (i % 10000) == 0 {
@@ -2427,7 +2441,7 @@ func TestMinReadTs(t *testing.T) {
 		readTxn.Discard()
 		time.Sleep(time.Millisecond)
 		require.Equal(t, uint64(19), db.orc.readMark.DoneUntil())
-		db.orc.readMark.Done(uint64(20)) // Because we called readTs.
+		db.orc.readMark.Done(types.CustomTs{AssignedTs: 20}) // Because we called readTs.
 
 		for i := 0; i < 10; i++ {
 			require.NoError(t, db.View(func(txn *Txn) error {
@@ -2769,7 +2783,7 @@ func TestVerifyChecksum(t *testing.T) {
 					Key:      key,
 					Value:    value,
 					StreamId: uint32(st),
-					Version:  1,
+					Version:  types.CustomTs{AssignedTs: 1},
 				}, buf)
 				if i%100 == 0 {
 					st++

@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 )
 
@@ -29,7 +30,7 @@ func TestWriteBatch(t *testing.T) {
 		defer wb.Cancel()
 
 		// Sanity check for SetEntryAt.
-		require.Error(t, wb.SetEntryAt(&Entry{}, 12))
+		require.Error(t, wb.SetEntryAt(&Entry{}, types.CustomTs{AssignedTs: 12}))
 
 		N, M := 50000, 1000
 		start := time.Now()
@@ -105,11 +106,11 @@ func TestEmptyWriteBatch(t *testing.T) {
 		opt.managedTxns = true
 		runBadgerTest(t, &opt, func(t *testing.T, db *DB) {
 			t.Run("WriteBatchAt", func(t *testing.T) {
-				wb := db.NewWriteBatchAt(2)
+				wb := db.NewWriteBatchAt(types.CustomTs{AssignedTs: 2})
 				require.NoError(t, wb.Flush())
-				wb = db.NewWriteBatchAt(208)
+				wb = db.NewWriteBatchAt(types.CustomTs{AssignedTs: 208})
 				require.NoError(t, wb.Flush())
-				wb = db.NewWriteBatchAt(31)
+				wb = db.NewWriteBatchAt(types.CustomTs{AssignedTs: 31})
 				require.NoError(t, wb.Flush())
 			})
 			t.Run("ManagedWriteBatch", func(t *testing.T) {
@@ -153,7 +154,7 @@ func TestBatchErrDeadlock(t *testing.T) {
 	require.NoError(t, err)
 
 	wb := db.NewManagedWriteBatch()
-	require.NoError(t, wb.SetEntryAt(&Entry{Key: []byte("foo")}, 0))
+	require.NoError(t, wb.SetEntryAt(&Entry{Key: []byte("foo")}, types.CustomTs{}))
 	require.Error(t, wb.Flush())
 	require.NoError(t, db.Close())
 }
