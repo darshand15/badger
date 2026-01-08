@@ -17,6 +17,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -39,7 +40,7 @@ func TestTxnSimple(t *testing.T) {
 			return nil
 		}))
 
-		require.Panics(t, func() { _ = txn.CommitAt(100, nil) })
+		require.Panics(t, func() { _ = txn.CommitAt(types.CustomTs{AssignedTs: 100}, nil) })
 		require.NoError(t, txn.Commit())
 	})
 }
@@ -209,7 +210,7 @@ func TestTxnVersions(t *testing.T) {
 
 		for i := 1; i < 10; i++ {
 			txn := db.NewTransaction(true)
-			txn.readTs = uint64(i) // Read version at i.
+			txn.readTs = types.CustomTs{AssignedTs: uint32(i)} // Read version at i.
 
 			item, err := txn.Get(k)
 			require.NoError(t, err)
@@ -388,19 +389,19 @@ func TestTxnIterationEdgeCase(t *testing.T) {
 		checkIterator(itr, []string{"c2", "a3"})
 		checkIterator(itr5, []string{"b4", "a3"})
 
-		txn.readTs = 3
+		txn.readTs = types.CustomTs{AssignedTs: 3}
 		itr = txn.NewIterator(DefaultIteratorOptions)
 		checkIterator(itr, []string{"a3", "b3", "c2"})
 		itr = txn.NewIterator(rev)
 		checkIterator(itr, []string{"c2", "b3", "a3"})
 
-		txn.readTs = 2
+		txn.readTs = types.CustomTs{AssignedTs: 2}
 		itr = txn.NewIterator(DefaultIteratorOptions)
 		checkIterator(itr, []string{"a2", "c2"})
 		itr = txn.NewIterator(rev)
 		checkIterator(itr, []string{"c2", "a2"})
 
-		txn.readTs = 1
+		txn.readTs = types.CustomTs{AssignedTs: 1}
 		itr = txn.NewIterator(DefaultIteratorOptions)
 		checkIterator(itr, []string{"c1"})
 		itr = txn.NewIterator(rev)
@@ -467,7 +468,7 @@ func TestTxnIterationEdgeCase2(t *testing.T) {
 		itr = txn.NewIterator(rev)
 		checkIterator(itr, []string{"c2", "a3"})
 
-		txn.readTs = 5
+		txn.readTs = types.CustomTs{AssignedTs: 5}
 		itr = txn.NewIterator(DefaultIteratorOptions)
 		itr.Seek(ka)
 		require.True(t, itr.Valid())
@@ -486,19 +487,19 @@ func TestTxnIterationEdgeCase2(t *testing.T) {
 		require.Equal(t, itr.item.Key(), kc)
 		itr.Close()
 
-		txn.readTs = 3
+		txn.readTs = types.CustomTs{AssignedTs: 3}
 		itr = txn.NewIterator(DefaultIteratorOptions)
 		checkIterator(itr, []string{"a3", "b3", "c2"})
 		itr = txn.NewIterator(rev)
 		checkIterator(itr, []string{"c2", "b3", "a3"})
 
-		txn.readTs = 2
+		txn.readTs = types.CustomTs{AssignedTs: 2}
 		itr = txn.NewIterator(DefaultIteratorOptions)
 		checkIterator(itr, []string{"a2", "c2"})
 		itr = txn.NewIterator(rev)
 		checkIterator(itr, []string{"c2", "a2"})
 
-		txn.readTs = 1
+		txn.readTs = types.CustomTs{AssignedTs: 1}
 		itr = txn.NewIterator(DefaultIteratorOptions)
 		checkIterator(itr, []string{"c1"})
 		itr = txn.NewIterator(rev)
@@ -746,15 +747,15 @@ func TestManagedDB(t *testing.T) {
 		require.NoError(t, err)
 
 		// Write data at t=3.
-		txn := db.NewTransactionAt(3, true)
+		txn := db.NewTransactionAt(types.CustomTs{AssignedTs: 3}, true)
 		for i := 0; i <= 3; i++ {
 			require.NoError(t, txn.SetEntry(NewEntry(key(i), val(i))))
 		}
 		require.Error(t, txn.Commit())
-		require.NoError(t, txn.CommitAt(3, nil))
+		require.NoError(t, txn.CommitAt(types.CustomTs{AssignedTs: 3}, nil))
 
 		// Read data at t=2.
-		txn = db.NewTransactionAt(2, false)
+		txn = db.NewTransactionAt(types.CustomTs{AssignedTs: 2}, false)
 		for i := 0; i <= 3; i++ {
 			_, err := txn.Get(key(i))
 			require.Equal(t, ErrKeyNotFound, err)
@@ -762,7 +763,7 @@ func TestManagedDB(t *testing.T) {
 		txn.Discard()
 
 		// Read data at t=3.
-		txn = db.NewTransactionAt(3, false)
+		txn = db.NewTransactionAt(types.CustomTs{AssignedTs: 3}, false)
 		for i := 0; i <= 3; i++ {
 			item, err := txn.Get(key(i))
 			require.NoError(t, err)
@@ -774,7 +775,7 @@ func TestManagedDB(t *testing.T) {
 		txn.Discard()
 
 		// Write data at t=7.
-		txn = db.NewTransactionAt(6, true)
+		txn = db.NewTransactionAt(types.CustomTs{AssignedTs: 6}, true)
 		for i := 0; i <= 7; i++ {
 			_, err := txn.Get(key(i))
 			if err == nil {
@@ -782,10 +783,10 @@ func TestManagedDB(t *testing.T) {
 			}
 			require.NoError(t, txn.SetEntry(NewEntry(key(i), val(i))))
 		}
-		require.NoError(t, txn.CommitAt(7, nil))
+		require.NoError(t, txn.CommitAt(types.CustomTs{AssignedTs: 7}, nil))
 
 		// Read data at t=9.
-		txn = db.NewTransactionAt(9, false)
+		txn = db.NewTransactionAt(types.CustomTs{AssignedTs: 9}, false)
 		for i := 0; i <= 9; i++ {
 			item, err := txn.Get(key(i))
 			if i <= 7 {
@@ -808,14 +809,14 @@ func TestManagedDB(t *testing.T) {
 		txn.Discard()
 
 		// Write data to same key, causing a conflict
-		txn = db.NewTransactionAt(10, true)
-		txnb := db.NewTransactionAt(10, true)
+		txn = db.NewTransactionAt(types.CustomTs{AssignedTs: 10}, true)
+		txnb := db.NewTransactionAt(types.CustomTs{AssignedTs: 10}, true)
 		_, err := txnb.Get(key(0))
 		require.NoError(t, err)
 		require.NoError(t, txn.SetEntry(NewEntry(key(0), val(0))))
 		require.NoError(t, txnb.SetEntry(NewEntry(key(0), val(1))))
-		require.NoError(t, txn.CommitAt(11, nil))
-		require.Equal(t, ErrConflict, txnb.CommitAt(11, nil))
+		require.NoError(t, txn.CommitAt(types.CustomTs{AssignedTs: 11}, nil))
+		require.Equal(t, ErrConflict, txnb.CommitAt(types.CustomTs{AssignedTs: 11}, nil))
 	}
 	t.Run("disk mode", func(t *testing.T) {
 		db, err := Open(opt)
