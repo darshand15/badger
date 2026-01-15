@@ -534,6 +534,12 @@ func (b *Builder) compressData(data []byte) ([]byte, error) {
 func (b *Builder) buildIndex(bloom []byte) ([]byte, uint32) {
 	builder := fbs.NewBuilder(3 << 20)
 
+	// maxVerOffset := fb.CreateCustomTs(builder,
+	// 	b.maxVersion.EpochID,
+	// 	b.maxVersion.BrokerID,
+	// 	b.maxVersion.AssignedTs,
+	// )
+
 	boList, dataSize := b.writeBlockOffsets(builder)
 	// Write block offset vector the the idxBuilder.
 	fb.TableIndexStartOffsetsVector(builder, len(boList))
@@ -550,17 +556,13 @@ func (b *Builder) buildIndex(bloom []byte) ([]byte, uint32) {
 		bfoff = builder.CreateByteVector(bloom)
 	}
 
-	maxVerOffset := fb.CreateCustomTs(builder,
-		b.maxVersion.EpochID,
-		b.maxVersion.BrokerID,
-		b.maxVersion.AssignedTs,
-	)
-
 	b.onDiskSize += dataSize
 	fb.TableIndexStart(builder)
 	fb.TableIndexAddOffsets(builder, boEnd)
 	fb.TableIndexAddBloomFilter(builder, bfoff)
-	fb.TableIndexAddMaxVersion(builder, maxVerOffset)
+	fb.TableIndexAddMaxVersionEpoch(builder, b.maxVersion.EpochID)
+	fb.TableIndexAddMaxVersionBroker(builder, b.maxVersion.BrokerID)
+	fb.TableIndexAddMaxVersionAssignedTs(builder, b.maxVersion.AssignedTs)
 	fb.TableIndexAddUncompressedSize(builder, b.uncompressedSize.Load())
 	fb.TableIndexAddKeyCount(builder, uint32(len(b.keyHashes)))
 	fb.TableIndexAddOnDiskSize(builder, b.onDiskSize)

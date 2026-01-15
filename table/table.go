@@ -471,19 +471,10 @@ func (t *Table) initIndex() (*fb.BlockOffset, error) {
 		t._index = index
 	}
 
-	// Create a variable to hold the FlatBuffers struct
-	var fbMaxVer fb.CustomTs
-
-	// Read into the struct
-	// The generated method returns nil if the field doesn't exist in the table
-	var maxVer types.CustomTs
-	if ptr := index.MaxVersion(&fbMaxVer); ptr != nil {
-		// Map fields from generated code (fb) to CustomTs type
-		maxVer = types.CustomTs{
-			EpochID:    ptr.Epoch(),
-			BrokerID:   ptr.Broker(),
-			AssignedTs: ptr.AssignedTs(),
-		}
+	maxVer := types.CustomTs{
+		EpochID:    index.MaxVersionEpoch(),
+		BrokerID:   index.MaxVersionBroker(),
+		AssignedTs: index.MaxVersionAssignedTs(),
 	}
 
 	t._cheap = &cheapIndex{
