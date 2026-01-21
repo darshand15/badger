@@ -100,8 +100,8 @@ func (o *oracle) readTs() types.CustomTs {
 func (o *oracle) nextTs() types.CustomTs {
 	o.Lock()
 	defer o.Unlock()
+	// o.nextTxnTs = o.nextTxnTs.Incr()
 	return o.nextTxnTs
-
 }
 
 func (o *oracle) incrementNextTs() {

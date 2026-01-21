@@ -368,7 +368,12 @@ func Open(opt Options) (*DB, error) {
 	}
 	// We do increment nextTxnTs below. So, no need to do it here.
 	db.orc.nextTxnTs = db.MaxVersion()
-	db.opt.Infof("Set nextTxnTs to %d", db.orc.nextTxnTs)
+
+	if db.orc.nextTxnTs.IsZero() {
+		db.orc.nextTxnTs = db.orc.nextTxnTs.Incr()
+	}
+
+	db.opt.Infof("Set nextTxnTs to %s", db.orc.nextTxnTs)
 
 	if err = db.vlog.open(db); err != nil {
 		return db, y.Wrapf(err, "During db.vlog.open")
