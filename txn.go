@@ -19,6 +19,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/types"	
 )
 
 type oracle struct {
@@ -472,6 +473,29 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 		// internally.
 		txn.addReadKey(key)
 	}
+
+	// DuckDB first if available
+    if txn.db.duckDBStorage != nil {
+        duckTxn := txn.db.duckDBStorage.NewTransactionAt(
+            types.CustomTs{int64(txn.readTs), 0, 0},
+            false,
+        )
+        
+        duckItem, err := duckTxn.Get(key)
+        if err == nil {
+            // Found in DuckDB - convert to Badger Item
+            return &Item{
+                key:       key,
+                version:   uint64(duckItem.Timestamp().EpochID),
+                val:       duckItem.Value(),
+                meta:      0,
+                userMeta:  0,
+                txn:       txn,
+                expiresAt: 0,
+            }, nil
+        }
+        // Not found in DuckDB - continue to original Badger path
+    }
 
 	seek := y.KeyWithTs(key, txn.readTs)
 	vs, err := txn.db.get(seek)

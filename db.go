@@ -24,6 +24,7 @@ import (
 	humanize "github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
 
+	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/storage"
 	"github.com/dgraph-io/badger/v4/fb"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/pb"
@@ -124,6 +125,8 @@ type DB struct {
 	blockCache *ristretto.Cache[[]byte, *table.Block]
 	indexCache *ristretto.Cache[uint64, *fb.TableIndex]
 	allocPool  *z.AllocatorPool
+
+	duckDBStorage *storage.DuckDBStorage
 }
 
 const (
@@ -238,22 +241,40 @@ func Open(opt Options) (*DB, error) {
 		}
 	}()
 
-	db := &DB{
-		imm:              make([]*memTable, 0, opt.NumMemtables),
-		flushChan:        make(chan *memTable, opt.NumMemtables),
-		writeCh:          make(chan *request, kvWriteChCapacity),
-		opt:              opt,
-		manifest:         manifestFile,
-		dirLockGuard:     dirLockGuard,
-		valueDirGuard:    valueDirLockGuard,
-		orc:              newOracle(opt),
-		pub:              newPublisher(),
-		allocPool:        z.NewAllocatorPool(8),
-		bannedNamespaces: &lockedKeys{keys: make(map[uint64]struct{})},
-		threshold:        initVlogThreshold(&opt),
-	}
-	db.root.Store(nil)
-	db.syncChan = opt.syncChan
+	    // Initialize DuckDB storage
+    numDuckDBPartitions := opt.PartitionFanOut
+    if numDuckDBPartitions <= 0 {
+        numDuckDBPartitions = 1
+    }
+
+    var duckdbPath string
+    if opt.InMemory {
+        duckdbPath = ":memory:"
+    } else {
+        duckdbPath = filepath.Join(opt.Dir, "duckdb_data")
+    }
+
+    duckStore, err := storage.NewDuckDBStorage(duckdbPath, numDuckDBPartitions)
+    if err != nil {
+        return nil, fmt.Errorf("failed to initialize DuckDB storage: %w", err)
+    }
+
+    db := &DB{
+        imm:               make([]*memTable, 0, opt.NumMemtables),
+        flushChan:         make(chan *memTable, opt.NumMemtables),
+        writeCh:           make(chan *request, kvWriteChCapacity),
+        duckDBStorage:     duckStore,
+        opt:               opt,
+        manifest:          manifestFile,
+        dirLockGuard:      dirLockGuard,
+        valueDirGuard:     valueDirLockGuard,
+        orc:               newOracle(opt),
+        pub:               newPublisher(),
+        allocPool:         z.NewAllocatorPool(8),
+        bannedNamespaces:  &lockedKeys{keys: make(map[uint64]struct{})},
+        threshold:         initVlogThreshold(&opt),
+    }
+    db.root.Store(nil)
 
 	// Cleanup all the goroutines started by badger in case of an error.
 	defer func() {
@@ -263,6 +284,7 @@ func Open(opt Options) (*DB, error) {
 			db = nil
 		}
 	}()
+
 
 	if opt.BlockCacheSize > 0 {
 		numInCache := opt.BlockCacheSize / int64(opt.BlockSize)
@@ -619,6 +641,16 @@ func (db *DB) close() (err error) {
 		}
 	}
 
+	// Close DuckDB storage BEFORE closing value log
+	if db.duckDBStorage != nil {
+		if duckErr := db.duckDBStorage.Close(); duckErr != nil {
+			db.opt.Errorf("Error closing DuckDB storage: %v", duckErr)
+			if err == nil {
+				err = y.Wrap(duckErr, "DB.Close (DuckDB)")
+			}
+		}
+	}
+
 	// Now close the value log.
 	if vlogErr := db.vlog.Close(); vlogErr != nil {
 		err = y.Wrap(vlogErr, "DB.Close")
@@ -748,9 +780,9 @@ func (db *DB) getMemTables() ([]*memTable, func()) {
 // Note that value will include meta byte.
 //
 // IMPORTANT: We should never write an entry with an older timestamp for the same key, We need to
-// maintain this invariant to search for the latest value of a key, or else we need to search in all
-// tables and find the max version among them.  To maintain this invariant, we also need to ensure
-// that all versions of a key are always present in the same table from level 1, because compaction
+// maintain this invariant to search for the latest value of a key, or else we need to
+// search in all tables and find the max version among them.  To maintain this invariant, we
+// also need to ensure that all versions of a key are always present in the same table from level 1, because compaction
 // can push any table down.
 //
 // Update(23/09/2020) - We have dropped the move key implementation. Earlier we
@@ -1144,35 +1176,99 @@ func (db *DB) handleMemTableFlushClassic(mt *memTable, dropPrefixes [][]byte) er
 }
 
 func (db *DB) handleMemTableFlushPartitioned() error {
-    // 🚀 Atomically swap out the CAS-prepended list
-    head := db.root.Swap(nil)
-    if head == nil {
-        return nil // nothing to flush
-    }
+	// 🚀 Atomically swap out the CAS-prepended list
+	head := db.root.Swap(nil)
+	if head == nil {
+		return nil // nothing to flush
+	}
 
-    var nodes []*upsertNode
-    for n := head; n != nil; n = n.next {
-        nodes = append(nodes, n)
-    }
+	var nodes []*upsertNode
+	for n := head; n != nil; n = n.next {
+		nodes = append(nodes, n)
+	}
 
-    var entries []*Entry
-    for _, node := range nodes {
-        entries = append(entries, node.kvs...)
-    }
+	var entries []*Entry
+	for _, node := range nodes {
+		entries = append(entries, node.kvs...)
+	}
 
-    if len(entries) == 0 {
-        return nil
-    }
+	if len(entries) == 0 {
+		return nil
+	}
 
-    sort.SliceStable(entries, func(i, j int) bool {
-        if cmp := bytes.Compare(entries[i].Key, entries[j].Key); cmp != 0 {
-            return cmp < 0
-        }
-        return entries[i].version < entries[j].version
-    })
+	// Ensure deterministic ordering (helps table builder stability).
+	sort.SliceStable(entries, func(i, j int) bool {
+		if cmp := bytes.Compare(entries[i].Key, entries[j].Key); cmp != 0 {
+			return cmp < 0
+		}
+		return entries[i].version < entries[j].version
+	})
 
-    // 🚀 Now hand these entries to Level-0 logic in levels.go
-    return db.lc.flushEntriesToPartitions(entries)
+	// Partition entries by logical key -> partition id at level 0.
+	fanout := db.opt.PartitionFanOut
+	if fanout <= 1 {
+		// Fallback: build single SSTable and add as partition 0.
+		tbl, err := db.lc.buildSSTable(entries)
+		if err != nil {
+			return err
+		}
+		if tbl == nil {
+			return nil
+		}
+		if err := db.lc.addLevel0PartitionedTable(0, tbl); err != nil {
+			_ = tbl.DecrRef()
+			return err
+		}
+		_ = tbl.DecrRef()
+		db.lc.checkPartitionOverflow(0)
+		return nil
+	}
+
+	parts := make(map[int][]*Entry, fanout)
+	for _, e := range entries {
+		pid := db.getPartitionForKey(e.Key, 0)
+		parts[pid] = append(parts[pid], e)
+	}
+
+	for pid, ents := range parts {
+		if len(ents) == 0 {
+			continue
+		}
+		tbl, err := db.lc.buildSSTable(ents)
+		if err != nil {
+			return err
+		}
+		if tbl == nil {
+			continue
+		}
+		if err := db.lc.addLevel0PartitionedTable(pid, tbl); err != nil {
+			_ = tbl.DecrRef()
+			return err
+		}
+		_ = tbl.DecrRef()
+	}
+
+	// After inserting all partitions, check for overflow at Level 0
+	db.lc.checkPartitionOverflow(0)
+	return nil
+}
+
+// getPartitionForKey calculates partition ID for a key at given level
+func (db *DB) getPartitionForKey(key []byte, level int) int {
+	if db.opt.PartitionFanOut <= 0 {
+		return 0
+	}
+	
+	keyNoTs := y.ParseKey(key)
+	hash := y.Hash(keyNoTs)
+	
+	// Calculate partitions at this level
+	numParts := 1
+	for i := 0; i <= level; i++ {
+		numParts *= db.opt.PartitionFanOut
+	}
+	
+	return int(uint64(hash) % uint64(numParts))
 }
 
 
@@ -1978,7 +2074,7 @@ func (db *DB) filterPrefixesToDrop(prefixes [][]byte) ([][]byte, error) {
 }
 
 // Checks if the key is banned. Returns the respective error if the key belongs to any of the banned
-// namepspaces. Else it returns nil.
+// namepsaces. Else it returns nil.
 func (db *DB) isBanned(key []byte) error {
 	if db.opt.NamespaceOffset < 0 {
 		return nil
@@ -2049,6 +2145,7 @@ func (db *DB) Subscribe(ctx context.Context, cb func(kv *KVList) error, matches 
 			default:
 				if len(batch.GetKv()) > 0 {
 					return cb(batch)
+
 				}
 				return nil
 			}

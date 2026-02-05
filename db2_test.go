@@ -602,7 +602,7 @@ func TestL0GCBug(t *testing.T) {
 			success++
 		}
 		if err != nil && err != ErrNoRewrite {
-			t.Fatalf(err.Error())
+			t.Fatalf("test failed: %v", err)
 		}
 	}
 	// Ensure alteast one GC call was successful.
