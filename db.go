@@ -98,7 +98,7 @@ type DB struct {
 	closers closers
 	nextTableID uint64
 
-	mt  *memTable   // Our latest (actively written) in-memory table
+	mt  *memTable
 	imm []*memTable // Add here only AFTER pushing to flushChan.
 	root atomic.Pointer[upsertNode] 
 
@@ -1203,6 +1203,24 @@ func (db *DB) handleMemTableFlushPartitioned() error {
 		}
 		return entries[i].version < entries[j].version
 	})
+
+	// Convert to Darshan entries and flush to DuckDB in background
+	if db.duckDBStorage != nil {
+		duckEntries := make([]*storage.DarshanEntry, 0, len(entries))
+		for _, entry := range entries {
+			duckEntries = append(duckEntries, &storage.DarshanEntry{
+				Key:     entry.Key,
+				Value:   entry.Value,
+				Version: entry.version,
+			})
+		}
+		// Flush to DuckDB (non-blocking, in background)
+		go func() {
+			if err := db.duckDBStorage.FlushDarshanEntries(duckEntries); err != nil {
+				db.opt.Debugf("DuckDB flush failed: %v", err)
+			}
+		}()
+	}
 
 	// Partition entries by logical key -> partition id at level 0.
 	fanout := db.opt.PartitionFanOut

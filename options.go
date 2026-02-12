@@ -122,6 +122,7 @@ type Options struct {
     // Level 0 has PartitionFanOut partitions; each of those fans out into PartitionFanOut 
     // subpartitions at Level 1, and so on.
 	PartitionFanOut int
+	UseDuckDB       bool // Enable DuckDB storage backend
 }
 
 // DefaultOptions sets a list of recommended options for good performance.
@@ -141,6 +142,7 @@ func DefaultOptions(path string) Options {
 		MetricsEnabled:      true,
 
 		PartitionFanOut:         1, // No partitioning
+		UseDuckDB:       		 false,
 		NumCompactors:           4, // Run at least 2 compactors. Zero-th compactor prioritizes L0.
 		NumLevelZeroTables:      5,
 		NumLevelZeroTablesStall: 15,

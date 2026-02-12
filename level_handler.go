@@ -277,8 +277,8 @@ func (s *levelHandler) getTableForKey(key []byte) ([]*table.Table, func() error)
 func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 	tables, decr := s.getTableForKey(key)
 	keyNoTs := y.ParseKey(key)
-
 	hash := y.Hash(keyNoTs)
+
 	var maxVs y.ValueStruct
 	for _, th := range tables {
 		if th.DoesNotHave(hash) {

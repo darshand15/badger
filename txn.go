@@ -17,9 +17,9 @@ import (
 
 	"github.com/pkg/errors"
 
+	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/types"	
 )
 
 type oracle struct {
@@ -475,27 +475,37 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 	}
 
 	// DuckDB first if available
-    if txn.db.duckDBStorage != nil {
-        duckTxn := txn.db.duckDBStorage.NewTransactionAt(
-            types.CustomTs{int64(txn.readTs), 0, 0},
-            false,
-        )
-        
-        duckItem, err := duckTxn.Get(key)
-        if err == nil {
-            // Found in DuckDB - convert to Badger Item
-            return &Item{
-                key:       key,
-                version:   uint64(duckItem.Timestamp().EpochID),
-                val:       duckItem.Value(),
-                meta:      0,
-                userMeta:  0,
-                txn:       txn,
-                expiresAt: 0,
-            }, nil
-        }
-        // Not found in DuckDB - continue to original Badger path
-    }
+	if txn.db.duckDBStorage != nil {
+		// Query DuckDB by logical key (strip the Badger timestamp suffix) if key has ts suffix.
+		var logicalKey []byte
+		if len(key) > 8 {
+			logicalKey = y.ParseKey(key)
+		} else {
+			logicalKey = key
+		}
+
+		readTs := y.ParseTs(key)
+		customTs := types.CustomTs{
+			EpochID:    int64(readTs),
+			BrokerID:   0,
+			AssignedTs: 0,
+		}
+
+		if entry, err := txn.db.duckDBStorage.Read(logicalKey, customTs); err == nil && entry != nil {
+			// Found in DuckDB - return a prefetched Badger Item.
+			return &Item{
+				key:       key,
+				version:   uint64(entry.Timestamp.EpochID),
+				val:       entry.Value,
+				meta:      0,
+				userMeta:  0,
+				txn:       txn,
+				expiresAt: 0,
+				status:    prefetched,
+			}, nil
+		}
+		// Not found in DuckDB — fall back to LSM lookup
+	}
 
 	seek := y.KeyWithTs(key, txn.readTs)
 	vs, err := txn.db.get(seek)
@@ -640,72 +650,67 @@ func (txn *Txn) Discard() {
 // }
 
 func (txn *Txn) commitAndSend() (func() error, error) {
-    orc := txn.db.orc
+	orc := txn.db.orc
+	orc.writeChLock.Lock()
+	defer orc.writeChLock.Unlock()
 
-    // assign commit timestamp
-    commitTs, conflict := orc.newCommitTs(txn)
-    if conflict {
-        return nil, ErrConflict
-    }
+	commitTs, conflict := orc.newCommitTs(txn)
+	if conflict {
+		return nil, ErrConflict
+	}
 
-    keepTogether := true
-    setVersion := func(e *Entry) {
-        if e.version == 0 {
-            e.version = commitTs
-        } else {
-            keepTogether = false
-        }
-    }
-    for _, e := range txn.pendingWrites {
-        setVersion(e)
-    }
-    for _, e := range txn.duplicateWrites {
-        setVersion(e)
-    }
+	keepTogether := true
+	setVersion := func(e *Entry) {
+		if e.version == 0 {
+			e.version = commitTs
+		} else {
+			keepTogether = false
+		}
+	}
+	for _, e := range txn.pendingWrites {
+		setVersion(e)
+	}
+	for _, e := range txn.duplicateWrites {
+		setVersion(e)
+	}
 
-    // batch all entries
-    entries := make([]*Entry, 0, len(txn.pendingWrites)+len(txn.duplicateWrites)+1)
+	entries := make([]*Entry, 0, len(txn.pendingWrites)+len(txn.duplicateWrites)+1)
 
-    processEntry := func(e *Entry) {
-        e.Key = y.KeyWithTs(e.Key, e.version)
-        if keepTogether {
-            e.meta |= bitTxn
-        }
-        entries = append(entries, e)
-    }
+	processEntry := func(e *Entry) {
+		e.Key = y.KeyWithTs(e.Key, e.version)
+		if keepTogether {
+			e.meta |= bitTxn
+		}
+		entries = append(entries, e)
+	}
 
-    for _, e := range txn.pendingWrites {
-        processEntry(e)
-    }
-    for _, e := range txn.duplicateWrites {
-        processEntry(e)
-    }
+	for _, e := range txn.pendingWrites {
+		processEntry(e)
+	}
+	for _, e := range txn.duplicateWrites {
+		processEntry(e)
+	}
 
-    if keepTogether {
-        y.AssertTrue(commitTs != 0)
-        entries = append(entries, &Entry{
-            Key:   y.KeyWithTs(txnKey, commitTs),
-            Value: []byte(strconv.FormatUint(commitTs, 10)),
-            meta:  bitFinTxn,
-        })
-    }
+	if keepTogether {
+		y.AssertTrue(commitTs != 0)
+		entries = append(entries, &Entry{
+			Key:   y.KeyWithTs(txnKey, commitTs),
+			Value: []byte(strconv.FormatUint(commitTs, 10)),
+			meta:  bitFinTxn,
+		})
+	}
 
-    // 🚀 CAS-prepend into Level-0 root
-    node := &upsertNode{kvs: entries}
-    for {
-        old := txn.db.root.Load()
-        node.next = old
-        if txn.db.root.CompareAndSwap(old, node) {
-            break
-        }
-    }
-
-    // No blocking on write channel anymore
-    ret := func() error {
-        orc.doneCommit(commitTs)
-        return nil
-    }
-    return ret, nil
+	req, err := txn.db.sendToWriteCh(entries)
+	if err != nil {
+		orc.doneCommit(commitTs)
+		return nil, err
+	}
+	ret := func() error {
+		err := req.Wait()
+		orc.doneCommit(commitTs)
+		return err
+	}
+	return ret, nil
 }
 
 
