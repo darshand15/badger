@@ -25,7 +25,7 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/storage"
-	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/types"
+
 	"github.com/dgraph-io/badger/v4/fb"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/pb"
@@ -866,7 +866,7 @@ var requestPool = sync.Pool{
 }
 
 func (db *DB) writeToLSM(b *request) error {
-	// We should check the length of b.Prts and b.Entries only when badger is not
+	// We should check the length of b.Ptrs and b.Entries only when badger is not
 	// running in InMemory mode. In InMemory mode, we don't write anything to the
 	// value log and that's why the length of b.Ptrs will always be zero.
 	if !db.opt.InMemory && len(b.Ptrs) != len(b.Entries) {
@@ -1205,26 +1205,23 @@ func (db *DB) handleMemTableFlushPartitioned() error {
 		return entries[i].version < entries[j].version
 	})
 
-	// Convert to storage entries and flush to DuckDB in background
+	// Convert to storage entries and flush to DuckDB efficiently
 	if db.duckDBStorage != nil {
-		duckEntries := make([]storage.Entry, 0, len(entries))
+		duckEntries := make([]*storage.DarshanEntry, 0, len(entries))
 		for _, entry := range entries {
-			duckEntries = append(duckEntries, storage.Entry{
-				Key:   entry.Key,
-				Value: entry.Value,
-				Timestamp: types.CustomTs{
-					EpochID:    int64(entry.version),
-					BrokerID:   0,
-					AssignedTs: 0,
-				},
+			duckEntries = append(duckEntries, &storage.DarshanEntry{
+				Key:     entry.Key,
+				Value:   entry.Value,
+				Version: entry.version,
 			})
 		}
-		// Flush to DuckDB (non-blocking, in background)
-		go func() {
-			if err := db.duckDBStorage.FlushDarshanEntries(duckEntries); err != nil {
-				db.opt.Debugf("DuckDB flush failed: %v", err)
-			}
-		}()
+
+		// Use buffered flush with 5000-entry batches for optimal throughput
+		const batchSize = 5000
+		if err := db.duckDBStorage.FlushDarshanEntriesBuffered(duckEntries, batchSize); err != nil {
+			db.opt.Debugf("DuckDB flush failed: %v", err)
+			// Don't fail the entire compaction, just log
+		}
 	}
 
 	// Partition entries by logical key -> partition id at level 0.
@@ -1281,19 +1278,18 @@ func (db *DB) getPartitionForKey(key []byte, level int) int {
 	if db.opt.PartitionFanOut <= 0 {
 		return 0
 	}
-	
+
 	keyNoTs := y.ParseKey(key)
 	hash := y.Hash(keyNoTs)
-	
+
 	// Calculate partitions at this level
 	numParts := 1
 	for i := 0; i <= level; i++ {
 		numParts *= db.opt.PartitionFanOut
 	}
-	
+
 	return int(uint64(hash) % uint64(numParts))
 }
-
 
 // func (db *DB) handleMemTableFlushPartitioned(mt *memTable) error {
 //     fanOut := db.opt.PartitionFanOut
@@ -1375,7 +1371,7 @@ func (db *DB) flushMemtable(lc *z.Closer) {
 				time.Sleep(time.Second)
 				continue
 			}
-			
+
 			if db.opt.PartitionFanOut > 1 {
 				db.lc.checkPartitionOverflow(0)
 			}

@@ -484,9 +484,8 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 			logicalKey = key
 		}
 
-		readTs := y.ParseTs(key)
 		customTs := types.CustomTs{
-			EpochID:    int64(readTs),
+			EpochID:    int64(txn.readTs),
 			BrokerID:   0,
 			AssignedTs: 0,
 		}

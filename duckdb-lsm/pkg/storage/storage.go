@@ -7,15 +7,17 @@ import (
 	"sync"
 
 	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/types"
+	"github.com/dgraph-io/ristretto/v2/z"
 	_ "github.com/marcboeker/go-duckdb"
 )
 
+// DuckDBStorage unified implementation
 type DuckDBStorage struct {
-	db        *sql.DB
-	ctx       context.Context
-	partCalc  *PartitionCalculator
-	mu        sync.RWMutex
-	numParts  int
+	db       *sql.DB
+	ctx      context.Context
+	partCalc *PartitionCalculator
+	mu       sync.RWMutex
+	numParts int
 }
 
 // NewDuckDBStorage creates a new DuckDB storage instance
@@ -72,7 +74,7 @@ func (s *DuckDBStorage) initializeTables() error {
 	return nil
 }
 
-// Write inserts a single entry (used for testing, not bulk operations)
+// Write inserts a single entry
 func (s *DuckDBStorage) Write(key []byte, value []byte, ts types.CustomTs) error {
 	partition := s.partCalc.GetPartitionForKey(key)
 	tableName := fmt.Sprintf("partition_%d", partition)
@@ -96,7 +98,6 @@ func (s *DuckDBStorage) Read(key []byte, readTs types.CustomTs) (*Entry, error) 
 	tableName := fmt.Sprintf("partition_%d", partition)
 
 	// Query for the latest entry with timestamp <= readTs
-	// Order by timestamp components: epoch_id DESC, broker_id DESC, assigned_ts DESC
 	querySQL := fmt.Sprintf(`
 		SELECT key, epoch_id, broker_id, assigned_ts, value
 		FROM %s
@@ -136,7 +137,7 @@ func (s *DuckDBStorage) Read(key []byte, readTs types.CustomTs) (*Entry, error) 
 	return &entry, nil
 }
 
-// ReadAll retrieves all entries for a key (used for debugging/testing)
+// ReadAll retrieves all entries for a key
 func (s *DuckDBStorage) ReadAll(key []byte) ([]Entry, error) {
 	partition := s.partCalc.GetPartitionForKey(key)
 	tableName := fmt.Sprintf("partition_%d", partition)
@@ -175,12 +176,129 @@ func (s *DuckDBStorage) ReadAll(key []byte) ([]Entry, error) {
 	return entries, rows.Err()
 }
 
+// FlushDarshanEntries bulk inserts entries using transactions
+func (s *DuckDBStorage) FlushDarshanEntries(entries []*DarshanEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Group by partition
+	partitions := make(map[int][]*DarshanEntry)
+	for _, entry := range entries {
+		pid := s.partCalc.GetPartitionForKey(entry.Key)
+		partitions[pid] = append(partitions[pid], entry)
+	}
+
+	// Insert per partition in a transaction
+	for pid, pEntries := range partitions {
+		tableName := fmt.Sprintf("partition_%d", pid)
+		tx, err := s.db.BeginTx(s.ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+
+		for _, entry := range pEntries {
+			insertSQL := fmt.Sprintf(`
+				INSERT INTO %s (key, epoch_id, broker_id, assigned_ts, value)
+				VALUES (?, ?, ?, ?, ?)
+			`, tableName)
+
+			if _, err := tx.ExecContext(
+				s.ctx,
+				insertSQL,
+				entry.Key,
+				entry.Timestamp.EpochID,
+				entry.Timestamp.BrokerID,
+				entry.Timestamp.AssignedTs,
+				entry.Value,
+			); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("failed to insert into %s: %w", tableName, err)
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction for %s: %w", tableName, err)
+		}
+	}
+
+	return nil
+}
+
+// FlushDarshanEntriesBuffered flushes with periodic batching
+func (s *DuckDBStorage) FlushDarshanEntriesBuffered(entries []*DarshanEntry, batchSize int) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Group by partition
+	partitions := make(map[int][]*DarshanEntry)
+	for _, entry := range entries {
+		pid := s.partCalc.GetPartitionForKey(entry.Key)
+		partitions[pid] = append(partitions[pid], entry)
+	}
+
+	// Insert per partition with periodic flushing
+	for pid, pEntries := range partitions {
+		tableName := fmt.Sprintf("partition_%d", pid)
+		
+		for i := 0; i < len(pEntries); i += batchSize {
+			end := i + batchSize
+			if end > len(pEntries) {
+				end = len(pEntries)
+			}
+
+			batch := pEntries[i:end]
+			tx, err := s.db.BeginTx(s.ctx, nil)
+			if err != nil {
+				return fmt.Errorf("failed to begin transaction: %w", err)
+			}
+
+			for _, entry := range batch {
+				insertSQL := fmt.Sprintf(`
+					INSERT INTO %s (key, epoch_id, broker_id, assigned_ts, value)
+					VALUES (?, ?, ?, ?, ?)
+				`, tableName)
+
+				if _, err := tx.ExecContext(
+					s.ctx,
+					insertSQL,
+					entry.Key,
+					entry.Timestamp.EpochID,
+					entry.Timestamp.BrokerID,
+					entry.Timestamp.AssignedTs,
+					entry.Value,
+				); err != nil {
+					tx.Rollback()
+					return fmt.Errorf("failed to insert into %s: %w", tableName, err)
+				}
+			}
+
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("failed to commit batch for %s: %w", tableName, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// GetPartitionID returns which partition a key belongs to
+func (s *DuckDBStorage) GetPartitionID(key []byte) int {
+	return s.partCalc.GetPartitionForKey(key)
+}
+
+// getPartition helper (used elsewhere in code)
+func (s *DuckDBStorage) getPartition(key []byte) int {
+	return s.GetPartitionID(key)
+}
+
 // Close closes the DuckDB connection
 func (s *DuckDBStorage) Close() error {
 	return s.db.Close()
 }
 
-// GetStats returns storage statistics (for debugging)
+// GetStats returns storage statistics
 func (s *DuckDBStorage) GetStats() (map[string]interface{}, error) {
 	stats := make(map[string]interface{})
 	
@@ -201,4 +319,43 @@ func (s *DuckDBStorage) GetStats() (map[string]interface{}, error) {
 	}
 	
 	return stats, nil
+}
+
+// Entry represents a key-value pair with timestamp
+type Entry struct {
+	Key       []byte
+	Value     []byte
+	Timestamp types.CustomTs
+}
+
+// DarshanEntry represents a Badger entry ready for DuckDB
+type DarshanEntry struct {
+	Key       []byte
+	Value     []byte
+	Timestamp types.CustomTs
+	Version   uint64
+}
+
+// PartitionCalculator handles hash-based key partitioning
+type PartitionCalculator struct {
+	numPartitions int
+}
+
+// NewPartitionCalculator creates a partition calculator
+func NewPartitionCalculator(numPartitions int) *PartitionCalculator {
+	if numPartitions <= 0 {
+		numPartitions = 1
+	}
+	return &PartitionCalculator{
+		numPartitions: numPartitions,
+	}
+}
+
+// GetPartitionForKey returns which partition a key belongs to
+func (pc *PartitionCalculator) GetPartitionForKey(key []byte) int {
+	if pc.numPartitions <= 1 {
+		return 0
+	}
+	hash := z.MemHash(key)
+	return int(hash % uint64(pc.numPartitions))
 }

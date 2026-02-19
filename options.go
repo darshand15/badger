@@ -122,7 +122,7 @@ type Options struct {
     // Level 0 has PartitionFanOut partitions; each of those fans out into PartitionFanOut 
     // subpartitions at Level 1, and so on.
 	PartitionFanOut int
-	UseDuckDB       bool // Enable DuckDB storage backend
+	UseDuckDB       bool   // Enable DuckDB storage backend
 }
 
 // DefaultOptions sets a list of recommended options for good performance.

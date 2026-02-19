@@ -1,11 +1,17 @@
 package types
 
-// CustomTs represents a 3-part timestamp (EpochID, BrokerID, AssignedTs)
-// This matches the timestamp structure from the paper's design
+// CustomTs represents a custom timestamp with three components
 type CustomTs struct {
-	EpochID    int64 // Highest order - epoch number
-	BrokerID   int64 // Middle order - broker identifier
-	AssignedTs int64 // Lowest order - assigned timestamp within epoch/broker
+	EpochID    int64
+	BrokerID   int64
+	AssignedTs int64
+}
+
+// Item represents a key-value pair with timestamp
+type Item struct {
+	Key       []byte
+	Val       []byte
+	Timestamp CustomTs
 }
 
 // Compare returns:
