@@ -141,7 +141,7 @@ func DefaultOptions(path string) Options {
 		NumGoroutines:       8,
 		MetricsEnabled:      true,
 
-		PartitionFanOut:         1, // No partitioning
+		PartitionFanOut:         8,
 		UseDuckDB:       		 false,
 		NumCompactors:           4, // Run at least 2 compactors. Zero-th compactor prioritizes L0.
 		NumLevelZeroTables:      5,

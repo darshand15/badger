@@ -1216,12 +1216,11 @@ func (db *DB) handleMemTableFlushPartitioned() error {
 			})
 		}
 
-		// Use buffered flush with 5000-entry batches for optimal throughput
-		const batchSize = 5000
-		if err := db.duckDBStorage.FlushDarshanEntriesBuffered(duckEntries, batchSize); err != nil {
-			db.opt.Debugf("DuckDB flush failed: %v", err)
-			// Don't fail the entire compaction, just log
+		// Use Appender API for fast bulk insert
+		if err := db.duckDBStorage.FlushDarshanEntries(duckEntries); err != nil {
+    		return fmt.Errorf("DuckDB flush failed: %w", err)  // Change this line too
 		}
+		return nil
 	}
 
 	// Partition entries by logical key -> partition id at level 0.

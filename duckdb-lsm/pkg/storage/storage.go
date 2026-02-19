@@ -8,6 +8,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/types"
 	"github.com/dgraph-io/ristretto/v2/z"
+	duckdb "github.com/marcboeker/go-duckdb"
 	_ "github.com/marcboeker/go-duckdb"
 )
 
@@ -23,17 +24,15 @@ type DuckDBStorage struct {
 // NewDuckDBStorage creates a new DuckDB storage instance
 func NewDuckDBStorage(dbPath string, numPartitions int) (*DuckDBStorage, error) {
 	if numPartitions <= 0 {
-		numPartitions = 8 // Default to 8 partitions
+		numPartitions = 8
 	}
 
-	// Open DuckDB connection
 	db, err := sql.Open("duckdb", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open DuckDB: %w", err)
 	}
 
-	// Configure connection pool for better concurrency
-	db.SetMaxOpenConns(numPartitions * 2) // 2 connections per partition
+	db.SetMaxOpenConns(numPartitions * 2)
 	db.SetMaxIdleConns(numPartitions)
 
 	storage := &DuckDBStorage{
@@ -43,7 +42,6 @@ func NewDuckDBStorage(dbPath string, numPartitions int) (*DuckDBStorage, error) 
 		numParts: numPartitions,
 	}
 
-	// Initialize all partition tables
 	if err := storage.initializeTables(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize tables: %w", err)
@@ -52,7 +50,6 @@ func NewDuckDBStorage(dbPath string, numPartitions int) (*DuckDBStorage, error) 
 	return storage, nil
 }
 
-// initializeTables creates all partition tables with proper schema
 func (s *DuckDBStorage) initializeTables() error {
 	for i := 0; i < s.numParts; i++ {
 		tableName := fmt.Sprintf("partition_%d", i)
@@ -74,7 +71,7 @@ func (s *DuckDBStorage) initializeTables() error {
 	return nil
 }
 
-// Write inserts a single entry
+// Write inserts a single entry (for testing)
 func (s *DuckDBStorage) Write(key []byte, value []byte, ts types.CustomTs) error {
 	partition := s.partCalc.GetPartitionForKey(key)
 	tableName := fmt.Sprintf("partition_%d", partition)
@@ -85,11 +82,7 @@ func (s *DuckDBStorage) Write(key []byte, value []byte, ts types.CustomTs) error
 	`, tableName)
 
 	_, err := s.db.ExecContext(s.ctx, insertSQL, key, ts.EpochID, ts.BrokerID, ts.AssignedTs, value)
-	if err != nil {
-		return fmt.Errorf("failed to write to %s: %w", tableName, err)
-	}
-
-	return nil
+	return err
 }
 
 // Read retrieves the latest value for a key with timestamp <= readTs
@@ -97,7 +90,6 @@ func (s *DuckDBStorage) Read(key []byte, readTs types.CustomTs) (*Entry, error) 
 	partition := s.partCalc.GetPartitionForKey(key)
 	tableName := fmt.Sprintf("partition_%d", partition)
 
-	// Query for the latest entry with timestamp <= readTs
 	querySQL := fmt.Sprintf(`
 		SELECT key, epoch_id, broker_id, assigned_ts, value
 		FROM %s
@@ -122,10 +114,10 @@ func (s *DuckDBStorage) Read(key []byte, readTs types.CustomTs) (*Entry, error) 
 	).Scan(&entry.Key, &epochID, &brokerID, &assignedTs, &entry.Value)
 
 	if err == sql.ErrNoRows {
-		return nil, nil // Key not found
+		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to read from %s: %w", tableName, err)
+		return nil, err
 	}
 
 	entry.Timestamp = types.CustomTs{
@@ -176,7 +168,7 @@ func (s *DuckDBStorage) ReadAll(key []byte) ([]Entry, error) {
 	return entries, rows.Err()
 }
 
-// FlushDarshanEntries bulk inserts entries using transactions
+// FlushDarshanEntries - FAST VERSION WITH APPENDER API
 func (s *DuckDBStorage) FlushDarshanEntries(entries []*DarshanEntry) error {
 	if len(entries) == 0 {
 		return nil
@@ -189,135 +181,119 @@ func (s *DuckDBStorage) FlushDarshanEntries(entries []*DarshanEntry) error {
 		partitions[pid] = append(partitions[pid], entry)
 	}
 
-	// Insert per partition in a transaction
+	// Flush each partition in parallel using Appender API
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(partitions))
+
 	for pid, pEntries := range partitions {
-		tableName := fmt.Sprintf("partition_%d", pid)
-		tx, err := s.db.BeginTx(s.ctx, nil)
-		if err != nil {
-			return fmt.Errorf("failed to begin transaction: %w", err)
-		}
-
-		for _, entry := range pEntries {
-			insertSQL := fmt.Sprintf(`
-				INSERT INTO %s (key, epoch_id, broker_id, assigned_ts, value)
-				VALUES (?, ?, ?, ?, ?)
-			`, tableName)
-
-			if _, err := tx.ExecContext(
-				s.ctx,
-				insertSQL,
-				entry.Key,
-				entry.Timestamp.EpochID,
-				entry.Timestamp.BrokerID,
-				entry.Timestamp.AssignedTs,
-				entry.Value,
-			); err != nil {
-				tx.Rollback()
-				return fmt.Errorf("failed to insert into %s: %w", tableName, err)
+		wg.Add(1)
+		go func(partition int, entries []*DarshanEntry) {
+			defer wg.Done()
+			if err := s.flushPartitionWithAppender(partition, entries); err != nil {
+				errChan <- fmt.Errorf("partition %d flush failed: %w", partition, err)
 			}
-		}
+		}(pid, pEntries)
+	}
 
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("failed to commit transaction for %s: %w", tableName, err)
-		}
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		return err
 	}
 
 	return nil
 }
 
-// FlushDarshanEntriesBuffered flushes with periodic batching
-func (s *DuckDBStorage) FlushDarshanEntriesBuffered(entries []*DarshanEntry, batchSize int) error {
+func (s *DuckDBStorage) flushPartitionWithAppender(partition int, entries []*DarshanEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
 
-	// Group by partition
-	partitions := make(map[int][]*DarshanEntry)
-	for _, entry := range entries {
-		pid := s.partCalc.GetPartitionForKey(entry.Key)
-		partitions[pid] = append(partitions[pid], entry)
+	tableName := fmt.Sprintf("partition_%d", partition)
+
+	// Get connection from pool
+	conn, err := s.db.Conn(s.ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get connection: %w", err)
+	}
+	defer conn.Close()
+
+	// Extract DuckDB connection for Appender API
+	var duckdbConn *duckdb.Conn
+	err = conn.Raw(func(driverConn interface{}) error {
+		var ok bool
+		duckdbConn, ok = driverConn.(*duckdb.Conn)
+		if !ok {
+			return fmt.Errorf("connection is not *duckdb.Conn, got %T", driverConn)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to extract DuckDB connection: %w", err)
 	}
 
-	// Insert per partition with periodic flushing
-	for pid, pEntries := range partitions {
-		tableName := fmt.Sprintf("partition_%d", pid)
-		
-		for i := 0; i < len(pEntries); i += batchSize {
-			end := i + batchSize
-			if end > len(pEntries) {
-				end = len(pEntries)
-			}
+	// Create Appender for bulk insert
+	appender, err := duckdb.NewAppenderFromConn(duckdbConn, "", tableName)
+	if err != nil {
+		return fmt.Errorf("failed to create appender for %s: %w", tableName, err)
+	}
+	defer appender.Close()
 
-			batch := pEntries[i:end]
-			tx, err := s.db.BeginTx(s.ctx, nil)
-			if err != nil {
-				return fmt.Errorf("failed to begin transaction: %w", err)
-			}
-
-			for _, entry := range batch {
-				insertSQL := fmt.Sprintf(`
-					INSERT INTO %s (key, epoch_id, broker_id, assigned_ts, value)
-					VALUES (?, ?, ?, ?, ?)
-				`, tableName)
-
-				if _, err := tx.ExecContext(
-					s.ctx,
-					insertSQL,
-					entry.Key,
-					entry.Timestamp.EpochID,
-					entry.Timestamp.BrokerID,
-					entry.Timestamp.AssignedTs,
-					entry.Value,
-				); err != nil {
-					tx.Rollback()
-					return fmt.Errorf("failed to insert into %s: %w", tableName, err)
-				}
-			}
-
-			if err := tx.Commit(); err != nil {
-				return fmt.Errorf("failed to commit batch for %s: %w", tableName, err)
-			}
+	// Bulk append all entries
+	for _, entry := range entries {
+		err := appender.AppendRow(
+			entry.Key,
+			entry.Timestamp.EpochID,
+			entry.Timestamp.BrokerID,
+			entry.Timestamp.AssignedTs,
+			entry.Value,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to append row: %w", err)
 		}
+	}
+
+	// Single flush (3-10x faster than individual inserts)
+	if err := appender.Flush(); err != nil {
+		return fmt.Errorf("failed to flush appender: %w", err)
 	}
 
 	return nil
 }
 
-// GetPartitionID returns which partition a key belongs to
+// FlushDarshanEntriesBuffered - DEPRECATED (kept for compatibility)
+func (s *DuckDBStorage) FlushDarshanEntriesBuffered(entries []*DarshanEntry, batchSize int) error {
+	// Just call the Appender version - it's always faster
+	return s.FlushDarshanEntries(entries)
+}
+
 func (s *DuckDBStorage) GetPartitionID(key []byte) int {
 	return s.partCalc.GetPartitionForKey(key)
 }
 
-// getPartition helper (used elsewhere in code)
 func (s *DuckDBStorage) getPartition(key []byte) int {
 	return s.GetPartitionID(key)
 }
 
-// Close closes the DuckDB connection
 func (s *DuckDBStorage) Close() error {
 	return s.db.Close()
 }
 
-// GetStats returns storage statistics
 func (s *DuckDBStorage) GetStats() (map[string]interface{}, error) {
 	stats := make(map[string]interface{})
-	
 	for i := 0; i < s.numParts; i++ {
 		tableName := fmt.Sprintf("partition_%d", i)
 		var count int64
-		
 		err := s.db.QueryRowContext(
 			s.ctx,
 			fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName),
 		).Scan(&count)
-		
 		if err != nil {
 			return nil, fmt.Errorf("failed to get stats for %s: %w", tableName, err)
 		}
-		
 		stats[tableName] = count
 	}
-	
 	return stats, nil
 }
 
@@ -341,7 +317,6 @@ type PartitionCalculator struct {
 	numPartitions int
 }
 
-// NewPartitionCalculator creates a partition calculator
 func NewPartitionCalculator(numPartitions int) *PartitionCalculator {
 	if numPartitions <= 0 {
 		numPartitions = 1
@@ -351,7 +326,6 @@ func NewPartitionCalculator(numPartitions int) *PartitionCalculator {
 	}
 }
 
-// GetPartitionForKey returns which partition a key belongs to
 func (pc *PartitionCalculator) GetPartitionForKey(key []byte) int {
 	if pc.numPartitions <= 1 {
 		return 0
