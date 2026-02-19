@@ -1,238 +1,204 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"sync"
 
 	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/types"
-
 	_ "github.com/marcboeker/go-duckdb"
 )
 
-// DuckDBStorage manages multiple DuckDB partition databases
 type DuckDBStorage struct {
-	basePath      string
-	db            *sql.DB // Main connection (set to connections[0])
-	connections   []*sql.DB
-	preparedStmts map[int]*sql.Stmt
-	partitionCalc *PartitionCalculator
-	numPartitions int
-	mu            sync.RWMutex
+	db        *sql.DB
+	ctx       context.Context
+	partCalc  *PartitionCalculator
+	mu        sync.RWMutex
+	numParts  int
 }
 
-// NewDuckDBStorage creates storage with DYNAMIC partition count
-func NewDuckDBStorage(basePath string, partitionCount int) (*DuckDBStorage, error) {
+// NewDuckDBStorage creates a new DuckDB storage instance
+func NewDuckDBStorage(dbPath string, numPartitions int) (*DuckDBStorage, error) {
+	if numPartitions <= 0 {
+		numPartitions = 8 // Default to 8 partitions
+	}
+
+	// Open DuckDB connection
+	db, err := sql.Open("duckdb", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open DuckDB: %w", err)
+	}
+
+	// Configure connection pool for better concurrency
+	db.SetMaxOpenConns(numPartitions * 2) // 2 connections per partition
+	db.SetMaxIdleConns(numPartitions)
+
 	storage := &DuckDBStorage{
-		basePath:      basePath,
-		connections:   make([]*sql.DB, partitionCount),
-		preparedStmts: make(map[int]*sql.Stmt),
-		partitionCalc: NewPartitionCalculator(partitionCount),
-		numPartitions: partitionCount,
+		db:       db,
+		ctx:      context.Background(),
+		partCalc: NewPartitionCalculator(numPartitions),
+		numParts: numPartitions,
 	}
 
-	// Initialize each partition database
-	for pid := 0; pid < partitionCount; pid++ {
-		if err := storage.initPartition(pid); err != nil {
-			storage.Close()
-			return nil, fmt.Errorf("failed to init partition %d: %w", pid, err)
-		}
+	// Initialize all partition tables
+	if err := storage.initializeTables(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize tables: %w", err)
 	}
-
-	// Set main db connection
-	storage.db = storage.connections[0]
 
 	return storage, nil
 }
 
-// initPartition creates database connection and table for one partition
-func (s *DuckDBStorage) initPartition(pid int) error {
-	var dbPath string
-	if s.basePath == ":memory:" {
-		// In-memory mode
-		dbPath = ":memory:"
-	} else {
-		// File-based mode
-		dbPath = fmt.Sprintf("%s/partition_%d.db", s.basePath, pid)
-		// Ensure base directory exists.
-		if err := os.MkdirAll(s.basePath, 0o700); err != nil {
-			return fmt.Errorf("failed to create duckdb base dir %q: %w", s.basePath, err)
+// initializeTables creates all partition tables with proper schema
+func (s *DuckDBStorage) initializeTables() error {
+	for i := 0; i < s.numParts; i++ {
+		tableName := fmt.Sprintf("partition_%d", i)
+		createTableSQL := fmt.Sprintf(`
+			CREATE TABLE IF NOT EXISTS %s (
+				key BLOB NOT NULL,
+				epoch_id BIGINT NOT NULL,
+				broker_id BIGINT NOT NULL,
+				assigned_ts BIGINT NOT NULL,
+				value BLOB,
+				PRIMARY KEY (key, epoch_id, broker_id, assigned_ts)
+			)
+		`, tableName)
+
+		if _, err := s.db.ExecContext(s.ctx, createTableSQL); err != nil {
+			return fmt.Errorf("failed to create table %s: %w", tableName, err)
 		}
 	}
+	return nil
+}
 
-	conn, err := sql.Open("duckdb", dbPath)
-	if err != nil {
-		return fmt.Errorf("failed to open partition %d: %w", pid, err)
-	}
+// Write inserts a single entry (used for testing, not bulk operations)
+func (s *DuckDBStorage) Write(key []byte, value []byte, ts types.CustomTs) error {
+	partition := s.partCalc.GetPartitionForKey(key)
+	tableName := fmt.Sprintf("partition_%d", partition)
 
-	s.connections[pid] = conn
-
-	// Create table
-	tableName := fmt.Sprintf("partition_%d", pid)
-	createTableSQL := fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s (
-			key BLOB NOT NULL,
-			epoch_id BIGINT NOT NULL,
-			broker_id BIGINT NOT NULL,
-			assigned_ts BIGINT NOT NULL,
-			value BLOB,
-			PRIMARY KEY (key, epoch_id, broker_id, assigned_ts)
-		)
-	`, tableName)
-
-	if _, err := conn.Exec(createTableSQL); err != nil {
-		return fmt.Errorf("failed to create table in partition %d: %w", pid, err)
-	}
-
-	// Create prepared statement
 	insertSQL := fmt.Sprintf(`
 		INSERT INTO %s (key, epoch_id, broker_id, assigned_ts, value)
 		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT (key, epoch_id, broker_id, assigned_ts) DO NOTHING
 	`, tableName)
 
-	stmt, err := conn.Prepare(insertSQL)
+	_, err := s.db.ExecContext(s.ctx, insertSQL, key, ts.EpochID, ts.BrokerID, ts.AssignedTs, value)
 	if err != nil {
-		return fmt.Errorf("failed to prepare statement for partition %d: %w", pid, err)
+		return fmt.Errorf("failed to write to %s: %w", tableName, err)
 	}
-
-	s.preparedStmts[pid] = stmt
 
 	return nil
 }
 
-// getPartition calculates partition ID from key
-func (s *DuckDBStorage) getPartition(key []byte) int {
-	return s.partitionCalc.GetPartitionID(key)
-}
+// Read retrieves the latest value for a key with timestamp <= readTs
+func (s *DuckDBStorage) Read(key []byte, readTs types.CustomTs) (*Entry, error) {
+	partition := s.partCalc.GetPartitionForKey(key)
+	tableName := fmt.Sprintf("partition_%d", partition)
 
-// Write writes a single entry
-func (s *DuckDBStorage) Write(entry *types.BadgerEntry) error {
-	pid := s.getPartition(entry.Key)
-
-	s.mu.RLock()
-	stmt := s.preparedStmts[pid]
-	s.mu.RUnlock()
-
-	if stmt == nil {
-		return fmt.Errorf("partition %d not initialized", pid)
-	}
-
-	_, err := stmt.Exec(
-		entry.Key,
-		entry.Timestamp.EpochID,
-		entry.Timestamp.BrokerID,
-		entry.Timestamp.AssignedTs,
-		entry.Value,
-	)
-
-	return err
-}
-
-// Read reads the latest version <= given timestamp
-func (s *DuckDBStorage) Read(key []byte, readTs types.CustomTs) (*types.BadgerEntry, error) {
-	pid := s.getPartition(key)
-
-	s.mu.RLock()
-	conn := s.connections[pid]
-	s.mu.RUnlock()
-
-	if conn == nil {
-		return nil, fmt.Errorf("partition %d not initialized", pid)
-	}
-
-	tableName := fmt.Sprintf("partition_%d", pid)
-	// Fetch the latest row for the key (no read-timestamp filtering).
-	query := fmt.Sprintf(`
-		SELECT epoch_id, broker_id, assigned_ts, value
+	// Query for the latest entry with timestamp <= readTs
+	// Order by timestamp components: epoch_id DESC, broker_id DESC, assigned_ts DESC
+	querySQL := fmt.Sprintf(`
+		SELECT key, epoch_id, broker_id, assigned_ts, value
 		FROM %s
 		WHERE key = ?
+		  AND (epoch_id < ? OR 
+		       (epoch_id = ? AND broker_id < ?) OR
+		       (epoch_id = ? AND broker_id = ? AND assigned_ts <= ?))
 		ORDER BY epoch_id DESC, broker_id DESC, assigned_ts DESC
 		LIMIT 1
 	`, tableName)
 
-	var entry types.BadgerEntry
-	err := conn.QueryRow(query, key).Scan(
-		&entry.Timestamp.EpochID,
-		&entry.Timestamp.BrokerID,
-		&entry.Timestamp.AssignedTs,
-		&entry.Value,
-	)
+	var entry Entry
+	var epochID, brokerID, assignedTs int64
+
+	err := s.db.QueryRowContext(
+		s.ctx,
+		querySQL,
+		key,
+		readTs.EpochID,
+		readTs.EpochID, readTs.BrokerID,
+		readTs.EpochID, readTs.BrokerID, readTs.AssignedTs,
+	).Scan(&entry.Key, &epochID, &brokerID, &assignedTs, &entry.Value)
 
 	if err == sql.ErrNoRows {
-		return nil, nil
+		return nil, nil // Key not found
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read from %s: %w", tableName, err)
 	}
-	// Keep the stored key as the logical key.
-	entry.Key = key
+
+	entry.Timestamp = types.CustomTs{
+		EpochID:    epochID,
+		BrokerID:   brokerID,
+		AssignedTs: assignedTs,
+	}
+
 	return &entry, nil
 }
 
-// FlushPartition flushes a batch of entries to a specific partition
-func (s *DuckDBStorage) FlushPartition(pid int, entries []*types.BadgerEntry) error {
-	s.mu.RLock()
-	conn := s.connections[pid]
-	s.mu.RUnlock()
+// ReadAll retrieves all entries for a key (used for debugging/testing)
+func (s *DuckDBStorage) ReadAll(key []byte) ([]Entry, error) {
+	partition := s.partCalc.GetPartitionForKey(key)
+	tableName := fmt.Sprintf("partition_%d", partition)
 
-	if conn == nil {
-		return fmt.Errorf("partition %d not initialized", pid)
-	}
+	querySQL := fmt.Sprintf(`
+		SELECT key, epoch_id, broker_id, assigned_ts, value
+		FROM %s
+		WHERE key = ?
+		ORDER BY epoch_id DESC, broker_id DESC, assigned_ts DESC
+	`, tableName)
 
-	tx, err := conn.Begin()
+	rows, err := s.db.QueryContext(s.ctx, querySQL, key)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("failed to query %s: %w", tableName, err)
 	}
-	defer tx.Rollback()
+	defer rows.Close()
 
-	stmt := tx.Stmt(s.preparedStmts[pid])
+	var entries []Entry
+	for rows.Next() {
+		var entry Entry
+		var epochID, brokerID, assignedTs int64
 
-	for _, entry := range entries {
-		_, err := stmt.Exec(
-			entry.Key,
-			entry.Timestamp.EpochID,
-			entry.Timestamp.BrokerID,
-			entry.Timestamp.AssignedTs,
-			entry.Value,
-		)
-		if err != nil {
-			return err
+		if err := rows.Scan(&entry.Key, &epochID, &brokerID, &assignedTs, &entry.Value); err != nil {
+			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
+
+		entry.Timestamp = types.CustomTs{
+			EpochID:    epochID,
+			BrokerID:   brokerID,
+			AssignedTs: assignedTs,
+		}
+
+		entries = append(entries, entry)
 	}
 
-	return tx.Commit()
+	return entries, rows.Err()
 }
 
-// Close closes all connections
+// Close closes the DuckDB connection
 func (s *DuckDBStorage) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var lastErr error
-
-	for pid, stmt := range s.preparedStmts {
-		if stmt != nil {
-			if err := stmt.Close(); err != nil {
-				lastErr = err
-			}
-			delete(s.preparedStmts, pid)
-		}
-	}
-
-	for i, conn := range s.connections {
-		if conn != nil {
-			if err := conn.Close(); err != nil {
-				lastErr = err
-			}
-			s.connections[i] = nil
-		}
-	}
-
-	return lastErr
+	return s.db.Close()
 }
 
-func (s *DuckDBStorage) GetPartitionCount() int {
-	return s.numPartitions
+// GetStats returns storage statistics (for debugging)
+func (s *DuckDBStorage) GetStats() (map[string]interface{}, error) {
+	stats := make(map[string]interface{})
+	
+	for i := 0; i < s.numParts; i++ {
+		tableName := fmt.Sprintf("partition_%d", i)
+		var count int64
+		
+		err := s.db.QueryRowContext(
+			s.ctx,
+			fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName),
+		).Scan(&count)
+		
+		if err != nil {
+			return nil, fmt.Errorf("failed to get stats for %s: %w", tableName, err)
+		}
+		
+		stats[tableName] = count
+	}
+	
+	return stats, nil
 }

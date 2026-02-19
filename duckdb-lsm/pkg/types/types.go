@@ -1,13 +1,17 @@
 package types
 
-import "fmt"
-
+// CustomTs represents a 3-part timestamp (EpochID, BrokerID, AssignedTs)
+// This matches the timestamp structure from the paper's design
 type CustomTs struct {
-	EpochID    int64
-	BrokerID   int64
-	AssignedTs int64
+	EpochID    int64 // Highest order - epoch number
+	BrokerID   int64 // Middle order - broker identifier
+	AssignedTs int64 // Lowest order - assigned timestamp within epoch/broker
 }
 
+// Compare returns:
+//  -1 if t < other
+//   0 if t == other
+//  +1 if t > other
 func (t CustomTs) Compare(other CustomTs) int {
 	if t.EpochID != other.EpochID {
 		if t.EpochID < other.EpochID {
@@ -30,33 +34,12 @@ func (t CustomTs) Compare(other CustomTs) int {
 	return 0
 }
 
+// LessOrEqual returns true if t <= other
 func (t CustomTs) LessOrEqual(other CustomTs) bool {
 	return t.Compare(other) <= 0
 }
 
-func (t CustomTs) String() string {
-	return fmt.Sprintf("(%d,%d,%d)", t.EpochID, t.BrokerID, t.AssignedTs)
+// Less returns true if t < other
+func (t CustomTs) Less(other CustomTs) bool {
+	return t.Compare(other) < 0
 }
-
-type BadgerEntry struct {
-	Key       []byte
-	Value     []byte
-	Timestamp CustomTs
-	Meta      byte
-	UserMeta  byte
-	ExpiresAt uint64
-}
-
-type Item struct {
-	key       []byte
-	value     []byte
-	timestamp CustomTs
-}
-
-func NewItem(key, value []byte, ts CustomTs) *Item {
-	return &Item{key: key, value: value, timestamp: ts}
-}
-
-func (i *Item) Key() []byte         { return i.key }
-func (i *Item) Value() []byte       { return i.value }
-func (i *Item) Timestamp() CustomTs { return i.timestamp }

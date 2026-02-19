@@ -25,6 +25,7 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/storage"
+	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/types"
 	"github.com/dgraph-io/badger/v4/fb"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/pb"
@@ -1204,14 +1205,18 @@ func (db *DB) handleMemTableFlushPartitioned() error {
 		return entries[i].version < entries[j].version
 	})
 
-	// Convert to Darshan entries and flush to DuckDB in background
+	// Convert to storage entries and flush to DuckDB in background
 	if db.duckDBStorage != nil {
-		duckEntries := make([]*storage.DarshanEntry, 0, len(entries))
+		duckEntries := make([]storage.Entry, 0, len(entries))
 		for _, entry := range entries {
-			duckEntries = append(duckEntries, &storage.DarshanEntry{
-				Key:     entry.Key,
-				Value:   entry.Value,
-				Version: entry.version,
+			duckEntries = append(duckEntries, storage.Entry{
+				Key:   entry.Key,
+				Value: entry.Value,
+				Timestamp: types.CustomTs{
+					EpochID:    int64(entry.version),
+					BrokerID:   0,
+					AssignedTs: 0,
+				},
 			})
 		}
 		// Flush to DuckDB (non-blocking, in background)
