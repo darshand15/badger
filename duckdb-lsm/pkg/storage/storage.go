@@ -14,11 +14,14 @@ import (
 
 // DuckDBStorage unified implementation
 type DuckDBStorage struct {
-	db       *sql.DB
-	ctx      context.Context
-	partCalc *PartitionCalculator
-	mu       sync.RWMutex
-	numParts int
+    db       *sql.DB
+    ctx      context.Context
+    partCalc *PartitionCalculator
+    mu       sync.RWMutex
+    numParts int
+    
+    connCache map[int]*sql.Conn
+    connMu    sync.Mutex
 }
 
 // NewDuckDBStorage creates a new DuckDB storage instance

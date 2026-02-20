@@ -1216,10 +1216,14 @@ func (db *DB) handleMemTableFlushPartitioned() error {
 			})
 		}
 
-		// Use Appender API for fast bulk insert
-		if err := db.duckDBStorage.FlushDarshanEntries(duckEntries); err != nil {
-    		return fmt.Errorf("DuckDB flush failed: %w", err)  // Change this line too
-		}
+		// Launch async flush - don't wait!
+		go func(entries []*storage.DarshanEntry) {
+    		if err := db.duckDBStorage.FlushDarshanEntries(entries); err != nil {
+        		db.opt.Errorf("DuckDB async flush failed: %v", err)
+    	}
+		}(duckEntries)
+
+		// ⭐ Return immediately - writes don't wait for DuckDB
 		return nil
 	}
 
