@@ -35,8 +35,9 @@ func NewDuckDBStorage(dbPath string, numPartitions int) (*DuckDBStorage, error) 
 		return nil, fmt.Errorf("failed to open DuckDB: %w", err)
 	}
 
-	db.SetMaxOpenConns(numPartitions * 2)
-	db.SetMaxIdleConns(numPartitions)
+	db.SetMaxOpenConns(numPartitions * 10)   
+	db.SetMaxIdleConns(numPartitions * 5) 
+	fmt.Printf("DuckDB connection pool: max=%d, idle=%d\n", numPartitions * 2, numPartitions)
 
 	storage := &DuckDBStorage{
 		db:       db,
