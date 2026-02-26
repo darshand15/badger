@@ -8,8 +8,8 @@ import (
 
 	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/types"
 	"github.com/dgraph-io/ristretto/v2/z"
-	duckdb "github.com/marcboeker/go-duckdb"
 	_ "github.com/marcboeker/go-duckdb"
+	duckdb "github.com/marcboeker/go-duckdb"
 )
 
 // DuckDBStorage unified implementation
@@ -282,6 +282,35 @@ func (s *DuckDBStorage) getPartition(key []byte) int {
 
 func (s *DuckDBStorage) Close() error {
 	return s.db.Close()
+}
+
+// CompactPartitions removes superseded versions (keeping only the latest per key)
+// and calls VACUUM so the DuckDB file actually shrinks. Equivalent to Badger GC for SSTables.
+func (s *DuckDBStorage) CompactPartitions() error {
+	for i := 0; i < s.numParts; i++ {
+		tableName := fmt.Sprintf("partition_%d", i)
+		// Delete all rows except the newest version per key.
+		deleteSQL := fmt.Sprintf(`
+			DELETE FROM %s
+			WHERE (key, epoch_id, broker_id, assigned_ts) IN (
+				SELECT key, epoch_id, broker_id, assigned_ts
+				FROM (
+					SELECT key, epoch_id, broker_id, assigned_ts,
+						ROW_NUMBER() OVER (
+							PARTITION BY key
+							ORDER BY epoch_id DESC, broker_id DESC, assigned_ts DESC
+						) AS rn
+					FROM %s
+				) sub WHERE rn > 1
+			)
+		`, tableName, tableName)
+		if _, err := s.db.ExecContext(s.ctx, deleteSQL); err != nil {
+			return fmt.Errorf("compact %s: %w", tableName, err)
+		}
+	}
+	// VACUUM rewrites the file, reclaiming space freed by the DELETEs above.
+	_, err := s.db.ExecContext(s.ctx, "VACUUM")
+	return err
 }
 
 func (s *DuckDBStorage) GetStats() (map[string]interface{}, error) {

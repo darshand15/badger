@@ -354,67 +354,20 @@ func TestConcurrentWriteCASRoot(t *testing.T) {
 		}
 		wg.Wait()
 
-		// --- REPLACEMENT: Direct Verification of db.root ---
-
-		// 1. Capture the snapshot
-		head := db.root.Load()
-		if head == nil {
-			t.Fatal("db.root is nil, no data was written!")
-		}
-
-		// 2. Load all data from the linked list into a map for easy verification.
-		// Map: UserKey (string) -> *Entry
-		foundData := make(map[string]*Entry)
-
-		// Traverse the lock-free list (Newest -> Oldest)
-		count := 0
-		for n := head; n != nil; n = n.next {
-			for _, e := range n.kvs {
-				if e == nil {
-					continue
-				}
-
-				// PARSING LOGIC:
-				// Badger keys usually have an 8-byte timestamp appended.
-				// We need to strip it to get the "user key" for verification.
-				userKey := e.Key
-				if len(e.Key) > 8 {
-					userKey = e.Key[:len(e.Key)-8]
-				}
-
-				kStr := string(userKey)
-
-				// If we encounter duplicates (updates), we only care about the newest.
-				// Since we traverse Head (New) -> Tail (Old), we only insert if not exists.
-				if _, exists := foundData[kStr]; !exists {
-					foundData[kStr] = e
-					count++
-				}
-			}
-		}
-
-		t.Logf("Found %d unique keys in db.root", count)
-
-		// 3. Verify against the expected data
+		// Verify data via txn.Get (db.root is only used in the DuckDB path).
+		txn := db.NewTransaction(false)
+		defer txn.Discard()
 		for i := 0; i < n; i++ {
 			for j := 0; j < m; j++ {
-				expectedKey := fmt.Sprintf("k%05d_%08d", i, j)
-				expectedVal := fmt.Sprintf("v%05d_%08d", i, j)
-				expectedMeta := byte(j % 127)
-
-				// Check if key exists
-				entry, ok := foundData[expectedKey]
-				require.True(t, ok, "Key %s missing from db.root", expectedKey)
-
-				// Check Value
-				require.Equal(t, expectedVal, string(entry.Value), "Value mismatch for key %s", expectedKey)
-
-				// Check Metadata
-				require.Equal(t, expectedMeta, entry.UserMeta, "Meta mismatch for key %s", expectedKey)
+				key := []byte(fmt.Sprintf("k%05d_%08d", i, j))
+				item, err := txn.Get(key)
+				require.NoError(t, err, "key %s not found", key)
+				val, _ := item.ValueCopy(nil)
+				require.Equal(t, fmt.Sprintf("v%05d_%08d", i, j), string(val))
+				require.Equal(t, byte(j%127), item.UserMeta())
 			}
 		}
-
-		t.Log("Direct verification passed successfully!")
+		t.Log("Verification via txn.Get passed!")
 	})
 }
 
@@ -511,7 +464,7 @@ func TestConcurrentWriteAndGet(t *testing.T) {
 		wg.Wait()
 
 		// simulate flush
-		if err := db.handleMemTableFlushPartitioned(); err != nil {
+		if err := db.handleMemTableFlushPartitioned(db.mt, nil); err != nil {
 			t.Fatalf("flush error: %v", err)
 		}
 

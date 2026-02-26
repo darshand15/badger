@@ -25,6 +25,7 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/storage"
+	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/types"
 
 	"github.com/dgraph-io/badger/v4/fb"
 	"github.com/dgraph-io/badger/v4/options"
@@ -796,40 +797,10 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 		return y.ValueStruct{}, ErrDBClosed
 	}
 
-	// Extract logical key + snapshot timestamp from seek key
+	// Extract snapshot timestamp from seek key
 	readTs := y.ParseTs(key)
-	logicalKey := y.ParseKey(key)
 
-	// 1. 🚀 Check the CAS-prepend root list first
-	var best y.ValueStruct
-	for n := db.root.Load(); n != nil; n = n.next {
-		for _, e := range n.kvs {
-			if !bytes.Equal(y.ParseKey(e.Key), logicalKey) {
-				continue
-			}
-			// Only consider versions <= readTs
-			if e.version <= readTs {
-				if isDeletedOrExpired(e.meta, e.ExpiresAt) {
-					return y.ValueStruct{}, ErrKeyNotFound
-				}
-				// Pick the newest visible version <= readTs
-				if e.version > best.Version {
-					best = y.ValueStruct{
-						Value:     e.Value,
-						Meta:      e.meta,
-						UserMeta:  e.UserMeta,
-						ExpiresAt: e.ExpiresAt,
-						Version:   e.version,
-					}
-				}
-			}
-		}
-	}
-	if best.Value != nil || best.Meta != 0 {
-		return best, nil
-	}
-
-	// 2. Fallback: memtables (mt + imm)
+	// 1. Fallback: memtables (mt + imm)
 	tables, decr := db.getMemTables()
 	defer decr()
 
@@ -1178,108 +1149,49 @@ func (db *DB) handleMemTableFlushClassic(mt *memTable, dropPrefixes [][]byte) er
 
 // FULLY OPTIMIZED VERSION - All unnecessary work removed
 
-func (db *DB) handleMemTableFlushPartitioned() error {
-	// ⭐ OPTIMIZATION 1: Fast check before any work
-	if db.root.Load() == nil {
-		return nil // Nothing to flush - return immediately
+func (db *DB) handleMemTableFlushPartitioned(mt *memTable, dropPrefixes [][]byte) error {
+	if db.duckDBStorage == nil {
+		// DuckDB not initialised — fall through to classic SSTable flush.
+		return db.handleMemTableFlushClassic(mt, dropPrefixes)
 	}
 
-	// 🚀 Atomically swap out the CAS-prepended list
-	head := db.root.Swap(nil)
-	if head == nil {
-		return nil // Double-check after swap
+	// Read all entries from the memtable skiplist and convert to DuckDB format.
+	// We copy key/value bytes because the memtable will be GC'd after this call.
+	itr := mt.sl.NewUniIterator(false)
+	defer itr.Close()
+
+	var duckEntries []*storage.DarshanEntry
+	for itr.Rewind(); itr.Valid(); itr.Next() {
+		rawKey := itr.Key()
+		vs := itr.Value()
+		logicalKey := append([]byte(nil), y.ParseKey(rawKey)...)
+		version := y.ParseTs(rawKey)
+		val := append([]byte(nil), vs.Value...)
+
+		duckEntries = append(duckEntries, &storage.DarshanEntry{
+			Key:     logicalKey,
+			Value:   val,
+			Version: version,
+			Timestamp: types.CustomTs{
+				EpochID:    int64(version),
+				BrokerID:   0,
+				AssignedTs: 0,
+			},
+		})
 	}
 
-	var nodes []*upsertNode
-	for n := head; n != nil; n = n.next {
-		nodes = append(nodes, n)
-	}
-
-	var entries []*Entry
-	for _, node := range nodes {
-		entries = append(entries, node.kvs...)
-	}
-
-	if len(entries) == 0 {
+	if len(duckEntries) == 0 {
 		return nil
 	}
 
-	// // ⭐ OPTIMIZATION 2: Only sort if actually needed
-	// // If entries are already ordered by your write path, REMOVE THIS!
-	// // Try commenting out and see if tests still pass
-	// sort.SliceStable(entries, func(i, j int) bool {
-	// 	if cmp := bytes.Compare(entries[i].Key, entries[j].Key); cmp != 0 {
-	// 		return cmp < 0
-	// 	}
-	// 	return entries[i].version < entries[j].version
-	// })
-
-	// ⭐ OPTIMIZATION 3: Async flush WITHOUT copying
-	if db.duckDBStorage != nil {
-		// Pass entries directly - no copy needed!
-		go func(entries []*Entry) {
-			// Convert to DuckDB format
-			duckEntries := make([]*storage.DarshanEntry, 0, len(entries))
-			for _, entry := range entries {
-				duckEntries = append(duckEntries, &storage.DarshanEntry{
-					Key:     entry.Key,
-					Value:   entry.Value,
-					Version: entry.version,
-				})
-			}
-
-			if err := db.duckDBStorage.FlushDarshanEntries(duckEntries); err != nil {
-				db.opt.Errorf("DuckDB async flush failed: %v", err)
-			}
-		}(entries) // No copy!
-
-		return nil
-	}
-
-	// Fallback to Badger SSTables
-	fanout := db.opt.PartitionFanOut
-	if fanout <= 1 {
-		tbl, err := db.lc.buildSSTable(entries)
-		if err != nil {
-			return err
+	// Async flush: the flusher goroutine can move on immediately;
+	// DuckDB writes happen in the background.
+	go func() {
+		if err := db.duckDBStorage.FlushDarshanEntries(duckEntries); err != nil {
+			db.opt.Errorf("DuckDB async flush failed: %v", err)
 		}
-		if tbl == nil {
-			return nil
-		}
-		if err := db.lc.addLevel0PartitionedTable(0, tbl); err != nil {
-			_ = tbl.DecrRef()
-			return err
-		}
-		_ = tbl.DecrRef()
-		db.lc.checkPartitionOverflow(0)
-		return nil
-	}
+	}()
 
-	parts := make(map[int][]*Entry, fanout)
-	for _, e := range entries {
-		pid := db.getPartitionForKey(e.Key, 0)
-		parts[pid] = append(parts[pid], e)
-	}
-
-	for pid, ents := range parts {
-		if len(ents) == 0 {
-			continue
-		}
-		tbl, err := db.lc.buildSSTable(ents)
-		if err != nil {
-			return err
-		}
-		if tbl == nil {
-			continue
-		}
-		if err := db.lc.addLevel0PartitionedTable(pid, tbl); err != nil {
-			_ = tbl.DecrRef()
-			return err
-		}
-		_ = tbl.DecrRef()
-	}
-
-	db.lc.checkPartitionOverflow(0)
 	return nil
 }
 
@@ -1358,8 +1270,8 @@ func (db *DB) getPartitionForKey(key []byte, level int) int {
 
 // handleMemTableFlush must be run serially.
 func (db *DB) handleMemTableFlush(mt *memTable, dropPrefixes [][]byte) error {
-	if db.opt.UseDuckDB && db.opt.PartitionFanOut > 1 {
-		return db.handleMemTableFlushPartitioned()
+	if db.opt.UseDuckDB {
+		return db.handleMemTableFlushPartitioned(mt, dropPrefixes)
 	}
 	return db.handleMemTableFlushClassic(mt, dropPrefixes)
 }
@@ -1508,6 +1420,11 @@ func (db *DB) RunValueLogGC(discardRatio float64) error {
 	}
 	if discardRatio >= 1.0 || discardRatio <= 0.0 {
 		return ErrInvalidRequest
+	}
+
+	// When DuckDB is the backing store, compact it to remove superseded versions.
+	if db.opt.UseDuckDB && db.duckDBStorage != nil {
+		_ = db.duckDBStorage.CompactPartitions() // best-effort; ignore errors
 	}
 
 	// Pick a log file and run GC

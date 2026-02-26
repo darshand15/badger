@@ -1,9 +1,9 @@
 package badger
 
 import (
-    "fmt"
-    "testing"
+	"fmt"
 	"math"
+	"testing"
 )
 
 func TestDuckDBIntegration(t *testing.T) {
@@ -33,7 +33,7 @@ func TestDuckDBIntegration(t *testing.T) {
     }
 
     // Trigger flush to DuckDB
-    if err := db.handleMemTableFlushPartitioned(); err != nil {
+    if err := db.handleMemTableFlushPartitioned(db.mt, nil); err != nil {
         t.Fatal(err)
     }
 

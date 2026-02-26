@@ -336,7 +336,7 @@ func TestTimestampScenarios(t *testing.T) {
 
 				if sc.triggerFlush {
 					// simulate flush
-					if err := db.handleMemTableFlushPartitioned(); err != nil {
+					if err := db.handleMemTableFlushPartitioned(db.mt, nil); err != nil {
 						t.Fatalf("flush error: %v", err)
 					}
 				}

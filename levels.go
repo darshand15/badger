@@ -1649,11 +1649,14 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 			tbls = h.tables
 		}
 
+		strLevel := fmt.Sprintf("l%d", h.level)
 		for _, tbl := range tbls {
 			if tbl.DoesNotHave(hash) {
+				y.NumLSMBloomHitsAdd(s.kv.opt.MetricsEnabled, strLevel, 1)
 				continue
 			}
 
+			y.NumLSMGetsAdd(s.kv.opt.MetricsEnabled, strLevel, 1)
 			// Iterator options are in the same package `table`
 			itr := tbl.NewIterator(table.NOCACHE)
 			defer itr.Close()
