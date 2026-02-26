@@ -242,40 +242,44 @@ func Open(opt Options) (*DB, error) {
 		}
 	}()
 
-	    // Initialize DuckDB storage
-    numDuckDBPartitions := opt.PartitionFanOut
-    if numDuckDBPartitions <= 0 {
-        numDuckDBPartitions = 1
-    }
+	// Initialize DuckDB storage only when explicitly enabled
+	var duckStore *storage.DuckDBStorage
+	if opt.UseDuckDB {
+		numDuckDBPartitions := opt.PartitionFanOut
+		if numDuckDBPartitions <= 0 {
+			numDuckDBPartitions = 1
+		}
 
-    var duckdbPath string
-    if opt.InMemory {
-        duckdbPath = ":memory:"
-    } else {
-        duckdbPath = filepath.Join(opt.Dir, "duckdb_data")
-    }
+		var duckdbPath string
+		if opt.InMemory {
+			duckdbPath = ":memory:"
+		} else {
+			duckdbPath = filepath.Join(opt.Dir, "duckdb_data")
+		}
 
-    duckStore, err := storage.NewDuckDBStorage(duckdbPath, numDuckDBPartitions)
-    if err != nil {
-        return nil, fmt.Errorf("failed to initialize DuckDB storage: %w", err)
-    }
+		var duckErr error
+		duckStore, duckErr = storage.NewDuckDBStorage(duckdbPath, numDuckDBPartitions)
+		if duckErr != nil {
+			return nil, fmt.Errorf("failed to initialize DuckDB storage: %w", duckErr)
+		}
+	}
 
-    db := &DB{
-        imm:               make([]*memTable, 0, opt.NumMemtables),
-        flushChan:         make(chan *memTable, opt.NumMemtables),
-        writeCh:           make(chan *request, kvWriteChCapacity),
-        duckDBStorage:     duckStore,
-        opt:               opt,
-        manifest:          manifestFile,
-        dirLockGuard:      dirLockGuard,
-        valueDirGuard:     valueDirLockGuard,
-        orc:               newOracle(opt),
-        pub:               newPublisher(),
-        allocPool:         z.NewAllocatorPool(8),
-        bannedNamespaces:  &lockedKeys{keys: make(map[uint64]struct{})},
-        threshold:         initVlogThreshold(&opt),
-    }
-    db.root.Store(nil)
+	db := &DB{
+		imm:              make([]*memTable, 0, opt.NumMemtables),
+		flushChan:        make(chan *memTable, opt.NumMemtables),
+		writeCh:          make(chan *request, kvWriteChCapacity),
+		duckDBStorage:    duckStore,
+		opt:              opt,
+		manifest:         manifestFile,
+		dirLockGuard:     dirLockGuard,
+		valueDirGuard:    valueDirLockGuard,
+		orc:              newOracle(opt),
+		pub:              newPublisher(),
+		allocPool:        z.NewAllocatorPool(8),
+		bannedNamespaces: &lockedKeys{keys: make(map[uint64]struct{})},
+		threshold:        initVlogThreshold(&opt),
+	}
+	db.root.Store(nil)
 
 	// Cleanup all the goroutines started by badger in case of an error.
 	defer func() {
@@ -371,13 +375,9 @@ func Open(opt Options) (*DB, error) {
 	// Initialize vlog struct.
 	db.vlog.init(db)
 
-	if !opt.ReadOnly{
-		// No background compactions
-		// Other way to do is set numCompactors to zero in options
-		if opt.PartitionFanOut != 0{
-			db.closers.compactors = z.NewCloser(1)
-			db.lc.startCompact(db.closers.compactors)
-		}
+	if !opt.ReadOnly {
+		db.closers.compactors = z.NewCloser(1)
+		db.lc.startCompact(db.closers.compactors)
 
 		db.closers.memtable = z.NewCloser(1)
 		go func() {
@@ -1358,10 +1358,10 @@ func (db *DB) getPartitionForKey(key []byte, level int) int {
 
 // handleMemTableFlush must be run serially.
 func (db *DB) handleMemTableFlush(mt *memTable, dropPrefixes [][]byte) error {
-    if db.opt.PartitionFanOut > 1 {
-        return db.handleMemTableFlushPartitioned()
-    }
-    return db.handleMemTableFlushClassic(mt, dropPrefixes)
+	if db.opt.UseDuckDB && db.opt.PartitionFanOut > 1 {
+		return db.handleMemTableFlushPartitioned()
+	}
+	return db.handleMemTableFlushClassic(mt, dropPrefixes)
 }
 
 // flushMemtable must keep running until we send it an empty memtable. If there
@@ -1382,7 +1382,7 @@ func (db *DB) flushMemtable(lc *z.Closer) {
 				continue
 			}
 
-			if db.opt.PartitionFanOut > 1 {
+			if db.opt.UseDuckDB && db.opt.PartitionFanOut > 1 {
 				db.lc.checkPartitionOverflow(0)
 			}
 

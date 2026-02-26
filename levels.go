@@ -1642,21 +1642,17 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 
 		h.RLock()
 		var tbls []*table.Table
-		if s.kv.opt.PartitionFanOut > 1 && len(h.partitionedTables) > 0 {
+		if s.kv.opt.UseDuckDB && s.kv.opt.PartitionFanOut > 1 && len(h.partitionedTables) > 0 {
 			pid := int(z.MemHash(logicalKey) % uint64(s.kv.opt.PartitionFanOut))
 			tbls = h.partitionedTables[pid]
 		} else {
-			// tbls = h.tables // dd_modify
-			tbls = h.partitionedTables[0]
+			tbls = h.tables
 		}
 
 		for _, tbl := range tbls {
 			if tbl.DoesNotHave(hash) {
-				fmt.Printf("%s Does not have hash\n", string(logicalKey))
 				continue
 			}
-
-			fmt.Printf("%s has hash\n", string(logicalKey))
 
 			// Iterator options are in the same package `table`
 			itr := tbl.NewIterator(table.NOCACHE)
