@@ -634,8 +634,16 @@ func (txn *Txn) Discard() {
 
 func (txn *Txn) commitAndSend() (*request, uint64, error) {
 	orc := txn.db.orc
-	orc.writeChLock.Lock()
-	defer orc.writeChLock.Unlock()
+
+	// useLockFree is true only for non-DuckDB databases that explicitly set
+	// NumCompactors=0 (e.g. BenchmarkLockFreeIngest). All other writes use the
+	// standard write-channel path which requires writeChLock so that commit
+	// timestamps and write-channel position stay in lockstep.
+	useLockFree := !txn.db.opt.UseDuckDB && txn.db.opt.NumCompactors == 0
+	if !useLockFree {
+		orc.writeChLock.Lock()
+		defer orc.writeChLock.Unlock()
+	}
 
 	commitTs, conflict := orc.newCommitTs(txn)
 	if conflict {
@@ -689,6 +697,28 @@ func (txn *Txn) commitAndSend() (*request, uint64, error) {
 		})
 	}
 
+	// ----------------------------------------------------------------
+	// Lock-free CAS path: only when NumCompactors==0 and !UseDuckDB.
+	// Prepend a node into db.root, bypassing the write channel.
+	// A background drain goroutine periodically moves db.root entries
+	// to the write channel to bound memory and drive L0 flushes.
+	// ----------------------------------------------------------------
+	if useLockFree {
+		node := &upsertNode{kvs: entries}
+		for {
+			old := txn.db.root.Load()
+			node.next = old
+			if txn.db.root.CompareAndSwap(old, node) {
+				break
+			}
+		}
+		// doneCommit must be called before returning so the watermark advances.
+		orc.doneCommit(commitTs)
+		// Return req=nil to signal lock-free completion; callers must check.
+		return nil, commitTs, nil
+	}
+
+	// Standard write-channel path (DuckDB or NumCompactors>0).
 	req, err := txn.db.sendToWriteCh(entries)
 	if err != nil {
 		orc.doneCommit(commitTs)
@@ -755,9 +785,14 @@ func (txn *Txn) Commit() error {
 	defer txn.Discard()
 
 	// commitAndSend returns req+commitTs directly (no closure) to avoid 1 heap alloc.
+	// req is nil for the lock-free CAS path; doneCommit was already called there.
 	req, commitTs, err := txn.commitAndSend()
 	if err != nil {
 		return err
+	}
+	if req == nil {
+		// Lock-free CAS path: data is already in db.root and doneCommit was called.
+		return nil
 	}
 	// If batchSet failed, LSM would not have been updated. So, no need to rollback anything.
 
@@ -820,6 +855,11 @@ func (txn *Txn) CommitWith(cb func(error)) {
 	req, commitTs, err := txn.commitAndSend()
 	if err != nil {
 		go runTxnCallback(&txnCb{user: cb, err: err})
+		return
+	}
+	if req == nil {
+		// Lock-free CAS path: data is already in db.root and doneCommit was called.
+		go runTxnCallback(&txnCb{user: cb})
 		return
 	}
 

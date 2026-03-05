@@ -616,8 +616,14 @@ func (db *DB) close() (err error) {
 	// trying to push stuff into the memtable. This will also resolve the value
 	// offset problem: as we push into memtable, we update value offsets there.
 	if db.mt != nil {
-		if db.mt.sl.Empty() {
-			// Remove the memtable if empty.
+		// For the lock-free (non-DuckDB) path, db.root may hold unflushed entries.
+		// handleMemTableFlushClassic already drains db.root before building the L0
+		// table, so we just need to ensure db.mt is pushed to flushChan even when its
+		// skiplist is empty, as long as db.root is non-nil. Do NOT drain into db.mt.sl
+		// here — the arena may be full.
+		hasRootEntries := !db.opt.UseDuckDB && db.opt.NumCompactors == 0 && db.root.Load() != nil
+		if db.mt.sl.Empty() && !hasRootEntries {
+			// Nothing to flush — safe to discard.
 			db.mt.DecrRef()
 		} else {
 			db.opt.Debugf("Flushing memtable")
@@ -819,10 +825,41 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 		return y.ValueStruct{}, ErrDBClosed
 	}
 
-	// Extract snapshot timestamp from seek key
+	// Extract snapshot timestamp + logical key from seek key.
 	readTs := y.ParseTs(key)
+	logicalKey := y.ParseKey(key)
 
-	// 1. Fallback: memtables (mt + imm)
+	// 1. 🚀 Check the lock-free CAS-prepend root list first (non-DuckDB writes
+	// with NumCompactors==0 land here before being drained to L0). When the
+	// standard write channel is used, db.root is always nil and this is a no-op.
+	var best y.ValueStruct
+	for n := db.root.Load(); n != nil; n = n.next {
+		for _, e := range n.kvs {
+			if !bytes.Equal(y.ParseKey(e.Key), logicalKey) {
+				continue
+			}
+			if e.version <= readTs {
+				if isDeletedOrExpired(e.meta, e.ExpiresAt) {
+					return y.ValueStruct{}, ErrKeyNotFound
+				}
+				if e.version > best.Version {
+					best = y.ValueStruct{
+						Value:     e.Value,
+						Meta:      e.meta,
+						UserMeta:  e.UserMeta,
+						ExpiresAt: e.ExpiresAt,
+						Version:   e.version,
+					}
+				}
+			}
+		}
+	}
+	if best.Value != nil || best.Meta != 0 {
+		y.NumGetsWithResultsAdd(db.opt.MetricsEnabled, 1)
+		return best, nil
+	}
+
+	// 2. Fallback: memtables (mt + imm)
 	tables, decr := db.getMemTables()
 	defer decr()
 
@@ -1144,7 +1181,48 @@ func buildL0Table(iter y.Iterator, dropPrefixes [][]byte, bopts table.Options) *
 // handleMemTableFlush must be run serially.
 func (db *DB) handleMemTableFlushClassic(mt *memTable, dropPrefixes [][]byte) error {
 	bopts := buildTableOptions(db)
-	itr := mt.sl.NewUniIterator(false)
+
+	// For the lock-free (non-DuckDB) path, db.root may hold entries that
+	// bypassed the write channel.  mt.sl is already full (that's why the flush
+	// was triggered), so we CANNOT put more entries into its arena.  Instead,
+	// collect the root entries into a fresh temporary skiplist sized exactly for
+	// them, then merge the two sorted streams when building the L0 table.
+	var itr y.Iterator
+	if !db.opt.UseDuckDB && db.opt.NumCompactors == 0 {
+		if head := db.root.Swap(nil); head != nil {
+			// First pass: compute total byte budget for the temp arena.
+			var arenaBytes int64
+			for n := head; n != nil; n = n.next {
+				for _, e := range n.kvs {
+					arenaBytes += int64(len(e.Key)) + int64(len(e.Value)) + int64(skl.MaxNodeSize)
+				}
+			}
+			const minArena = 4 << 10 // 4 KiB floor
+			if arenaBytes < minArena {
+				arenaBytes = minArena
+			}
+			tmpSl := skl.NewSkiplist(arenaBytes * 2) // 2× headroom for skl overhead
+			defer tmpSl.DecrRef()
+			for n := head; n != nil; n = n.next {
+				for _, e := range n.kvs {
+					tmpSl.Put(e.Key, y.ValueStruct{
+						Value:     e.Value,
+						Meta:      e.meta,
+						UserMeta:  e.UserMeta,
+						ExpiresAt: e.ExpiresAt,
+					})
+				}
+			}
+			itr = table.NewMergeIterator([]y.Iterator{
+				mt.sl.NewUniIterator(false),
+				tmpSl.NewUniIterator(false),
+			}, false)
+		}
+	}
+	if itr == nil {
+		itr = mt.sl.NewUniIterator(false)
+	}
+
 	builder := buildL0Table(itr, nil, bopts)
 	defer builder.Close()
 
