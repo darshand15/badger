@@ -8,6 +8,8 @@
 package badger
 
 import (
+	"fmt"
+
 	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/storage"
 	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/types"
 	"github.com/dgraph-io/badger/v4/y"
@@ -81,11 +83,12 @@ func (db *DB) handleMemTableFlushPartitioned(mt *memTable, dropPrefixes [][]byte
 		return nil
 	}
 
-	go func() {
-		if err := db.duckDBStorage.FlushEntries(entries); err != nil {
-			db.opt.Errorf("DuckDB async flush failed: %v", err)
-		}
-	}()
+	// Flush synchronously so reads after this call see the written data.
+	// The async goroutine caused read-after-write inconsistency: the function
+	// returned nil before DuckDB had persisted any entries.
+	if err := db.duckDBStorage.FlushEntries(entries); err != nil {
+		return fmt.Errorf("DuckDB flush failed: %w", err)
+	}
 
 	return nil
 }

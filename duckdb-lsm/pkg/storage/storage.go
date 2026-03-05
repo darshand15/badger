@@ -185,6 +185,14 @@ func (s *DuckDBStorage) FlushDarshanEntries(entries []*DarshanEntry) error {
 		partitions[pid] = append(partitions[pid], entry)
 	}
 
+	// Fast path: single partition — avoid goroutine/WaitGroup/errChan overhead.
+	// This is the common case for small batches and uniform key distributions.
+	if len(partitions) == 1 {
+		for pid, pEntries := range partitions {
+			return s.flushPartitionWithAppender(pid, pEntries)
+		}
+	}
+
 	// Flush each partition in parallel using Appender API
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(partitions))
