@@ -47,10 +47,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-require github.com/dgraph-io/badger/v4/duckdb-lsm v0.0.0
-
-replace github.com/dgraph-io/badger/v4/duckdb-lsm => ./duckdb-lsm
-
 retract v4.0.0 // see #1888 and #1889
 
 retract v4.3.0 // see #2113 and #2121

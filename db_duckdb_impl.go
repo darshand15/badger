@@ -10,19 +10,18 @@ package badger
 import (
 	"fmt"
 
-	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/storage"
-	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/types"
+	"github.com/dgraph-io/badger/v4/duckdb"
 	"github.com/dgraph-io/badger/v4/y"
 )
 
-// duckDBStorageWrapper wraps *storage.DuckDBStorage to implement duckDBIface.
+// duckDBStorageWrapper wraps *duckdb.DuckDBStorage to implement duckDBIface.
 type duckDBStorageWrapper struct {
-	s *storage.DuckDBStorage
+	s *duckdb.DuckDBStorage
 }
 
 // newDuckDBBackend creates a DuckDB-backed storage implementation.
 func newDuckDBBackend(path string, parts int) (duckDBIface, error) {
-	s, err := storage.NewDuckDBStorage(path, parts)
+	s, err := duckdb.NewDuckDBStorage(path, parts)
 	if err != nil {
 		return nil, err
 	}
@@ -30,7 +29,7 @@ func newDuckDBBackend(path string, parts int) (duckDBIface, error) {
 }
 
 func (w *duckDBStorageWrapper) Read(key []byte, epochID int64) ([]byte, uint64, error) {
-	entry, err := w.s.Read(key, types.CustomTs{EpochID: epochID})
+	entry, err := w.s.Read(key, duckdb.CustomTs{EpochID: epochID})
 	if err != nil || entry == nil {
 		return nil, 0, err
 	}
@@ -38,13 +37,13 @@ func (w *duckDBStorageWrapper) Read(key []byte, epochID int64) ([]byte, uint64, 
 }
 
 func (w *duckDBStorageWrapper) FlushEntries(entries []duckEntry) error {
-	darshanEntries := make([]*storage.DarshanEntry, len(entries))
+	darshanEntries := make([]*duckdb.DarshanEntry, len(entries))
 	for i, e := range entries {
-		darshanEntries[i] = &storage.DarshanEntry{
+		darshanEntries[i] = &duckdb.DarshanEntry{
 			Key:     e.Key,
 			Value:   e.Value,
 			Version: e.Version,
-			Timestamp: types.CustomTs{
+			Timestamp: duckdb.CustomTs{
 				EpochID: int64(e.Version),
 			},
 		}
