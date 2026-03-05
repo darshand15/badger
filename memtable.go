@@ -291,15 +291,16 @@ func (lf *logFile) encodeEntry(buf *bytes.Buffer, e *Entry, offset uint32) (int,
 		userMeta:  e.UserMeta,
 	}
 
-	hash := crc32.New(y.CastagnoliCrcTable)
-	writer := io.MultiWriter(buf, hash)
-
 	// encode header.
 	var headerEnc [maxHeaderSize]byte
 	sz := h.Encode(headerEnc[:])
-	y.Check2(writer.Write(headerEnc[:sz]))
+
 	// we'll encrypt only key and value.
 	if lf.encryptionEnabled() {
+		// Encrypted path: use io.MultiWriter + crc32.New (infrequent; encryption is rare).
+		hash := crc32.New(y.CastagnoliCrcTable)
+		writer := io.MultiWriter(buf, hash)
+		y.Check2(writer.Write(headerEnc[:sz]))
 		// TODO: no need to allocate the bytes. we can calculate the encrypted buf one by one
 		// since we're using ctr mode of AES encryption. Ordering won't changed. Need some
 		// refactoring in XORBlock which will work like stream cipher.
@@ -310,15 +311,35 @@ func (lf *logFile) encodeEntry(buf *bytes.Buffer, e *Entry, offset uint32) (int,
 			writer, eBuf, lf.dataKey.Data, lf.generateIV(offset)); err != nil {
 			return 0, y.Wrapf(err, "Error while encoding entry for vlog.")
 		}
-	} else {
-		// Encryption is disabled so writing directly to the buffer.
-		y.Check2(writer.Write(e.Key))
-		y.Check2(writer.Write(e.Value))
+		var crcBuf [crc32.Size]byte
+		binary.BigEndian.PutUint32(crcBuf[:], hash.Sum32())
+		y.Check2(buf.Write(crcBuf[:]))
+		return len(headerEnc[:sz]) + len(e.Key) + len(e.Value) + len(crcBuf), nil
 	}
+
+	// Fast path: no encryption.
+	// Avoid heap allocations from crc32.New and io.MultiWriter by using
+	// crc32.Update with a plain uint32 accumulator instead.
+	// Also avoid y.Check2(buf.Write(...)) which boxes the int return to interface{}.
+	var crcVal uint32
+	if _, err := buf.Write(headerEnc[:sz]); err != nil {
+		return 0, err
+	}
+	crcVal = crc32.Update(crcVal, y.CastagnoliCrcTable, headerEnc[:sz])
+	if _, err := buf.Write(e.Key); err != nil {
+		return 0, err
+	}
+	crcVal = crc32.Update(crcVal, y.CastagnoliCrcTable, e.Key)
+	if _, err := buf.Write(e.Value); err != nil {
+		return 0, err
+	}
+	crcVal = crc32.Update(crcVal, y.CastagnoliCrcTable, e.Value)
 	// write crc32 hash.
 	var crcBuf [crc32.Size]byte
-	binary.BigEndian.PutUint32(crcBuf[:], hash.Sum32())
-	y.Check2(buf.Write(crcBuf[:]))
+	binary.BigEndian.PutUint32(crcBuf[:], crcVal)
+	if _, err := buf.Write(crcBuf[:]); err != nil {
+		return 0, err
+	}
 	// return encoded length.
 	return len(headerEnc[:sz]) + len(e.Key) + len(e.Value) + len(crcBuf), nil
 }

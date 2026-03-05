@@ -24,9 +24,6 @@ import (
 	humanize "github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
 
-	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/storage"
-	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/types"
-
 	"github.com/dgraph-io/badger/v4/fb"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/pb"
@@ -128,7 +125,7 @@ type DB struct {
 	indexCache *ristretto.Cache[uint64, *fb.TableIndex]
 	allocPool  *z.AllocatorPool
 
-	duckDBStorage *storage.DuckDBStorage
+	duckDBStorage duckDBIface
 }
 
 const (
@@ -244,7 +241,7 @@ func Open(opt Options) (*DB, error) {
 	}()
 
 	// Initialize DuckDB storage only when explicitly enabled
-	var duckStore *storage.DuckDBStorage
+	var duckStore duckDBIface
 	if opt.UseDuckDB {
 		numDuckDBPartitions := opt.PartitionFanOut
 		if numDuckDBPartitions <= 0 {
@@ -259,7 +256,7 @@ func Open(opt Options) (*DB, error) {
 		}
 
 		var duckErr error
-		duckStore, duckErr = storage.NewDuckDBStorage(duckdbPath, numDuckDBPartitions)
+		duckStore, duckErr = newDuckDBBackend(duckdbPath, numDuckDBPartitions)
 		if duckErr != nil {
 			return nil, fmt.Errorf("failed to initialize DuckDB storage: %w", duckErr)
 		}
@@ -822,6 +819,7 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 		}
 	}
 	if maxVs.Value != nil || maxVs.Meta != 0 {
+		y.NumGetsWithResultsAdd(db.opt.MetricsEnabled, 1)
 		return maxVs, nil
 	}
 
@@ -880,21 +878,25 @@ func (db *DB) writeToLSM(b *request) error {
 }
 
 // writeRequests is called serially by only one goroutine.
+// completeRequests marks every request in reqs as finished with the given
+// error and signals their WaitGroup. Extracted from the former inline done
+// closure to avoid a closure heap allocation on every writeRequests call.
+func completeRequests(reqs []*request, err error) {
+	for _, r := range reqs {
+		r.Err = err
+		r.Wg.Done()
+	}
+}
+
 func (db *DB) writeRequests(reqs []*request) error {
 	if len(reqs) == 0 {
 		return nil
 	}
 
-	done := func(err error) {
-		for _, r := range reqs {
-			r.Err = err
-			r.Wg.Done()
-		}
-	}
 	db.opt.Debugf("writeRequests called. Writing to value log")
 	err := db.vlog.write(reqs)
 	if err != nil {
-		done(err)
+		completeRequests(reqs, err)
 		return err
 	}
 
@@ -918,11 +920,11 @@ func (db *DB) writeRequests(reqs []*request) error {
 			time.Sleep(10 * time.Millisecond)
 		}
 		if err != nil {
-			done(err)
+			completeRequests(reqs, err)
 			return y.Wrap(err, "writeRequests")
 		}
 		if err := db.writeToLSM(b); err != nil {
-			done(err)
+			completeRequests(reqs, err)
 			return y.Wrap(err, "writeRequests")
 		}
 	}
@@ -930,7 +932,7 @@ func (db *DB) writeRequests(reqs []*request) error {
 	db.opt.Debugf("Sending updates to subscribers")
 	db.pub.sendUpdates(reqs)
 
-	done(nil)
+	completeRequests(reqs, nil)
 	db.opt.Debugf("%d entries written", count)
 	return nil
 }
@@ -1147,53 +1149,6 @@ func (db *DB) handleMemTableFlushClassic(mt *memTable, dropPrefixes [][]byte) er
 	return err
 }
 
-// FULLY OPTIMIZED VERSION - All unnecessary work removed
-
-func (db *DB) handleMemTableFlushPartitioned(mt *memTable, dropPrefixes [][]byte) error {
-	if db.duckDBStorage == nil {
-		// DuckDB not initialised — fall through to classic SSTable flush.
-		return db.handleMemTableFlushClassic(mt, dropPrefixes)
-	}
-
-	// Read all entries from the memtable skiplist and convert to DuckDB format.
-	// We copy key/value bytes because the memtable will be GC'd after this call.
-	itr := mt.sl.NewUniIterator(false)
-	defer itr.Close()
-
-	var duckEntries []*storage.DarshanEntry
-	for itr.Rewind(); itr.Valid(); itr.Next() {
-		rawKey := itr.Key()
-		vs := itr.Value()
-		logicalKey := append([]byte(nil), y.ParseKey(rawKey)...)
-		version := y.ParseTs(rawKey)
-		val := append([]byte(nil), vs.Value...)
-
-		duckEntries = append(duckEntries, &storage.DarshanEntry{
-			Key:     logicalKey,
-			Value:   val,
-			Version: version,
-			Timestamp: types.CustomTs{
-				EpochID:    int64(version),
-				BrokerID:   0,
-				AssignedTs: 0,
-			},
-		})
-	}
-
-	if len(duckEntries) == 0 {
-		return nil
-	}
-
-	// Async flush: the flusher goroutine can move on immediately;
-	// DuckDB writes happen in the background.
-	go func() {
-		if err := db.duckDBStorage.FlushDarshanEntries(duckEntries); err != nil {
-			db.opt.Errorf("DuckDB async flush failed: %v", err)
-		}
-	}()
-
-	return nil
-}
 
 // getPartitionForKey calculates partition ID for a key at given level
 func (db *DB) getPartitionForKey(key []byte, level int) int {

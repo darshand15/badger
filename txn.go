@@ -17,7 +17,6 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/dgraph-io/badger/v4/duckdb-lsm/pkg/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -26,14 +25,11 @@ type oracle struct {
 	isManaged       bool // Does not change value, so no locking required.
 	detectConflicts bool // Determines if the txns should be checked for conflicts.
 
-	//sync.Mutex // For nextTxnTs and commits.
 	// writeChLock lock is for ensuring that transactions go to the write
 	// channel in the same order as their commit timestamps.
 	sync.Mutex
 	writeChLock sync.Mutex
 	nextTxnTs   uint64
-	txnMarkLock sync.Mutex
-	
 
 	// Used to block NewTransaction, so all previous commits are visible to a new read.
 	txnMark *y.WaterMark
@@ -90,8 +86,6 @@ func (o *oracle) readTs() uint64 {
 	o.readMark.Begin(readTs)
 	o.Unlock()
 
-
-
 	// Wait for all txns which have no conflicts, have been assigned a commit
 	// timestamp and are going through the write to value log and LSM tree
 	// process. Not waiting here could mean that some txns which have been
@@ -104,14 +98,12 @@ func (o *oracle) nextTs() uint64 {
 	o.Lock()
 	defer o.Unlock()
 	return o.nextTxnTs
-
 }
 
 func (o *oracle) incrementNextTs() {
 	o.Lock()
 	defer o.Unlock()
 	o.nextTxnTs++
-
 }
 
 // Any deleted or invalid versions at or below ts would be discarded during
@@ -121,8 +113,6 @@ func (o *oracle) setDiscardTs(ts uint64) {
 	defer o.Unlock()
 	o.discardTs = ts
 	o.cleanupCommittedTransactions()
-
-
 }
 
 func (o *oracle) discardAtOrBelow() uint64 {
@@ -132,8 +122,6 @@ func (o *oracle) discardAtOrBelow() uint64 {
 		return o.discardTs
 	}
 	return o.readMark.DoneUntil()
-	
-	
 }
 
 // hasConflict must be called while having a lock.
@@ -163,7 +151,7 @@ func (o *oracle) hasConflict(txn *Txn) bool {
 }
 
 func (o *oracle) newCommitTs(txn *Txn) (uint64, bool) {
-    o.Lock()
+	o.Lock()
 	defer o.Unlock()
 
 	if o.hasConflict(txn) {
@@ -192,9 +180,7 @@ func (o *oracle) newCommitTs(txn *Txn) (uint64, bool) {
 	}
 
 	return ts, false
-
 }
-
 
 func (o *oracle) doneRead(txn *Txn) {
 	if !txn.doneRead {
@@ -237,11 +223,10 @@ func (o *oracle) cleanupCommittedTransactions() { // Must be called under o.Lock
 }
 
 func (o *oracle) doneCommit(cts uint64) {
-    if o.isManaged {
+	if o.isManaged {
 		return
 	}
 	o.txnMark.Done(cts)
-	
 }
 
 
@@ -395,13 +380,15 @@ func (txn *Txn) modify(e *Entry) error {
 		fp := z.MemHash(e.Key) // Avoid dealing with byte arrays.
 		txn.conflictKeys[fp] = struct{}{}
 	}
+	// Convert once to avoid two separate string([]byte) allocations.
+	keyStr := string(e.Key)
 	// If a duplicate entry was inserted in managed mode, move it to the duplicate writes slice.
 	// Add the entry to duplicateWrites only if both the entries have different versions. For
 	// same versions, we will overwrite the existing entry.
-	if oldEntry, ok := txn.pendingWrites[string(e.Key)]; ok && oldEntry.version != e.version {
+	if oldEntry, ok := txn.pendingWrites[keyStr]; ok && oldEntry.version != e.version {
 		txn.duplicateWrites = append(txn.duplicateWrites, oldEntry)
 	}
-	txn.pendingWrites[string(e.Key)] = e
+	txn.pendingWrites[keyStr] = e
 	return nil
 }
 
@@ -484,18 +471,12 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 			logicalKey = key
 		}
 
-		customTs := types.CustomTs{
-			EpochID:    int64(txn.readTs),
-			BrokerID:   0,
-			AssignedTs: 0,
-		}
-
-		if entry, err := txn.db.duckDBStorage.Read(logicalKey, customTs); err == nil && entry != nil {
+		if val, ver, err := txn.db.duckDBStorage.Read(logicalKey, int64(txn.readTs)); err == nil && val != nil {
 			// Found in DuckDB - return a prefetched Badger Item.
 			return &Item{
 				key:       key,
-				version:   uint64(entry.Timestamp.EpochID),
-				val:       entry.Value,
+				version:   ver,
+				val:       val,
 				meta:      0,
 				userMeta:  0,
 				txn:       txn,
@@ -651,34 +632,44 @@ func (txn *Txn) Discard() {
 // 	return ret, nil
 // }
 
-func (txn *Txn) commitAndSend() (func() error, error) {
+func (txn *Txn) commitAndSend() (*request, uint64, error) {
 	orc := txn.db.orc
 	orc.writeChLock.Lock()
 	defer orc.writeChLock.Unlock()
 
 	commitTs, conflict := orc.newCommitTs(txn)
 	if conflict {
-		return nil, ErrConflict
+		return nil, 0, ErrConflict
 	}
 
 	keepTogether := true
-	setVersion := func(e *Entry) {
+	// Inline setVersion to avoid closure heap-escape (Go 1.25 escape analysis).
+	for _, e := range txn.pendingWrites {
 		if e.version == 0 {
 			e.version = commitTs
 		} else {
 			keepTogether = false
 		}
 	}
-	for _, e := range txn.pendingWrites {
-		setVersion(e)
-	}
 	for _, e := range txn.duplicateWrites {
-		setVersion(e)
+		if e.version == 0 {
+			e.version = commitTs
+		} else {
+			keepTogether = false
+		}
 	}
 
 	entries := make([]*Entry, 0, len(txn.pendingWrites)+len(txn.duplicateWrites)+1)
 
-	processEntry := func(e *Entry) {
+	// Inline processEntry to avoid closure heap-escape (Go 1.25 escape analysis).
+	for _, e := range txn.pendingWrites {
+		e.Key = y.KeyWithTs(e.Key, e.version)
+		if keepTogether {
+			e.meta |= bitTxn
+		}
+		entries = append(entries, e)
+	}
+	for _, e := range txn.duplicateWrites {
 		e.Key = y.KeyWithTs(e.Key, e.version)
 		if keepTogether {
 			e.meta |= bitTxn
@@ -686,18 +677,14 @@ func (txn *Txn) commitAndSend() (func() error, error) {
 		entries = append(entries, e)
 	}
 
-	for _, e := range txn.pendingWrites {
-		processEntry(e)
-	}
-	for _, e := range txn.duplicateWrites {
-		processEntry(e)
-	}
-
 	if keepTogether {
 		y.AssertTrue(commitTs != 0)
+		// Use AppendUint into a heap-allocated slice to avoid FormatUint's
+		// intermediate string allocation plus the string→[]byte copy.
+		val := strconv.AppendUint(make([]byte, 0, 20), commitTs, 10)
 		entries = append(entries, &Entry{
 			Key:   y.KeyWithTs(txnKey, commitTs),
-			Value: []byte(strconv.FormatUint(commitTs, 10)),
+			Value: val,
 			meta:  bitFinTxn,
 		})
 	}
@@ -705,14 +692,11 @@ func (txn *Txn) commitAndSend() (func() error, error) {
 	req, err := txn.db.sendToWriteCh(entries)
 	if err != nil {
 		orc.doneCommit(commitTs)
-		return nil, err
+		return nil, 0, err
 	}
-	ret := func() error {
-		err := req.Wait()
-		orc.doneCommit(commitTs)
-		return err
-	}
-	return ret, nil
+	// Return req and commitTs directly so callers can inline the wait+doneCommit
+	// without creating a closure (eliminates 1 heap alloc per commit in Go 1.25).
+	return req, commitTs, nil
 }
 
 
@@ -770,7 +754,8 @@ func (txn *Txn) Commit() error {
 	}
 	defer txn.Discard()
 
-	txnCb, err := txn.commitAndSend()
+	// commitAndSend returns req+commitTs directly (no closure) to avoid 1 heap alloc.
+	req, commitTs, err := txn.commitAndSend()
 	if err != nil {
 		return err
 	}
@@ -778,7 +763,9 @@ func (txn *Txn) Commit() error {
 
 	// TODO: What if some of the txns successfully make it to value log, but others fail.
 	// Nothing gets updated to LSM, until a restart happens.
-	return txnCb()
+	waitErr := req.Wait()
+	txn.db.orc.doneCommit(commitTs)
+	return waitErr
 }
 
 type txnCb struct {
@@ -830,13 +817,17 @@ func (txn *Txn) CommitWith(cb func(error)) {
 
 	defer txn.Discard()
 
-	commitCb, err := txn.commitAndSend()
+	req, commitTs, err := txn.commitAndSend()
 	if err != nil {
 		go runTxnCallback(&txnCb{user: cb, err: err})
 		return
 	}
 
-	go runTxnCallback(&txnCb{user: cb, commit: commitCb})
+	go func() {
+		waitErr := req.Wait()
+		txn.db.orc.doneCommit(commitTs)
+		cb(waitErr)
+	}()
 }
 
 // ReadTs returns the read timestamp of the transaction.

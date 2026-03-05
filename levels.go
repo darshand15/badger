@@ -1624,12 +1624,59 @@ func (s *levelsController) close() error {
 	return y.Wrap(err, "levelsController.Close")
 }
 
+// get searches levels for the given key. For the standard (non-partitioned) path it delegates
+// to levelHandler.get which uses binary search for L1+ tables. The DuckDB partitioned path is
+// handled by getPartitioned which avoids holding open iterators across table iterations.
 func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) (
 	y.ValueStruct, error) {
 
 	if s.kv.IsClosed() {
 		return y.ValueStruct{}, ErrDBClosed
 	}
+
+	// DuckDB partitioned path: custom partition-aware table selection.
+	if s.kv.opt.UseDuckDB && s.kv.opt.PartitionFanOut > 1 {
+		return s.getPartitioned(key, maxVs, startLevel)
+	}
+
+	// Standard path: delegate to h.get which uses binary search for L1+ and correct ref-counting.
+	// It's important that we iterate the levels from 0 on upward. The reason is, if we iterated
+	// in opposite order, or in parallel (naively calling all the h.RLock() in some order) we could
+	// read level L's tables post-compaction and level L+1's tables pre-compaction. (If we do
+	// parallelize this, we will need to call the h.RLock() function by increasing order of level
+	// number.)
+	version := y.ParseTs(key)
+	for _, h := range s.levels {
+		// Ignore all levels below startLevel. This is useful for GC when L0 is kept in memory.
+		if h.level < startLevel {
+			continue
+		}
+		vs, err := h.get(key) // Calls h.RLock() and h.RUnlock().
+		if err != nil {
+			return y.ValueStruct{}, y.Wrapf(err, "get key: %q", key)
+		}
+		if vs.Value == nil && vs.Meta == 0 {
+			continue
+		}
+		y.NumBytesReadsLSMAdd(s.kv.opt.MetricsEnabled, int64(len(vs.Value)))
+		if vs.Version == version {
+			return vs, nil
+		}
+		if maxVs.Version < vs.Version {
+			maxVs = vs
+		}
+	}
+	if len(maxVs.Value) > 0 {
+		y.NumGetsWithResultsAdd(s.kv.opt.MetricsEnabled, 1)
+	}
+	return maxVs, nil
+}
+
+// getPartitioned is the DuckDB-specific read path that selects tables by partition ID.
+// It explicitly closes each iterator after use (no defer inside the loop) to avoid
+// accumulating open iterators and excessive heap allocations.
+func (s *levelsController) getPartitioned(key []byte, maxVs y.ValueStruct, startLevel int) (
+	y.ValueStruct, error) {
 
 	readTs := y.ParseTs(key)
 	logicalKey := y.ParseKey(key)
@@ -1642,55 +1689,48 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 
 		h.RLock()
 		var tbls []*table.Table
-		if s.kv.opt.UseDuckDB && s.kv.opt.PartitionFanOut > 1 && len(h.partitionedTables) > 0 {
+		if len(h.partitionedTables) > 0 {
 			pid := int(z.MemHash(logicalKey) % uint64(s.kv.opt.PartitionFanOut))
 			tbls = h.partitionedTables[pid]
 		} else {
 			tbls = h.tables
 		}
 
-		strLevel := fmt.Sprintf("l%d", h.level)
 		for _, tbl := range tbls {
 			if tbl.DoesNotHave(hash) {
-				y.NumLSMBloomHitsAdd(s.kv.opt.MetricsEnabled, strLevel, 1)
+				y.NumLSMBloomHitsAdd(s.kv.opt.MetricsEnabled, h.strLevel, 1)
 				continue
 			}
 
-			y.NumLSMGetsAdd(s.kv.opt.MetricsEnabled, strLevel, 1)
-			// Iterator options are in the same package `table`
+			y.NumLSMGetsAdd(s.kv.opt.MetricsEnabled, h.strLevel, 1)
 			itr := tbl.NewIterator(table.NOCACHE)
-			defer itr.Close()
-
-			// Seek to our key
 			itr.Seek(key)
-			if !itr.Valid() {
-				continue
-			}
+			if itr.Valid() {
+				k := itr.Key()
+				if bytes.Equal(y.ParseKey(k), logicalKey) {
+					val := itr.ValueCopy()
+					valVersion := y.ParseTs(k)
 
-			k := itr.Key()
-			if bytes.Equal(y.ParseKey(k), logicalKey) {
-				val := itr.ValueCopy() // already returns y.ValueStruct
-				val_version := y.ParseTs(k)
-
-				// Only consider versions <= readTs
-				if val_version <= readTs {
-					if isDeletedOrExpired(val.Meta, val.ExpiresAt) {
-						return y.ValueStruct{}, ErrKeyNotFound
-					}
-					// Pick the newest visible version <= readTs
-					if val_version > maxVs.Version {
-						maxVs = y.ValueStruct{
-							Value:     val.Value,
-							Meta:      val.Meta,
-							UserMeta:  val.UserMeta,
-							ExpiresAt: val.ExpiresAt,
-							Version:   val_version,
+					if valVersion <= readTs {
+						if isDeletedOrExpired(val.Meta, val.ExpiresAt) {
+							itr.Close()
+							h.RUnlock()
+							return y.ValueStruct{}, ErrKeyNotFound
+						}
+						if valVersion > maxVs.Version {
+							maxVs = y.ValueStruct{
+								Value:     val.Value,
+								Meta:      val.Meta,
+								UserMeta:  val.UserMeta,
+								ExpiresAt: val.ExpiresAt,
+								Version:   valVersion,
+							}
 						}
 					}
 				}
 			}
+			itr.Close() // Explicit close per-table; no defer to avoid accumulating open iterators.
 		}
-
 		h.RUnlock()
 	}
 
@@ -1700,42 +1740,6 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 	return maxVs, nil
 }
 
-// func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) (
-// 	y.ValueStruct, error) {
-// 	if s.kv.IsClosed() {
-// 		return y.ValueStruct{}, ErrDBClosed
-// 	}
-// 	// It's important that we iterate the levels from 0 on upward. The reason is, if we iterated
-// 	// in opposite order, or in parallel (naively calling all the h.RLock() in some order) we could
-// 	// read level L's tables post-compaction and level L+1's tables pre-compaction. (If we do
-// 	// parallelize this, we will need to call the h.RLock() function by increasing order of level
-// 	// number.)
-// 	version := y.ParseTs(key)
-// 	for _, h := range s.levels {
-// 		// Ignore all levels below startLevel. This is useful for GC when L0 is kept in memory.
-// 		if h.level < startLevel {
-// 			continue
-// 		}
-// 		vs, err := h.get(key) // Calls h.RLock() and h.RUnlock().
-// 		if err != nil {
-// 			return y.ValueStruct{}, y.Wrapf(err, "get key: %q", key)
-// 		}
-// 		if vs.Value == nil && vs.Meta == 0 {
-// 			continue
-// 		}
-// 		y.NumBytesReadsLSMAdd(s.kv.opt.MetricsEnabled, int64(len(vs.Value)))
-// 		if vs.Version == version {
-// 			return vs, nil
-// 		}
-// 		if maxVs.Version < vs.Version {
-// 			maxVs = vs
-// 		}
-// 	}
-// 	if len(maxVs.Value) > 0 {
-// 		y.NumGetsWithResultsAdd(s.kv.opt.MetricsEnabled, 1)
-// 	}
-// 	return maxVs, nil
-// }
 
 func appendIteratorsReversed(out []y.Iterator, th []*table.Table, opt int) []y.Iterator {
 	for i := len(th) - 1; i >= 0; i-- {
