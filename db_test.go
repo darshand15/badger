@@ -241,8 +241,8 @@ func TestUpdateAndView(t *testing.T) {
 func TestConcurrentWrite(t *testing.T) {
 	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
 		// Not a benchmark. Just a simple test for concurrent writes.
-		n := 1
-		m := 1
+		n := 10
+		m := 5
 		var wg sync.WaitGroup
 
 		// Use a channel to collect errors from goroutines
