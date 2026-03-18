@@ -748,6 +748,253 @@ func TestConcurrentReadTSVerify(t *testing.T) {
 	})
 }
 
+func TestTransactionConflict(t *testing.T) {
+	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
+		key := []byte("balance")
+
+		// 1. Setup initial state
+		err := db.Update(func(txn *Txn) error {
+			return txn.Set(key, []byte("100"))
+		})
+		require.NoError(t, err)
+
+		// 2. Open two concurrent transactions at the exact same time
+		// Both transactions will get the same read timestamp (snapshot)
+		txn1 := db.NewTransaction(true)
+		defer txn1.Discard()
+
+		txn2 := db.NewTransaction(true)
+		defer txn2.Discard()
+
+		// 3. Both transactions read the same initial state (value: 100)
+		item1, err := txn1.Get(key)
+		require.NoError(t, err)
+		val1, _ := item1.ValueCopy(nil)
+		require.Equal(t, "100", string(val1))
+
+		item2, err := txn2.Get(key)
+		require.NoError(t, err)
+		val2, _ := item2.ValueCopy(nil)
+		require.Equal(t, "100", string(val2))
+
+		// 4. Both transactions attempt to modify the key in their local memory buffers
+		err = txn1.Set(key, []byte("150")) // txn1 adds 50
+		require.NoError(t, err)
+
+		err = txn2.Set(key, []byte("80")) // txn2 subtracts 20
+		require.NoError(t, err)
+
+		// 5. txn1 commits first. It will succeed because no one else has
+		// modified the key since txn1's snapshot was taken.
+		err = txn1.Commit()
+		require.NoError(t, err)
+		t.Log("Transaction 1 committed successfully")
+
+		// 6. txn2 attempts to commit.
+		// Badger detects that "balance" was modified by txn1 AFTER txn2 started.
+		// To prevent a lost update (overwriting txn1's work based on stale read data),
+		// Badger rejects txn2.
+		err = txn2.Commit()
+
+		t.Logf("Transaction 2 error: %v", err)
+		require.Error(t, err)
+		require.Equal(t, ErrConflict, err)
+
+		// 7. Verify the final state is purely from txn1
+		err = db.View(func(txn *Txn) error {
+			item, err := txn.Get(key)
+			require.NoError(t, err)
+			finalVal, _ := item.ValueCopy(nil)
+			require.Equal(t, "150", string(finalVal))
+			return nil
+		})
+		require.NoError(t, err)
+	})
+}
+
+func TestConcurrentConflicts(t *testing.T) {
+	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
+		key := []byte("shared_resource")
+
+		// 1. Setup the initial state
+		err := db.Update(func(txn *Txn) error {
+			return txn.Set(key, []byte("initial_value"))
+		})
+		require.NoError(t, err)
+
+		var wg sync.WaitGroup
+		var startWg sync.WaitGroup
+		errCh := make(chan error, 2)
+
+		// This WaitGroup acts as a starting block to hold the goroutines
+		// until we are ready, ensuring they overlap perfectly.
+		startWg.Add(1)
+
+		// 2. Launch two concurrent transactions
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+
+				txn := db.NewTransaction(true)
+				defer txn.Discard()
+
+				// Block until the main thread releases startWg
+				startWg.Wait()
+
+				// Both transactions read the key (this populates their read sets)
+				_, err := txn.Get(key)
+				require.NoError(t, err)
+
+				// Both transactions try to overwrite it
+				err = txn.Set(key, []byte(fmt.Sprintf("value_from_txn_%d", id)))
+				require.NoError(t, err)
+
+				// Attempt to commit and send the error result to the channel
+				errCh <- txn.Commit()
+			}(i)
+		}
+
+		// 3. Fire the starting pistol to unblock both goroutines
+		startWg.Done()
+
+		// Wait for both to finish and close the channel
+		wg.Wait()
+		close(errCh)
+
+		// 4. Tally the results
+		successCount := 0
+		conflictCount := 0
+
+		for err := range errCh {
+			if err == nil {
+				successCount++
+			} else if err == ErrConflict {
+				conflictCount++
+			} else {
+				t.Fatalf("Unexpected error during commit: %v", err)
+			}
+		}
+
+		t.Logf("Committed successfully: %d, Conflicts: %d", successCount, conflictCount)
+
+		// 5. In a correctly functioning MVCC database, EXACTLY ONE transaction
+		// should succeed, and EXACTLY ONE should fail with ErrConflict.
+		if successCount == 2 {
+			t.Errorf("CRITICAL MVCC BUG: Both transactions succeeded! Lost Update occurred.")
+
+			// Print what actually survived in the database
+			db.View(func(txn *Txn) error {
+				item, _ := txn.Get(key)
+				val, _ := item.ValueCopy(nil)
+				t.Logf("Surviving value in DB: %s", string(val))
+				return nil
+			})
+		}
+
+		require.Equal(t, 1, successCount, "Exactly one transaction should succeed")
+		require.Equal(t, 1, conflictCount, "Exactly one transaction should fail with ErrConflict")
+	})
+}
+
+func TestConcurrentConflictsManaged(t *testing.T) {
+
+	opt := DefaultOptions("")
+	// opts.InMemory = true
+	// We MUST enable ManagedTxns to manually control Read/Commit timestamps
+	opt.managedTxns = true
+
+	runBadgerTest(t, &opt, func(t *testing.T, db *DB) {
+		key := []byte("shared_resource")
+
+		// 2. Setup the initial state
+		// In managed mode, even the initial setup needs manual timestamps.
+		// We write at readTs=1, and commit at commitTs=2.
+		txnInit := db.NewTransactionAt(1, true)
+		err := txnInit.Set(key, []byte("initial_value"))
+		require.NoError(t, err)
+		err = txnInit.CommitAt(2, nil)
+		require.NoError(t, err)
+
+		var wg sync.WaitGroup
+		var startWg sync.WaitGroup
+		errCh := make(chan error, 2)
+
+		startWg.Add(1)
+
+		// 3. Launch two concurrent transactions
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+
+				// Both transactions take a snapshot of the database at readTs=2
+				// They will both see "initial_value"
+				txn := db.NewTransactionAt(2, true)
+				defer txn.Discard()
+
+				startWg.Wait()
+
+				_, err := txn.Get(key)
+				require.NoError(t, err)
+
+				err = txn.Set(key, []byte(fmt.Sprintf("value_from_txn_%d", id)))
+				require.NoError(t, err)
+
+				// In Managed Mode, we must use CommitAt and provide the commit timestamp.
+				// We assign Txn 0 to commitTs=3, and Txn 1 to commitTs=4.
+				commitTs := uint64(3 + id)
+				errCh <- txn.CommitAt(commitTs, nil)
+			}(i)
+		}
+
+		startWg.Done()
+		wg.Wait()
+		close(errCh)
+
+		// 4. Tally the results
+		successCount := 0
+		conflictCount := 0
+
+		for err := range errCh {
+			if err == nil {
+				successCount++
+			} else if err == ErrConflict {
+				conflictCount++
+			} else {
+				t.Fatalf("Unexpected error during commit: %v", err)
+			}
+		}
+
+		t.Logf("Committed successfully: %d, Conflicts: %d", successCount, conflictCount)
+
+		// 5. THE EXPECTED BEHAVIOR:
+		// Even in Managed Mode, Badger's Oracle tracks the manual timestamps we provide.
+		// Since both transactions read at Ts=2, the FIRST ONE to call CommitAt will succeed
+		// and register its commitTs (either 3 or 4) with the Oracle.
+		// The SECOND ONE will see that the key was modified at a timestamp > 2, and will be rejected.
+		require.Equal(t, 1, successCount, "Exactly one transaction should succeed")
+		require.Equal(t, 1, conflictCount, "Exactly one transaction should fail with ErrConflict")
+
+		// 6. Verify the final state
+		// Read at a high timestamp (Ts=5) to see the final surviving state.
+		txnVerify := db.NewTransactionAt(5, false)
+		defer txnVerify.Discard()
+
+		item, err := txnVerify.Get(key)
+		require.NoError(t, err)
+		val, _ := item.ValueCopy(nil)
+
+		valStr := string(val)
+		t.Logf("Surviving value in DB: %s", valStr)
+
+		// Because goroutines race to the CPU, we can't guarantee whether Txn 0 or Txn 1
+		// hit the CommitAt code first. We just know one of them successfully wrote its data.
+		require.True(t, valStr == "value_from_txn_0" || valStr == "value_from_txn_1",
+			"Surviving value should belong to whichever transaction managed to commit first")
+	})
+}
+
 // func TestConcurrentWrite2(t *testing.T) {
 // 	// Get the db path so we can reopen it
 // 	dir := t.TempDir()
