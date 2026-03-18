@@ -22,6 +22,9 @@ func withDB(tb testing.TB, managed bool, fn func(db *DB)) {
 	// Keep it simple/fast and reduce background noise.
 	opts.NumCompactors = 0
 	opts.CompactL0OnClose = false
+	// Silence Badger's INFO logs so they don't corrupt benchmark output
+	// captured by -bench pipelines (benchstat requires clean lines).
+	opts.Logger = nil
 
 	var (
 		db  *DB

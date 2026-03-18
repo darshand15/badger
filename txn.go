@@ -635,12 +635,18 @@ func (txn *Txn) Discard() {
 func (txn *Txn) commitAndSend() (*request, uint64, error) {
 	orc := txn.db.orc
 
+	// useDuckDBDirect: bypass WAL+memtable entirely; write straight into the
+	// persistent DuckDB Appender buffer.  Like the lock-free CAS path this
+	// does NOT hold writeChLock — the per-partition Appender mutexes handle
+	// concurrent safety, and the oracle provides unique commit timestamps.
+	useDuckDBDirect := txn.db.opt.UseDuckDB && txn.db.duckDBStorage != nil
+
 	// useLockFree is true only for non-DuckDB databases that explicitly set
 	// NumCompactors=0 (e.g. BenchmarkLockFreeIngest). All other writes use the
 	// standard write-channel path which requires writeChLock so that commit
 	// timestamps and write-channel position stay in lockstep.
 	useLockFree := !txn.db.opt.UseDuckDB && txn.db.opt.NumCompactors == 0
-	if !useLockFree {
+	if !useLockFree && !useDuckDBDirect {
 		orc.writeChLock.Lock()
 		defer orc.writeChLock.Unlock()
 	}
@@ -695,6 +701,42 @@ func (txn *Txn) commitAndSend() (*request, uint64, error) {
 			Value: val,
 			meta:  bitFinTxn,
 		})
+	}
+
+	// ----------------------------------------------------------------
+	// DuckDB direct path: bypass WAL, memtable, and write channel.
+	// Entries are appended straight into the persistent Appender buffer.
+	// A CGo Flush() fires automatically every directFlushBatchSize rows.
+	// ----------------------------------------------------------------
+	if useDuckDBDirect {
+		ducks := make([]duckEntry, 0, len(entries))
+		for _, e := range entries {
+			// Skip the internal txn-marker entry — it has no value payload.
+			if e.meta&bitFinTxn != 0 {
+				continue
+			}
+			logicalKey := append([]byte(nil), y.ParseKey(e.Key)...)
+			version := y.ParseTs(e.Key)
+			// Delete entries must be stored as nil (SQL NULL) so that Read()
+			// returns nil and txn.Get falls through to ErrKeyNotFound.
+			deleted := e.meta&bitDelete != 0
+			var value []byte
+			if !deleted {
+				value = append([]byte(nil), e.Value...)
+			}
+			ducks = append(ducks, duckEntry{
+				Key:     logicalKey,
+				Value:   value,
+				Version: version,
+				Deleted: deleted,
+			})
+		}
+		if err := txn.db.duckDBStorage.DirectFlush(ducks); err != nil {
+			orc.doneCommit(commitTs)
+			return nil, 0, err
+		}
+		orc.doneCommit(commitTs)
+		return nil, commitTs, nil
 	}
 
 	// ----------------------------------------------------------------

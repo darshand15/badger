@@ -9,6 +9,7 @@ package badger
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/dgraph-io/badger/v4/duckdb"
 	"github.com/dgraph-io/badger/v4/y"
@@ -29,6 +30,11 @@ func newDuckDBBackend(path string, parts int) (duckDBIface, error) {
 }
 
 func (w *duckDBStorageWrapper) Read(key []byte, epochID int64) ([]byte, uint64, error) {
+	// uint64 readTs overflows to -1 when cast to int64 (e.g. math.MaxUint64).
+	// Cap to MaxInt64 so the SQL WHERE epoch_id <= ? matches all stored epochs.
+	if epochID < 0 {
+		epochID = math.MaxInt64
+	}
 	entry, err := w.s.Read(key, duckdb.CustomTs{EpochID: epochID})
 	if err != nil || entry == nil {
 		return nil, 0, err
@@ -43,12 +49,29 @@ func (w *duckDBStorageWrapper) FlushEntries(entries []duckEntry) error {
 			Key:     e.Key,
 			Value:   e.Value,
 			Version: e.Version,
+			Deleted: e.Deleted,
 			Timestamp: duckdb.CustomTs{
 				EpochID: int64(e.Version),
 			},
 		}
 	}
 	return w.s.FlushDarshanEntries(darshanEntries)
+}
+
+func (w *duckDBStorageWrapper) DirectFlush(entries []duckEntry) error {
+	darshanEntries := make([]*duckdb.DarshanEntry, 0, len(entries))
+	for _, e := range entries {
+		darshanEntries = append(darshanEntries, &duckdb.DarshanEntry{
+			Key:     e.Key,
+			Value:   e.Value,
+			Deleted: e.Deleted,
+			Timestamp: duckdb.CustomTs{
+				EpochID: int64(e.Version),
+			},
+			Version: e.Version,
+		})
+	}
+	return w.s.DirectAppendEntries(darshanEntries)
 }
 
 func (w *duckDBStorageWrapper) CompactPartitions() error {
@@ -74,8 +97,12 @@ func (db *DB) handleMemTableFlushPartitioned(mt *memTable, dropPrefixes [][]byte
 		vs := itr.Value()
 		logicalKey := append([]byte(nil), y.ParseKey(rawKey)...)
 		version := y.ParseTs(rawKey)
-		val := append([]byte(nil), vs.Value...)
-		entries = append(entries, duckEntry{Key: logicalKey, Value: val, Version: version})
+		deleted := vs.Meta&bitDelete != 0
+		var val []byte
+		if !deleted {
+			val = append([]byte(nil), vs.Value...)
+		}
+		entries = append(entries, duckEntry{Key: logicalKey, Value: val, Version: version, Deleted: deleted})
 	}
 
 	if len(entries) == 0 {

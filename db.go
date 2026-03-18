@@ -91,8 +91,17 @@ type duckDBIface interface {
 	// Returns (nil, 0, nil) when the key is not found.
 	Read(key []byte, epochID int64) (value []byte, version uint64, err error)
 
-	// FlushEntries writes a batch of entries to DuckDB.
+	// FlushEntries writes a batch of entries to DuckDB synchronously.
+	// Used by the memtable-flush path (infrequent, large batches).
 	FlushEntries(entries []duckEntry) error
+
+	// DirectFlush appends entries directly into the DuckDB Appender buffer,
+	// bypassing the WAL and memtable entirely.  A CGo Appender.Flush() is
+	// triggered automatically once the per-partition buffer reaches the
+	// configured batch size (default 512 rows), amortising the fixed CGo cost
+	// across many commits.  Reads always flush pending rows before querying so
+	// read-after-write correctness is preserved.
+	DirectFlush(entries []duckEntry) error
 
 	// CompactPartitions removes superseded key versions to reclaim space.
 	CompactPartitions() error
@@ -106,6 +115,7 @@ type duckEntry struct {
 	Key     []byte
 	Value   []byte
 	Version uint64
+	Deleted bool // true when this entry is a delete tombstone
 }
 
 // DB provides the various functions required to interact with Badger.
