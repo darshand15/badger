@@ -1034,6 +1034,7 @@ func BenchmarkDbGrowth(b *testing.B) {
 	opts.MemTableSize = 1 << 20
 	db, err := Open(opts)
 	require.NoError(b, err)
+	b.ResetTimer() // exclude Open() from the measured window
 	for numWrites := 0; numWrites < maxWrites; numWrites++ {
 		txn := db.NewTransaction(true)
 		if start > 0 {
@@ -1078,6 +1079,7 @@ func BenchmarkDbGrowth(b *testing.B) {
 		start += numKeys
 	}
 
+	b.StopTimer() // exclude Close() from the measured window
 	db.Close()
 	size, err := dirSize(dir)
 	require.NoError(b, err)
