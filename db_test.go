@@ -1081,6 +1081,7 @@ func BenchmarkDbGrowth(b *testing.B) {
 	opts.MemTableSize = 1 << 20
 	db, err := Open(opts)
 	require.NoError(b, err)
+	b.ResetTimer() // exclude Open() from the measured window
 	for numWrites := 0; numWrites < maxWrites; numWrites++ {
 		txn := db.NewTransaction(true)
 		if start > 0 {
@@ -1090,6 +1091,7 @@ func BenchmarkDbGrowth(b *testing.B) {
 				err := txn.Delete(key)
 				if err == ErrTxnTooBig {
 					require.NoError(b, txn.Commit())
+					require.NoError(b, db.FlushToStorage())
 					txn = db.NewTransaction(true)
 				} else {
 					require.NoError(b, err)
@@ -1103,12 +1105,14 @@ func BenchmarkDbGrowth(b *testing.B) {
 			err := txn.SetEntry(NewEntry(key, value))
 			if err == ErrTxnTooBig {
 				require.NoError(b, txn.Commit())
+				require.NoError(b, db.FlushToStorage())
 				txn = db.NewTransaction(true)
 			} else {
 				require.NoError(b, err)
 			}
 		}
 		require.NoError(b, txn.Commit())
+		require.NoError(b, db.FlushToStorage())
 		require.NoError(b, db.Flatten(1))
 		for {
 			err = db.RunValueLogGC(discardRatio)
@@ -1125,6 +1129,7 @@ func BenchmarkDbGrowth(b *testing.B) {
 		start += numKeys
 	}
 
+	b.StopTimer() // exclude Close() from the measured window
 	db.Close()
 	size, err := dirSize(dir)
 	require.NoError(b, err)
