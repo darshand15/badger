@@ -581,6 +581,14 @@ func (db *DB) IndexCacheMetrics() *ristretto.Metrics {
 	return nil
 }
 
+// FlushToStorage is a no-op on the duckdb-integration branch because the write
+// path is fully synchronous — data is already on disk by the time txn.Commit()
+// returns. It exists so that BenchmarkDbGrowth can call the same interface on
+// both branches (on dd_exp it drains the async lock-free write list to disk).
+func (db *DB) FlushToStorage() error {
+	return nil
+}
+
 // Close closes a DB. It's crucial to call it to ensure all the pending updates make their way to
 // disk. Calling DB.Close() multiple times would still only close the DB once.
 func (db *DB) Close() error {

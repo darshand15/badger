@@ -1044,6 +1044,7 @@ func BenchmarkDbGrowth(b *testing.B) {
 				err := txn.Delete(key)
 				if err == ErrTxnTooBig {
 					require.NoError(b, txn.Commit())
+					require.NoError(b, db.FlushToStorage())
 					txn = db.NewTransaction(true)
 				} else {
 					require.NoError(b, err)
@@ -1057,12 +1058,14 @@ func BenchmarkDbGrowth(b *testing.B) {
 			err := txn.SetEntry(NewEntry(key, value))
 			if err == ErrTxnTooBig {
 				require.NoError(b, txn.Commit())
+				require.NoError(b, db.FlushToStorage())
 				txn = db.NewTransaction(true)
 			} else {
 				require.NoError(b, err)
 			}
 		}
 		require.NoError(b, txn.Commit())
+		require.NoError(b, db.FlushToStorage())
 		require.NoError(b, db.Flatten(1))
 		for {
 			err = db.RunValueLogGC(discardRatio)
