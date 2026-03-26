@@ -525,6 +525,15 @@ func (db *DB) IndexCacheMetrics() *ristretto.Metrics {
 	return nil
 }
 
+// FlushToStorage drains the in-memory lock-free write list to disk synchronously.
+// On the dd_exp branch the write path is async (txn.Commit() only updates
+// db.root in memory); this method forces all pending entries to L0 SST files so
+// that subsequent Flatten() / RunValueLogGC() calls have real data to compact.
+// Call this after txn.Commit() whenever you need data durable before compaction.
+func (db *DB) FlushToStorage() error {
+	return db.handleMemTableFlushPartitioned()
+}
+
 // Close closes a DB. It's crucial to call it to ensure all the pending updates make their way to
 // disk. Calling DB.Close() multiple times would still only close the DB once.
 func (db *DB) Close() error {
