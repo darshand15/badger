@@ -10,10 +10,49 @@ package badger
 import (
 	"fmt"
 	"math"
+	"sync/atomic"
+	"time"
 
+	"github.com/dgraph-io/badger/v4/divytime"
 	"github.com/dgraph-io/badger/v4/duckdb"
 	"github.com/dgraph-io/badger/v4/y"
 )
+
+// globalDivyOracle is the process-wide timestamp oracle used by all DuckDB
+// write paths.  It assigns the BrokerID=1 (single-node) and an automatically
+// incrementing AssignedTs so every write has a unique, totally-ordered
+// 3-tuple timestamp.  In production this would be replaced by a call to the
+// real Divy ordering service.
+var globalDivyOracle = divytime.NewOracle(1, 0)
+
+// divyTsCounter is an atomic counter used to ensure each call to
+// makeDivyTs yields a unique AssignedTs without calling the oracle
+// (used in the hot DirectFlush path).
+var divyTsCounter int64
+
+// makeDivyTs returns a full 3-tuple CustomTs for the given Badger version.
+// EpochID is the Badger MVCC version (preserves snapshot semantics).
+// BrokerID=1 (single broker), AssignedTs from the oracle.
+func makeDivyTs(version uint64) duckdb.CustomTs {
+	ts, _ := globalDivyOracle.GetTimestamp(int64(version))
+	return duckdb.CustomTs{
+		EpochID:    ts.EpochID,
+		BrokerID:   ts.BrokerID,
+		AssignedTs: ts.AssignedTs,
+	}
+}
+
+// makeDivyTsFast returns a 3-tuple CustomTs without calling the oracle for
+// the DirectFlush hot path.  It uses an atomic nanosecond counter so that
+// latency remains sub-microsecond regardless of oracle load.
+func makeDivyTsFast(version uint64) duckdb.CustomTs {
+	_ = time.Now() // ensure time package is referenced (avoids import erasing)
+	return duckdb.CustomTs{
+		EpochID:    int64(version),
+		BrokerID:   1,
+		AssignedTs: atomic.AddInt64(&divyTsCounter, 1),
+	}
+}
 
 // duckDBStorageWrapper wraps *duckdb.DuckDBStorage to implement duckDBIface.
 type duckDBStorageWrapper struct {
@@ -35,7 +74,14 @@ func (w *duckDBStorageWrapper) Read(key []byte, epochID int64) ([]byte, uint64, 
 	if epochID < 0 {
 		epochID = math.MaxInt64
 	}
-	entry, err := w.s.Read(key, duckdb.CustomTs{EpochID: epochID})
+	// Use the full 3-tuple with MaxInt64 for BrokerID and AssignedTs so that
+	// the MVCC read sees all rows with the matching EpochID regardless of which
+	// broker or sequence number they carry.
+	entry, err := w.s.Read(key, duckdb.CustomTs{
+		EpochID:    epochID,
+		BrokerID:   math.MaxInt64,
+		AssignedTs: math.MaxInt64,
+	})
 	if err != nil || entry == nil {
 		return nil, 0, err
 	}
@@ -46,13 +92,11 @@ func (w *duckDBStorageWrapper) FlushEntries(entries []duckEntry) error {
 	darshanEntries := make([]*duckdb.DarshanEntry, len(entries))
 	for i, e := range entries {
 		darshanEntries[i] = &duckdb.DarshanEntry{
-			Key:     e.Key,
-			Value:   e.Value,
-			Version: e.Version,
-			Deleted: e.Deleted,
-			Timestamp: duckdb.CustomTs{
-				EpochID: int64(e.Version),
-			},
+			Key:       e.Key,
+			Value:     e.Value,
+			Version:   e.Version,
+			Deleted:   e.Deleted,
+			Timestamp: makeDivyTs(e.Version),
 		}
 	}
 	return w.s.FlushDarshanEntries(darshanEntries)
@@ -62,13 +106,11 @@ func (w *duckDBStorageWrapper) DirectFlush(entries []duckEntry) error {
 	darshanEntries := make([]*duckdb.DarshanEntry, 0, len(entries))
 	for _, e := range entries {
 		darshanEntries = append(darshanEntries, &duckdb.DarshanEntry{
-			Key:     e.Key,
-			Value:   e.Value,
-			Deleted: e.Deleted,
-			Timestamp: duckdb.CustomTs{
-				EpochID: int64(e.Version),
-			},
-			Version: e.Version,
+			Key:       e.Key,
+			Value:     e.Value,
+			Deleted:   e.Deleted,
+			Timestamp: makeDivyTsFast(e.Version),
+			Version:   e.Version,
 		})
 	}
 	return w.s.DirectAppendEntries(darshanEntries)
