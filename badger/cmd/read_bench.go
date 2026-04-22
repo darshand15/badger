@@ -8,7 +8,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"math"
 	"math/rand"
 	"sync/atomic"
 	"time"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/pb"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -68,7 +68,7 @@ func init() {
 
 // Scan the whole database using the iterators
 func fullScanDB(db *badger.DB) {
-	txn := db.NewTransactionAt(math.MaxUint64, false)
+	txn := db.NewTransactionAt(types.MaxTs, false)
 	defer txn.Discard()
 
 	startTime = time.Now()
@@ -183,7 +183,7 @@ func lookupForKey(db *badger.DB, key []byte) (sz uint64) {
 func getSampleKeys(db *badger.DB, sampleSize int) ([][]byte, error) {
 	var keys [][]byte
 	count := 0
-	stream := db.NewStreamAt(math.MaxUint64)
+	stream := db.NewStreamAt(types.MaxTs)
 
 	// overide stream.KeyToList as we only want keys. Also
 	// we can take only first version for the key.

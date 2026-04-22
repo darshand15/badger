@@ -19,6 +19,7 @@ import (
 	humanize "github.com/dustin/go-humanize"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 )
 
@@ -142,9 +143,9 @@ func TestValueGCManaged(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	var ts uint64
-	newTs := func() uint64 {
-		ts++
+	var ts types.CustomTs
+	newTs := func() types.CustomTs {
+		ts.Incr()
 		return ts
 	}
 
@@ -181,7 +182,7 @@ func TestValueGCManaged(t *testing.T) {
 		t.Logf("File: %s. Size: %s\n", fi.Name(), humanize.IBytes(uint64(fi.Size())))
 	}
 
-	db.SetDiscardTs(math.MaxUint32)
+	db.SetDiscardTs(types.MaxTs)
 	require.NoError(t, db.Flatten(3))
 
 	for i := 0; i < 100; i++ {

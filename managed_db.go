@@ -5,6 +5,8 @@
 
 package badger
 
+import "github.com/dgraph-io/badger/v4/types"
+
 // OpenManaged returns a new DB, which allows more control over setting
 // transaction timestamps, aka managed mode.
 //
@@ -20,7 +22,7 @@ func OpenManaged(opts Options) (*DB, error) {
 //
 // This is only useful for databases built on top of Badger (like Dgraph), and
 // can be ignored by most users.
-func (db *DB) NewTransactionAt(readTs uint64, update bool) *Txn {
+func (db *DB) NewTransactionAt(readTs types.CustomTs, update bool) *Txn {
 	if !db.opt.managedTxns {
 		panic("Cannot use NewTransactionAt with managedDB=false. Use NewTransaction instead.")
 	}
@@ -31,7 +33,7 @@ func (db *DB) NewTransactionAt(readTs uint64, update bool) *Txn {
 
 // NewWriteBatchAt is similar to NewWriteBatch but it allows user to set the commit timestamp.
 // NewWriteBatchAt is supposed to be used only in the managed mode.
-func (db *DB) NewWriteBatchAt(commitTs uint64) *WriteBatch {
+func (db *DB) NewWriteBatchAt(commitTs types.CustomTs) *WriteBatch {
 	if !db.opt.managedTxns {
 		panic("cannot use NewWriteBatchAt with managedDB=false. Use NewWriteBatch instead")
 	}
@@ -55,7 +57,7 @@ func (db *DB) NewManagedWriteBatch() *WriteBatch {
 //
 // This is only useful for databases built on top of Badger (like Dgraph), and
 // can be ignored by most users.
-func (txn *Txn) CommitAt(commitTs uint64, callback func(error)) error {
+func (txn *Txn) CommitAt(commitTs types.CustomTs, callback func(error)) error {
 	if !txn.db.opt.managedTxns {
 		panic("Cannot use CommitAt with managedDB=false. Use Commit instead.")
 	}
@@ -70,7 +72,7 @@ func (txn *Txn) CommitAt(commitTs uint64, callback func(error)) error {
 // SetDiscardTs sets a timestamp at or below which, any invalid or deleted
 // versions can be discarded from the LSM tree, and thence from the value log to
 // reclaim disk space. Can only be used with managed transactions.
-func (db *DB) SetDiscardTs(ts uint64) {
+func (db *DB) SetDiscardTs(ts types.CustomTs) {
 	if !db.opt.managedTxns {
 		panic("Cannot use SetDiscardTs with managedDB=false.")
 	}

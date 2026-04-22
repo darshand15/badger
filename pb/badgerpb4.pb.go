@@ -13,10 +13,12 @@
 package pb
 
 import (
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
+
+	"github.com/dgraph-io/badger/v4/types"
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
@@ -166,12 +168,12 @@ type KV struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Key       []byte `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
-	Value     []byte `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
-	UserMeta  []byte `protobuf:"bytes,3,opt,name=user_meta,json=userMeta,proto3" json:"user_meta,omitempty"`
-	Version   uint64 `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`
-	ExpiresAt uint64 `protobuf:"varint,5,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
-	Meta      []byte `protobuf:"bytes,6,opt,name=meta,proto3" json:"meta,omitempty"`
+	Key       []byte         `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Value     []byte         `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	UserMeta  []byte         `protobuf:"bytes,3,opt,name=user_meta,json=userMeta,proto3" json:"user_meta,omitempty"`
+	Version   types.CustomTs `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`
+	ExpiresAt uint64         `protobuf:"varint,5,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	Meta      []byte         `protobuf:"bytes,6,opt,name=meta,proto3" json:"meta,omitempty"`
 	// Stream id is used to identify which stream the KV came from.
 	StreamId uint32 `protobuf:"varint,10,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
 	// Stream done is used to indicate end of stream.
@@ -231,11 +233,11 @@ func (x *KV) GetUserMeta() []byte {
 	return nil
 }
 
-func (x *KV) GetVersion() uint64 {
+func (x *KV) GetVersion() types.CustomTs {
 	if x != nil {
 		return x.Version
 	}
-	return 0
+	return types.CustomTs{}
 }
 
 func (x *KV) GetExpiresAt() uint64 {

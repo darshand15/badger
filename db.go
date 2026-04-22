@@ -29,6 +29,7 @@ import (
 	"github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/badger/v4/skl"
 	"github.com/dgraph-io/badger/v4/table"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/dgraph-io/ristretto/v2/z"
@@ -56,8 +57,8 @@ type lockedKeys struct {
 }
 
 type upsertNode struct {
-    next *upsertNode
-    kvs  []*Entry
+	next *upsertNode
+	kvs  []*Entry
 }
 
 func (lk *lockedKeys) add(key uint64) {
@@ -84,12 +85,11 @@ func (lk *lockedKeys) all() []uint64 {
 }
 
 // duckDBIface is the interface for the optional DuckDB storage backend.
-// It deliberately uses only built-in types so that files importing it never
-// pull in CGO (which would degrade escape analysis for the whole package).
+// It deliberately avoids CGO types so files importing it stay pure-Go.
 type duckDBIface interface {
-	// Read looks up the latest value for key with epoch <= epochID.
-	// Returns (nil, 0, nil) when the key is not found.
-	Read(key []byte, epochID int64) (value []byte, version uint64, err error)
+	// Read looks up the latest value for key with timestamp <= readTs.
+	// Returns (nil, zero, nil) when the key is not found.
+	Read(key []byte, readTs types.CustomTs) (value []byte, version types.CustomTs, err error)
 
 	// FlushEntries writes a batch of entries to DuckDB synchronously.
 	// Used by the memtable-flush path (infrequent, large batches).
@@ -114,7 +114,7 @@ type duckDBIface interface {
 type duckEntry struct {
 	Key     []byte
 	Value   []byte
-	Version uint64
+	Version types.CustomTs
 	Deleted bool // true when this entry is a delete tombstone
 }
 
@@ -129,12 +129,12 @@ type DB struct {
 	// nil if Dir and ValueDir are the same
 	valueDirGuard *directoryLockGuard
 
-	closers closers
+	closers     closers
 	nextTableID uint64
 
-	mt  *memTable
-	imm []*memTable // Add here only AFTER pushing to flushChan.
-	root atomic.Pointer[upsertNode] 
+	mt   *memTable   // Our latest (actively written) in-memory table
+	imm  []*memTable // Add here only AFTER pushing to flushChan.
+	root atomic.Pointer[upsertNode]
 
 	// Initialized via openMemTables.
 	nextMemFid int
@@ -409,8 +409,12 @@ func Open(opt Options) (*DB, error) {
 	db.vlog.init(db)
 
 	if !opt.ReadOnly {
-		db.closers.compactors = z.NewCloser(1)
-		db.lc.startCompact(db.closers.compactors)
+		// No background compactions when using partitioned or DuckDB mode;
+		// set NumCompactors=0 in options for the same effect.
+		if opt.PartitionFanOut != 0 && !opt.UseDuckDB {
+			db.closers.compactors = z.NewCloser(1)
+			db.lc.startCompact(db.closers.compactors)
+		}
 
 		db.closers.memtable = z.NewCloser(1)
 		go func() {
@@ -423,7 +427,12 @@ func Open(opt Options) (*DB, error) {
 	}
 	// We do increment nextTxnTs below. So, no need to do it here.
 	db.orc.nextTxnTs = db.MaxVersion()
-	db.opt.Infof("Set nextTxnTs to %d", db.orc.nextTxnTs)
+
+	if db.orc.nextTxnTs.IsZero() {
+		db.orc.nextTxnTs = db.orc.nextTxnTs.Incr()
+	}
+
+	db.opt.Infof("Set nextTxnTs to %s", db.orc.nextTxnTs)
 
 	if err = db.vlog.open(db); err != nil {
 		return db, y.Wrapf(err, "During db.vlog.open")
@@ -480,10 +489,10 @@ func (db *DB) initBannedNamespaces() error {
 	})
 }
 
-func (db *DB) MaxVersion() uint64 {
-	var maxVersion uint64
-	update := func(a uint64) {
-		if a > maxVersion {
+func (db *DB) MaxVersion() types.CustomTs {
+	var maxVersion types.CustomTs
+	update := func(a types.CustomTs) {
+		if a.Greater(maxVersion) {
 			maxVersion = a
 		}
 	}
@@ -856,11 +865,13 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 			if !bytes.Equal(y.ParseKey(e.Key), logicalKey) {
 				continue
 			}
-			if e.version <= readTs {
+			// Only consider versions <= readTs
+			if !(e.version.Greater(readTs)) {
 				if isDeletedOrExpired(e.meta, e.ExpiresAt) {
 					return y.ValueStruct{}, ErrKeyNotFound
 				}
-				if e.version > best.Version {
+				// Pick the newest visible version <= readTs
+				if e.version.Greater(best.Version) {
 					best = y.ValueStruct{
 						Value:     e.Value,
 						Meta:      e.meta,
@@ -894,7 +905,7 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 			y.NumGetsWithResultsAdd(db.opt.MetricsEnabled, 1)
 			return vs, nil
 		}
-		if vs.Version <= readTs && maxVs.Version < vs.Version {
+		if !(vs.Version.Greater(readTs)) && maxVs.Version.Less(vs.Version) {
 			maxVs = vs
 		}
 	}
@@ -906,7 +917,6 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 	// 3. Final fallback: LSM levels
 	return db.lc.get(key, maxVs, 0)
 }
-
 
 var requestPool = sync.Pool{
 	New: func() interface{} {
@@ -2116,8 +2126,11 @@ func (db *DB) BanNamespace(ns uint64) error {
 		return ErrNamespaceMode
 	}
 	db.opt.Infof("Banning namespace: %d", ns)
+
+	systemTs := types.CustomTs{EpochID: 1, BrokerID: 1, AssignedTs: 1}
+
 	// First set the banned namespaces in DB and then update the in-memory structure.
-	key := y.KeyWithTs(append(bannedNsKey, y.U64ToBytes(ns)...), 1)
+	key := y.KeyWithTs(append(bannedNsKey, y.U64ToBytes(ns)...), systemTs)
 	entry := []*Entry{{
 		Key:   key,
 		Value: nil,
@@ -2261,7 +2274,7 @@ func (db *DB) StreamDB(outOptions Options) error {
 	}
 
 	// Stream contents of DB to the output DB.
-	stream := db.NewStreamAt(math.MaxUint64)
+	stream := db.NewStreamAt(types.MaxTs)
 	stream.LogPrefix = fmt.Sprintf("Streaming DB to new DB at %s", outDir)
 
 	stream.Send = func(buf *z.Buffer) error {

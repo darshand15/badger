@@ -26,6 +26,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/badger/v4/skl"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -37,7 +38,7 @@ type memTable struct {
 	// TODO: Give skiplist z.Calloc'd []byte.
 	sl         *skl.Skiplist
 	wal        *logFile
-	maxVersion uint64
+	maxVersion types.CustomTs
 	opt        Options
 	buf        *bytes.Buffer
 }
@@ -193,7 +194,7 @@ func (mt *memTable) Put(key []byte, value y.ValueStruct) error {
 
 	// Write to skiplist and update maxVersion encountered.
 	mt.sl.Put(key, value)
-	if ts := y.ParseTs(entry.Key); ts > mt.maxVersion {
+	if ts := y.ParseTs(entry.Key); ts.Greater(mt.maxVersion) {
 		mt.maxVersion = ts
 	}
 	y.NumBytesWrittenToL0Add(mt.opt.MetricsEnabled, entry.estimateSizeAndSetThreshold(mt.opt.ValueThreshold))
@@ -231,7 +232,7 @@ func (mt *memTable) replayFunction(opt Options) func(Entry, valuePointer) error 
 			opt.Debugf("First key=%q\n", e.Key)
 		}
 		first = false
-		if ts := y.ParseTs(e.Key); ts > mt.maxVersion {
+		if ts := y.ParseTs(e.Key); ts.Greater(mt.maxVersion) {
 			mt.maxVersion = ts
 		}
 		v := y.ValueStruct{
@@ -468,7 +469,7 @@ func (lf *logFile) iterate(readOnly bool, offset uint32, fn logEntry) (uint32, e
 		lf:           lf,
 	}
 
-	var lastCommit uint64
+	var lastCommit types.CustomTs
 	var validEndOffset uint32 = offset
 
 	var entries []*Entry
@@ -503,22 +504,22 @@ loop:
 		switch {
 		case e.meta&bitTxn > 0:
 			txnTs := y.ParseTs(e.Key)
-			if lastCommit == 0 {
+			if lastCommit.IsZero() {
 				lastCommit = txnTs
 			}
-			if lastCommit != txnTs {
+			if !(lastCommit.Equal(txnTs)) {
 				break loop
 			}
 			entries = append(entries, e)
 			vptrs = append(vptrs, vp)
 
 		case e.meta&bitFinTxn > 0:
-			txnTs, err := strconv.ParseUint(string(e.Value), 10, 64)
-			if err != nil || lastCommit != txnTs {
+			txnTs, err := types.ParseCustomTsString(string(e.Value))
+			if err != nil || !(lastCommit.Equal(txnTs)) {
 				break loop
 			}
 			// Got the end of txn. Now we can store them.
-			lastCommit = 0
+			lastCommit = types.CustomTs{}
 			validEndOffset = read.recordOffset
 
 			for i, e := range entries {
@@ -534,7 +535,7 @@ loop:
 			vptrs = vptrs[:0]
 
 		default:
-			if lastCommit != 0 {
+			if !(lastCommit.IsZero()) {
 				// This is most likely an entry which was moved as part of GC.
 				// We shouldn't get this entry in the middle of a transaction.
 				break loop

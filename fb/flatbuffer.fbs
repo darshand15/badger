@@ -8,7 +8,9 @@ namespace fb;
 table TableIndex {
   offsets:[BlockOffset];
   bloom_filter:[ubyte];
-  max_version:uint64;
+  max_version_epoch: uint32;
+  max_version_broker: uint32;
+  max_version_assigned_ts: uint32;
   key_count:uint32;
   uncompressed_size:uint32;
   on_disk_size:uint32;

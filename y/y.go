@@ -21,6 +21,7 @@ import (
 	"unsafe"
 
 	"github.com/dgraph-io/badger/v4/pb"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
 
@@ -106,19 +107,45 @@ func Copy(a []byte) []byte {
 }
 
 // KeyWithTs generates a new key by appending ts to key.
-func KeyWithTs(key []byte, ts uint64) []byte {
-	out := make([]byte, len(key)+8)
+func KeyWithTs(key []byte, ts types.CustomTs) []byte {
+	out := make([]byte, len(key)+types.TsSize)
 	copy(out, key)
-	binary.BigEndian.PutUint64(out[len(key):], math.MaxUint64-ts)
+	// Get the slice corresponding to the timestamp part
+	tsBytes := out[len(key):]
+
+	// Encode fields in significance order (Big Endian)
+	binary.BigEndian.PutUint32(tsBytes[0:4], ts.EpochID)
+	binary.BigEndian.PutUint32(tsBytes[4:8], ts.BrokerID)
+	binary.BigEndian.PutUint32(tsBytes[8:12], ts.AssignedTs)
+
+	// Invert bits for descending sort
+	// Original used (MaxUint64 - ts). Using bitwise NOT (^) which is equivalent.
+	for i := range tsBytes {
+		tsBytes[i] = ^tsBytes[i]
+	}
 	return out
 }
 
-// ParseTs parses the timestamp from the key bytes.
-func ParseTs(key []byte) uint64 {
-	if len(key) <= 8 {
-		return 0
+// ParseTs parses the types.CustomTs from the key bytes.
+func ParseTs(key []byte) types.CustomTs {
+	if len(key) <= types.TsSize {
+		return types.CustomTs{} // Return zero value
 	}
-	return math.MaxUint64 - binary.BigEndian.Uint64(key[len(key)-8:])
+
+	// Extract the encoded bytes
+	encoded := key[len(key)-types.TsSize:]
+
+	// Invert bits back to get the original values
+	raw := make([]byte, types.TsSize)
+	for i, b := range encoded {
+		raw[i] = ^b
+	}
+
+	return types.CustomTs{
+		EpochID:    binary.BigEndian.Uint32(raw[0:4]),
+		BrokerID:   binary.BigEndian.Uint32(raw[4:8]),
+		AssignedTs: binary.BigEndian.Uint32(raw[8:12]),
+	}
 }
 
 // CompareKeys checks the key without timestamp and checks the timestamp if keyNoTs
@@ -126,10 +153,19 @@ func ParseTs(key []byte) uint64 {
 // a<timestamp> would be sorted higher than aa<timestamp> if we use bytes.compare
 // All keys should have timestamp.
 func CompareKeys(key1, key2 []byte) int {
-	if cmp := bytes.Compare(key1[:len(key1)-8], key2[:len(key2)-8]); cmp != 0 {
+	// Compare the User Key (everything except the last 12 bytes)
+	k1Len := len(key1) - types.TsSize
+	k2Len := len(key2) - types.TsSize
+
+	if cmp := bytes.Compare(key1[:k1Len], key2[:k2Len]); cmp != 0 {
 		return cmp
 	}
-	return bytes.Compare(key1[len(key1)-8:], key2[len(key2)-8:])
+
+	// Compare the Timestamp bytes
+	// Since we stored the timestamp using bitwise inversion,
+	// a lexicographical byte compare automatically yields Descending Order.
+	// (Larger TS -> Inverted to Smaller Bytes -> Sorts earlier)
+	return bytes.Compare(key1[k1Len:], key2[k2Len:])
 }
 
 // ParseKey parses the actual key from the key bytes.
@@ -138,7 +174,10 @@ func ParseKey(key []byte) []byte {
 		return nil
 	}
 
-	return key[:len(key)-8]
+	if len(key) < types.TsSize {
+		return key
+	}
+	return key[:len(key)-types.TsSize]
 }
 
 // SameKey checks for key equality ignoring the version timestamp suffix.

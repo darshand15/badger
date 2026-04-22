@@ -20,6 +20,7 @@ import (
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/badger/v4/table"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 )
 
@@ -121,7 +122,7 @@ func buildTable(t *testing.T, keyValues [][]string, bopts table.Options) *table.
 	})
 	for _, kv := range keyValues {
 		y.AssertTrue(len(kv) == 2)
-		b.Add(y.KeyWithTs([]byte(kv[0]), 10), y.ValueStruct{
+		b.Add(y.KeyWithTs([]byte(kv[0]), types.CustomTs{AssignedTs: 10}), y.ValueStruct{
 			Value:    []byte(kv[1]),
 			Meta:     'A',
 			UserMeta: 0,

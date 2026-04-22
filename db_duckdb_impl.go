@@ -11,45 +11,43 @@ import (
 	"fmt"
 	"math"
 	"sync/atomic"
-	"time"
 
-	"github.com/dgraph-io/badger/v4/divytime"
 	"github.com/dgraph-io/badger/v4/duckdb"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 )
 
-// globalDivyOracle is the process-wide timestamp oracle used by all DuckDB
-// write paths.  It assigns the BrokerID=1 (single-node) and an automatically
-// incrementing AssignedTs so every write has a unique, totally-ordered
-// 3-tuple timestamp.  In production this would be replaced by a call to the
-// real Divy ordering service.
-var globalDivyOracle = divytime.NewOracle(1, 0)
-
-// divyTsCounter is an atomic counter used to ensure each call to
-// makeDivyTs yields a unique AssignedTs without calling the oracle
-// (used in the hot DirectFlush path).
+// divyTsCounter is an atomic counter that provides unique AssignedTs values
+// for the hot DirectFlush path without calling out to a remote oracle.
 var divyTsCounter int64
 
-// makeDivyTs returns a full 3-tuple CustomTs for the given Badger version.
-// EpochID is the Badger MVCC version (preserves snapshot semantics).
-// BrokerID=1 (single broker), AssignedTs from the oracle.
-func makeDivyTs(version uint64) duckdb.CustomTs {
-	ts, _ := globalDivyOracle.GetTimestamp(int64(version))
+// toDuckTs converts a types.CustomTs (uint32 fields) to a duckdb.CustomTs
+// (int64 fields) suitable for DuckDB appender and SQL queries.
+func toDuckTs(ts types.CustomTs) duckdb.CustomTs {
 	return duckdb.CustomTs{
-		EpochID:    ts.EpochID,
-		BrokerID:   ts.BrokerID,
-		AssignedTs: ts.AssignedTs,
+		EpochID:    int64(ts.EpochID),
+		BrokerID:   int64(ts.BrokerID),
+		AssignedTs: int64(ts.AssignedTs),
 	}
 }
 
-// makeDivyTsFast returns a 3-tuple CustomTs without calling the oracle for
-// the DirectFlush hot path.  It uses an atomic nanosecond counter so that
-// latency remains sub-microsecond regardless of oracle load.
-func makeDivyTsFast(version uint64) duckdb.CustomTs {
-	_ = time.Now() // ensure time package is referenced (avoids import erasing)
+// makeDivyTs converts a types.CustomTs Badger version to a duckdb.CustomTs,
+// assigning a unique monotonic AssignedTs counter so concurrent writes within
+// the same EpochID+BrokerID are still totally ordered.
+func makeDivyTs(version types.CustomTs) duckdb.CustomTs {
 	return duckdb.CustomTs{
-		EpochID:    int64(version),
-		BrokerID:   1,
+		EpochID:    int64(version.EpochID),
+		BrokerID:   int64(version.BrokerID),
+		AssignedTs: atomic.AddInt64(&divyTsCounter, 1),
+	}
+}
+
+// makeDivyTsFast is the same as makeDivyTs but intended for the DirectFlush
+// hot path where every call must be sub-microsecond.
+func makeDivyTsFast(version types.CustomTs) duckdb.CustomTs {
+	return duckdb.CustomTs{
+		EpochID:    int64(version.EpochID),
+		BrokerID:   int64(version.BrokerID),
 		AssignedTs: atomic.AddInt64(&divyTsCounter, 1),
 	}
 }
@@ -68,24 +66,32 @@ func newDuckDBBackend(path string, parts int) (duckDBIface, error) {
 	return &duckDBStorageWrapper{s: s}, nil
 }
 
-func (w *duckDBStorageWrapper) Read(key []byte, epochID int64) ([]byte, uint64, error) {
-	// uint64 readTs overflows to -1 when cast to int64 (e.g. math.MaxUint64).
-	// Cap to MaxInt64 so the SQL WHERE epoch_id <= ? matches all stored epochs.
-	if epochID < 0 {
-		epochID = math.MaxInt64
+func (w *duckDBStorageWrapper) Read(key []byte, readTs types.CustomTs) ([]byte, types.CustomTs, error) {
+	dts := toDuckTs(readTs)
+	// For MaxTs reads, cap to MaxInt64 so the SQL WHERE clause matches all rows.
+	if dts.EpochID < 0 {
+		dts.EpochID = math.MaxInt64
 	}
-	// Use the full 3-tuple with MaxInt64 for BrokerID and AssignedTs so that
-	// the MVCC read sees all rows with the matching EpochID regardless of which
-	// broker or sequence number they carry.
-	entry, err := w.s.Read(key, duckdb.CustomTs{
-		EpochID:    epochID,
-		BrokerID:   math.MaxInt64,
-		AssignedTs: math.MaxInt64,
-	})
+	if dts.BrokerID < 0 {
+		dts.BrokerID = math.MaxInt64
+	}
+	if dts.AssignedTs < 0 {
+		dts.AssignedTs = math.MaxInt64
+	}
+	// Always read up to max broker/assigned so we see all rows for this epoch.
+	dts.BrokerID = math.MaxInt64
+	dts.AssignedTs = math.MaxInt64
+
+	entry, err := w.s.Read(key, dts)
 	if err != nil || entry == nil {
-		return nil, 0, err
+		return nil, types.CustomTs{}, err
 	}
-	return entry.Value, uint64(entry.Timestamp.EpochID), nil
+	retTs := types.CustomTs{
+		EpochID:    uint32(entry.Timestamp.EpochID),
+		BrokerID:   uint32(entry.Timestamp.BrokerID),
+		AssignedTs: uint32(entry.Timestamp.AssignedTs),
+	}
+	return entry.Value, retTs, nil
 }
 
 func (w *duckDBStorageWrapper) FlushEntries(entries []duckEntry) error {
@@ -94,7 +100,7 @@ func (w *duckDBStorageWrapper) FlushEntries(entries []duckEntry) error {
 		darshanEntries[i] = &duckdb.DarshanEntry{
 			Key:       e.Key,
 			Value:     e.Value,
-			Version:   e.Version,
+			Version:   uint64(e.Version.EpochID),
 			Deleted:   e.Deleted,
 			Timestamp: makeDivyTs(e.Version),
 		}
@@ -110,7 +116,7 @@ func (w *duckDBStorageWrapper) DirectFlush(entries []duckEntry) error {
 			Value:     e.Value,
 			Deleted:   e.Deleted,
 			Timestamp: makeDivyTsFast(e.Version),
-			Version:   e.Version,
+			Version:   uint64(e.Version.EpochID),
 		})
 	}
 	return w.s.DirectAppendEntries(darshanEntries)
@@ -151,12 +157,11 @@ func (db *DB) handleMemTableFlushPartitioned(mt *memTable, dropPrefixes [][]byte
 		return nil
 	}
 
-	// Flush synchronously so reads after this call see the written data.
-	// The async goroutine caused read-after-write inconsistency: the function
-	// returned nil before DuckDB had persisted any entries.
 	if err := db.duckDBStorage.FlushEntries(entries); err != nil {
 		return fmt.Errorf("DuckDB flush failed: %w", err)
 	}
 
 	return nil
 }
+
+
