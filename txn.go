@@ -169,7 +169,7 @@ func (o *oracle) newCommitTs(txn *Txn) (types.CustomTs, bool) {
 
 		ts = o.nextTxnTs
 		// o.nextTxnTs++
-		o.nextTxnTs.Incr()
+		o.nextTxnTs = o.nextTxnTs.Incr()
 		o.txnMark.Begin(ts)
 	} else {
 		ts = txn.commitTs
@@ -471,15 +471,9 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 
 	// DuckDB first if available
 	if txn.db.duckDBStorage != nil {
-		// Query DuckDB by logical key (strip the Badger timestamp suffix) if key has ts suffix.
-		var logicalKey []byte
-		if len(key) > 8 {
-			logicalKey = y.ParseKey(key)
-		} else {
-			logicalKey = key
-		}
-
-		if val, ver, err := txn.db.duckDBStorage.Read(logicalKey, txn.readTs); err == nil && val != nil {
+		// key here is the raw user key passed to txn.Get — it never carries a
+		// Badger timestamp suffix, so use it directly as the logical key.
+		if val, ver, err := txn.db.duckDBStorage.Read(key, txn.readTs); err == nil && val != nil {
 			// Found in DuckDB - return a prefetched Badger Item.
 			return &Item{
 				key:       key,

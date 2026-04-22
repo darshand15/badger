@@ -4,8 +4,9 @@ package badger
 
 import (
 	"fmt"
-	"math"
 	"testing"
+
+	"github.com/dgraph-io/badger/v4/types"
 )
 
 func TestDuckDBIntegration(t *testing.T) {
@@ -25,11 +26,12 @@ func TestDuckDBIntegration(t *testing.T) {
         key := []byte(fmt.Sprintf("key%03d", i))
         val := []byte(fmt.Sprintf("val%03d", i))
         
-        txn := db.NewTransactionAt(uint64(i+1), true)
+        ts := types.CustomTs{AssignedTs: uint32(i + 1)}
+        txn := db.NewTransactionAt(ts, true)
         if err := txn.Set(key, val); err != nil {
             t.Fatal(err)
         }
-        if err := txn.CommitAt(uint64(i+1), nil); err != nil {
+        if err := txn.CommitAt(ts, nil); err != nil {
             t.Fatal(err)
         }
     }
@@ -47,7 +49,7 @@ func TestDuckDBIntegration(t *testing.T) {
     expectedVal := []byte(fmt.Sprintf("val%03d", i))
     
     // ✅ FIX: Use NewTransactionAt instead of NewTransaction
-    txn := db.NewTransactionAt(math.MaxUint64, false)  // ← CHANGED THIS LINE
+    txn := db.NewTransactionAt(types.MaxTs, false)
     item, err := txn.Get(key)
     if err != nil {
         t.Fatalf("Failed to read key%03d: %v", i, err)

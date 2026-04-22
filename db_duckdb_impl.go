@@ -10,16 +10,11 @@ package badger
 import (
 	"fmt"
 	"math"
-	"sync/atomic"
 
 	"github.com/dgraph-io/badger/v4/duckdb"
 	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 )
-
-// divyTsCounter is an atomic counter that provides unique AssignedTs values
-// for the hot DirectFlush path without calling out to a remote oracle.
-var divyTsCounter int64
 
 // toDuckTs converts a types.CustomTs (uint32 fields) to a duckdb.CustomTs
 // (int64 fields) suitable for DuckDB appender and SQL queries.
@@ -31,25 +26,16 @@ func toDuckTs(ts types.CustomTs) duckdb.CustomTs {
 	}
 }
 
-// makeDivyTs converts a types.CustomTs Badger version to a duckdb.CustomTs,
-// assigning a unique monotonic AssignedTs counter so concurrent writes within
-// the same EpochID+BrokerID are still totally ordered.
+// makeDivyTs maps the Badger types.CustomTs version directly to a duckdb.CustomTs
+// so that DuckDB's lexicographic (epoch_id, broker_id, assigned_ts) ordering
+// matches Badger's MVCC snapshot semantics exactly.
 func makeDivyTs(version types.CustomTs) duckdb.CustomTs {
-	return duckdb.CustomTs{
-		EpochID:    int64(version.EpochID),
-		BrokerID:   int64(version.BrokerID),
-		AssignedTs: atomic.AddInt64(&divyTsCounter, 1),
-	}
+	return toDuckTs(version)
 }
 
-// makeDivyTsFast is the same as makeDivyTs but intended for the DirectFlush
-// hot path where every call must be sub-microsecond.
+// makeDivyTsFast is the hot-path variant — same as makeDivyTs.
 func makeDivyTsFast(version types.CustomTs) duckdb.CustomTs {
-	return duckdb.CustomTs{
-		EpochID:    int64(version.EpochID),
-		BrokerID:   int64(version.BrokerID),
-		AssignedTs: atomic.AddInt64(&divyTsCounter, 1),
-	}
+	return toDuckTs(version)
 }
 
 // duckDBStorageWrapper wraps *duckdb.DuckDBStorage to implement duckDBIface.
@@ -68,7 +54,8 @@ func newDuckDBBackend(path string, parts int) (duckDBIface, error) {
 
 func (w *duckDBStorageWrapper) Read(key []byte, readTs types.CustomTs) ([]byte, types.CustomTs, error) {
 	dts := toDuckTs(readTs)
-	// For MaxTs reads, cap to MaxInt64 so the SQL WHERE clause matches all rows.
+	// Cap negative values (produced by uint32→int64 overflow wrap of large values)
+	// to MaxInt64 so the SQL WHERE clause matches all rows with that field.
 	if dts.EpochID < 0 {
 		dts.EpochID = math.MaxInt64
 	}
@@ -78,9 +65,6 @@ func (w *duckDBStorageWrapper) Read(key []byte, readTs types.CustomTs) ([]byte, 
 	if dts.AssignedTs < 0 {
 		dts.AssignedTs = math.MaxInt64
 	}
-	// Always read up to max broker/assigned so we see all rows for this epoch.
-	dts.BrokerID = math.MaxInt64
-	dts.AssignedTs = math.MaxInt64
 
 	entry, err := w.s.Read(key, dts)
 	if err != nil || entry == nil {

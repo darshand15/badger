@@ -6,6 +6,8 @@ import (
 	"math/rand"
 	"testing"
 	"time"
+
+	"github.com/dgraph-io/badger/v4/types"
 )
 
 // withDuckDB opens a DuckDB-backed managed DB for the duration of fn.
@@ -47,7 +49,7 @@ func BenchmarkLockFreeIngest_DuckDB(b *testing.B) {
 			id := rand.Int()
 			for pb.Next() {
 				k := []byte{byte(id), byte(time.Now().Nanosecond())}
-				ts := uint64(time.Now().UnixNano())
+				ts := types.CustomTs{AssignedTs: uint32(time.Now().UnixNano())}
 
 				txn := db.NewTransactionAt(ts, true)
 				_ = txn.Set(k, []byte("v"))
