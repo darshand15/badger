@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -83,8 +84,7 @@ func (o *oracle) readTs() types.CustomTs {
 	var readTs types.CustomTs
 	o.Lock()
 	// readTs = o.nextTxnTs - 1
-	readTs = o.nextTxnTs
-	readTs.Decr()
+	readTs = o.nextTxnTs.Decr()
 	o.readMark.Begin(readTs)
 	o.Unlock()
 
@@ -253,6 +253,8 @@ type Txn struct {
 
 	pendingWrites   map[string]*Entry // cache stores any writes done by txn.
 	duplicateWrites []*Entry          // Used in managed mode to store duplicate entries.
+
+	batchCache map[string]*duckReadBatchResult // pre-fetched values from ReadBatch
 
 	numIterators atomic.Int32
 	discarded    bool
@@ -434,6 +436,50 @@ func (txn *Txn) Delete(key []byte) error {
 	return txn.modify(e)
 }
 
+// PrefetchKeys pre-fetches all the given keys from DuckDB in a single batched
+// SQL query and caches the results in the transaction. Subsequent calls to
+// Get() for these keys will be served from the cache without another SQL
+// round-trip.
+//
+// Call this at the start of a transaction when you know which keys will be read.
+// Order does not matter. Duplicate keys are de-duplicated automatically.
+//
+// This is a no-op when the DuckDB backend is not active.
+func (txn *Txn) PrefetchKeys(keys [][]byte) error {
+	if txn.db.duckDBStorage == nil || len(keys) == 0 {
+		return nil
+	}
+	if txn.batchCache == nil {
+		txn.batchCache = make(map[string]*duckReadBatchResult, len(keys))
+	}
+
+	// De-duplicate keys already in cache.
+	toFetch := keys[:0]
+	for _, k := range keys {
+		if _, already := txn.batchCache[string(k)]; !already {
+			toFetch = append(toFetch, k)
+		}
+	}
+	if len(toFetch) == 0 {
+		return nil
+	}
+
+	reqs := make([]duckReadBatchReq, len(toFetch))
+	for i, k := range toFetch {
+		reqs[i] = duckReadBatchReq{Key: k, ReadTs: txn.readTs}
+	}
+
+	results, err := txn.db.duckDBStorage.ReadBatch(reqs)
+	if err != nil {
+		return fmt.Errorf("PrefetchKeys: %w", err)
+	}
+	for i := range results {
+		r := results[i] // copy so we can take address
+		txn.batchCache[string(r.Key)] = &r
+	}
+	return nil
+}
+
 // Get looks for key and returns corresponding Item.
 // If key is not found, ErrKeyNotFound is returned.
 func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
@@ -471,6 +517,26 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 
 	// DuckDB first if available
 	if txn.db.duckDBStorage != nil {
+		// Check the prefetch cache first (zero CGo cost).
+		if txn.batchCache != nil {
+			if cached, ok := txn.batchCache[string(key)]; ok {
+				if !cached.Found || cached.Value == nil {
+					return nil, ErrKeyNotFound
+				}
+				return &Item{
+					key:       key,
+					version:   cached.Version,
+					val:       cached.Value,
+					meta:      0,
+					userMeta:  0,
+					txn:       txn,
+					expiresAt: 0,
+					status:    prefetched,
+				}, nil
+			}
+		}
+
+		// Cache miss — fall through to single SQL query (existing behaviour).
 		// key here is the raw user key passed to txn.Get — it never carries a
 		// Badger timestamp suffix, so use it directly as the logical key.
 		if val, ver, err := txn.db.duckDBStorage.Read(key, txn.readTs); err == nil && val != nil {
@@ -740,18 +806,73 @@ func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 
 	// ----------------------------------------------------------------
 	// Lock-free CAS path: only when NumCompactors==0 and !UseDuckDB.
-	// Prepend a node into db.root, bypassing the write channel.
-	// A background drain goroutine periodically moves db.root entries
+	// Prepend a node into db.roots, bypassing the write channel.
+	// A background drain goroutine periodically moves db.roots entries
 	// to the write channel to bound memory and drive L0 flushes.
 	// ----------------------------------------------------------------
 	if useLockFree {
-		node := &upsertNode{kvs: entries}
-		for {
-			old := txn.db.root.Load()
-			node.next = old
-			if txn.db.root.CompareAndSwap(old, node) {
+		// Find the bucket for the primary (first non-txn-marker) entry.
+		// The txn end-marker (bitFinTxn) is co-located with the primary entry
+		// so that a typical 1-key commit uses exactly ONE CAS instead of two,
+		// and avoids creating a hot txn-marker bucket under concurrency.
+		var primaryBucket int
+		for _, e := range entries {
+			if e.meta&bitFinTxn == 0 {
+				primaryBucket = lockFreeBucket(e.Key)
 				break
 			}
+		}
+
+		// Fast path: all entries land in a single bucket (by far the common case
+		// for 1-key transactions — 1 data entry + 1 txn marker, both go to
+		// primaryBucket). This avoids a heap-allocated map entirely.
+		singleBucket := true
+		for _, e := range entries {
+			if e.meta&bitFinTxn == 0 && lockFreeBucket(e.Key) != primaryBucket {
+				singleBucket = false
+				break
+			}
+		}
+
+		var totalRetries int64
+		if singleBucket {
+			node := &upsertNode{kvs: entries}
+			for {
+				old := txn.db.roots[primaryBucket].Load()
+				node.next = old
+				if txn.db.roots[primaryBucket].CompareAndSwap(old, node) {
+					break
+				}
+				totalRetries++
+			}
+		} else {
+			// Multi-key transaction: group entries by bucket, one CAS per bucket.
+			bucketEntries := make(map[int][]*Entry)
+			for _, e := range entries {
+				var b int
+				if e.meta&bitFinTxn != 0 {
+					b = primaryBucket
+				} else {
+					b = lockFreeBucket(e.Key)
+				}
+				bucketEntries[b] = append(bucketEntries[b], e)
+			}
+			for b, kvs := range bucketEntries {
+				node := &upsertNode{kvs: kvs}
+				for {
+					old := txn.db.roots[b].Load()
+					node.next = old
+					if txn.db.roots[b].CompareAndSwap(old, node) {
+						break
+					}
+					totalRetries++
+				}
+			}
+		}
+		// Record CAS contention metrics — always enabled (cheap atomic adds).
+		y.NumCASSuccessesAdd(1)
+		if totalRetries > 0 {
+			y.NumCASRetriesAdd(totalRetries)
 		}
 		// doneCommit must be called before returning so the watermark advances.
 		orc.doneCommit(commitTs)
@@ -831,7 +952,7 @@ func (txn *Txn) Commit() error {
 		return err
 	}
 	if req == nil {
-		// Lock-free CAS path: data is already in db.root and doneCommit was called.
+		// Lock-free CAS path: data is already in db.roots and doneCommit was called.
 		return nil
 	}
 	// If batchSet failed, LSM would not have been updated. So, no need to rollback anything.
@@ -898,7 +1019,7 @@ func (txn *Txn) CommitWith(cb func(error)) {
 		return
 	}
 	if req == nil {
-		// Lock-free CAS path: data is already in db.root and doneCommit was called.
+		// Lock-free CAS path: data is already in db.roots and doneCommit was called.
 		go runTxnCallback(&txnCb{user: cb})
 		return
 	}

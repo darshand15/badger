@@ -157,6 +157,10 @@ type DuckDBStorage struct {
 	// partAppenders holds one persistent Appender per partition.
 	// Indexed by partition ID; created in initPersistentAppenders.
 	partAppenders  []*partitionAppender
+	// readStmts holds one prepared LIMIT 1 read statement per partition.
+	// Prepared once at startup; used by Read() and ReadBatch() to avoid
+	// SQL re-parsing on every query.
+	readStmts      []*sql.Stmt
 	// flushBatchSize is the per-partition row count that triggers an automatic
 	// Appender flush.  Configurable; defaults to defaultFlushBatchSize.
 	flushBatchSize int64
@@ -201,9 +205,11 @@ func NewDuckDBStorage(dbPath string, numPartitions int) (*DuckDBStorage, error) 
 // partition and stores them in s.partAppenders.  These are kept alive for the
 // lifetime of the storage instance; re-using them across flushes eliminates
 // repeated CGo boundary crossings for connection acquisition and Appender
-// construction.
+// construction.  It also prepares one LIMIT 1 read statement per partition so
+// that Read() and ReadBatch() avoid SQL re-parsing on every query.
 func (s *DuckDBStorage) initPersistentAppenders() error {
 	s.partAppenders = make([]*partitionAppender, s.numParts)
+	s.readStmts = make([]*sql.Stmt, s.numParts)
 	for i := 0; i < s.numParts; i++ {
 		tableName := fmt.Sprintf("partition_%d", i)
 
@@ -236,6 +242,24 @@ func (s *DuckDBStorage) initPersistentAppenders() error {
 			appender:    appender,
 			pendingKeys: make(map[string]struct{}),
 		}
+
+		// Prepare the LIMIT 1 read statement for this partition once, so every
+		// Read() / ReadBatch() call avoids re-parsing the SQL.
+		readSQL := fmt.Sprintf(`
+			SELECT key, epoch_id, broker_id, assigned_ts, value, deleted
+			FROM %s
+			WHERE key = ?
+			  AND (epoch_id < ? OR
+			       (epoch_id = ? AND broker_id < ?) OR
+			       (epoch_id = ? AND broker_id = ? AND assigned_ts <= ?))
+			ORDER BY epoch_id DESC, broker_id DESC, assigned_ts DESC
+			LIMIT 1`, tableName)
+		stmt, err := s.db.PrepareContext(s.ctx, readSQL)
+		if err != nil {
+			sqlConn.Close()
+			return fmt.Errorf("partition %d: prepare read stmt: %w", i, err)
+		}
+		s.readStmts[i] = stmt
 	}
 	return nil
 }
@@ -387,24 +411,13 @@ func (s *DuckDBStorage) Read(key []byte, readTs CustomTs) (*Entry, error) {
 		pa.mu.Unlock()
 	}
 
-	tableName := fmt.Sprintf("partition_%d", partition)
-
-	querySQL := fmt.Sprintf(`
-		SELECT key, epoch_id, broker_id, assigned_ts, value, deleted
-		FROM %s
-		WHERE key = ?
-		  AND (epoch_id < ? OR
-		       (epoch_id = ? AND broker_id < ?) OR
-		       (epoch_id = ? AND broker_id = ? AND assigned_ts <= ?))
-		ORDER BY epoch_id DESC, broker_id DESC, assigned_ts DESC
-		LIMIT 1`, tableName)
-
 	var entry Entry
 	var epochID, brokerID, assignedTs int64
 	var deleted bool
 
-	err := s.db.QueryRowContext(
-		s.ctx, querySQL,
+	// Use the pre-compiled prepared statement to avoid SQL re-parsing overhead.
+	err := s.readStmts[partition].QueryRowContext(
+		s.ctx,
 		key,
 		readTs.EpochID,
 		readTs.EpochID, readTs.BrokerID,
@@ -424,6 +437,119 @@ func (s *DuckDBStorage) Read(key []byte, readTs CustomTs) (*Entry, error) {
 
 	entry.Timestamp = CustomTs{EpochID: epochID, BrokerID: brokerID, AssignedTs: assignedTs}
 	return &entry, nil
+}
+
+// ReadBatchRequest specifies a single key lookup within a ReadBatch call.
+type ReadBatchRequest struct {
+	Key    []byte
+	ReadTs CustomTs
+}
+
+// ReadBatchResult is the result for one key in a ReadBatch call.
+// Value is nil when the key is not found or was deleted.
+type ReadBatchResult struct {
+	Key       []byte
+	Value     []byte
+	Timestamp CustomTs
+	Found     bool
+}
+
+// ReadBatch retrieves the latest value for multiple keys, grouping by partition
+// so that pendingKeys is flushed at most once per partition. Each key is then
+// queried with the same index-friendly LIMIT 1 query as Read(), routed through
+// the partition's persistent pa.sqlConn instead of the shared pool — avoiding
+// connection acquisition overhead while keeping efficient primary-key lookups.
+//
+// The returned slice is in the same order as the input requests.
+// If a key is not found its ReadBatchResult has Found=false and Value=nil.
+func (s *DuckDBStorage) ReadBatch(requests []ReadBatchRequest) ([]ReadBatchResult, error) {
+	if len(requests) == 0 {
+		return nil, nil
+	}
+
+	results := make([]ReadBatchResult, len(requests))
+	for i, req := range requests {
+		results[i].Key = req.Key
+	}
+
+	// Group requests by partition.
+	type partReq struct {
+		key    []byte
+		readTs CustomTs
+		idx    int // original position in requests
+	}
+	partGroups := make(map[int][]partReq)
+	for i, req := range requests {
+		pid := s.partCalc.getPartition(req.Key)
+		partGroups[pid] = append(partGroups[pid], partReq{req.Key, req.ReadTs, i})
+	}
+
+	// For each partition: flush once if needed, then issue one LIMIT 1 query
+	// per key using the partition's persistent connection.
+	for pid, reqs := range partGroups {
+		pa := s.partAppenders[pid]
+
+		// Check under RLock whether any key in this partition needs a flush.
+		pa.mu.RLock()
+		needFlush := false
+		for _, r := range reqs {
+			if pa.hasPending(r.key) {
+				needFlush = true
+				break
+			}
+		}
+		pa.mu.RUnlock()
+
+		if needFlush {
+			pa.mu.Lock()
+			if err := pa.flush(); err != nil {
+				pa.mu.Unlock()
+				return nil, fmt.Errorf("ReadBatch flush partition %d: %w", pid, err)
+			}
+			pa.mu.Unlock()
+		}
+
+		// Use the pre-compiled prepared statement — same index-friendly LIMIT 1
+		// query as Read(), executed through the s.db pool so concurrent workers
+		// on different partitions don't serialize through a single connection.
+		stmt := s.readStmts[pid]
+
+		for _, r := range reqs {
+			var (
+				key                   []byte
+				epochID, brokerID, ts int64
+				value                 []byte
+				deleted               bool
+			)
+			err := stmt.QueryRowContext(
+				s.ctx,
+				r.key,
+				r.readTs.EpochID,
+				r.readTs.EpochID, r.readTs.BrokerID,
+				r.readTs.EpochID, r.readTs.BrokerID, r.readTs.AssignedTs,
+			).Scan(&key, &epochID, &brokerID, &ts, &value, &deleted)
+
+			if err == sql.ErrNoRows {
+				// results[r.idx] already has Found=false, Value=nil — nothing to do.
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("ReadBatch scan partition %d key %q: %w", pid, r.key, err)
+			}
+			if deleted {
+				continue
+			}
+			results[r.idx].Found = true
+			results[r.idx].Value = value
+			results[r.idx].Timestamp = CustomTs{
+				EpochID:    epochID,
+				BrokerID:   brokerID,
+				AssignedTs: ts,
+			}
+		}
+	}
+
+	return results, nil
 }
 
 // FlushDarshanEntries writes a batch of entries to DuckDB.
@@ -545,6 +671,12 @@ func (s *DuckDBStorage) CompactPartitions() error {
 
 // Close releases all DuckDB resources.
 func (s *DuckDBStorage) Close() error {
+	// Close prepared read statements first.
+	for _, stmt := range s.readStmts {
+		if stmt != nil {
+			_ = stmt.Close()
+		}
+	}
 	// Flush + close persistent appenders before closing the underlying DB;
 	// appender.Close() flushes any remaining buffered rows.
 	for i, pa := range s.partAppenders {

@@ -110,6 +110,43 @@ func (w *duckDBStorageWrapper) CompactPartitions() error {
 	return w.s.CompactPartitions()
 }
 
+func (w *duckDBStorageWrapper) ReadBatch(requests []duckReadBatchReq) ([]duckReadBatchResult, error) {
+	duckReqs := make([]duckdb.ReadBatchRequest, len(requests))
+	for i, req := range requests {
+		dts := toDuckTs(req.ReadTs)
+		if dts.EpochID < 0 {
+			dts.EpochID = math.MaxInt64
+		}
+		if dts.BrokerID < 0 {
+			dts.BrokerID = math.MaxInt64
+		}
+		if dts.AssignedTs < 0 {
+			dts.AssignedTs = math.MaxInt64
+		}
+		duckReqs[i] = duckdb.ReadBatchRequest{Key: req.Key, ReadTs: dts}
+	}
+
+	duckResults, err := w.s.ReadBatch(duckReqs)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]duckReadBatchResult, len(duckResults))
+	for i, dr := range duckResults {
+		results[i] = duckReadBatchResult{
+			Key:   dr.Key,
+			Value: dr.Value,
+			Found: dr.Found,
+			Version: types.CustomTs{
+				EpochID:    uint32(dr.Timestamp.EpochID),
+				BrokerID:   uint32(dr.Timestamp.BrokerID),
+				AssignedTs: uint32(dr.Timestamp.AssignedTs),
+			},
+		}
+	}
+	return results, nil
+}
+
 func (w *duckDBStorageWrapper) Close() error {
 	return w.s.Close()
 }
