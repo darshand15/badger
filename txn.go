@@ -154,6 +154,14 @@ func (o *oracle) hasConflict(txn *Txn) bool {
 }
 
 func (o *oracle) newCommitTs(txn *Txn) (types.CustomTs, bool) {
+	// Fast path: managed mode with conflict detection disabled.
+	// The DAG executor pre-orders transactions so no conflicts can arrive
+	// concurrently, and txn.commitTs is already assigned by the caller.
+	// No shared oracle state needs updating, so skip the mutex entirely.
+	if o.isManaged && !o.detectConflicts {
+		return txn.commitTs, false
+	}
+
 	o.Lock()
 	defer o.Unlock()
 
@@ -806,73 +814,25 @@ func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 
 	// ----------------------------------------------------------------
 	// Lock-free CAS path: only when NumCompactors==0 and !UseDuckDB.
-	// Prepend a node into db.roots, bypassing the write channel.
-	// A background drain goroutine periodically moves db.roots entries
+	// Prepend a node into db.root, bypassing the write channel.
+	// A background drain goroutine periodically moves db.root entries
 	// to the write channel to bound memory and drive L0 flushes.
 	// ----------------------------------------------------------------
 	if useLockFree {
-		// Find the bucket for the primary (first non-txn-marker) entry.
-		// The txn end-marker (bitFinTxn) is co-located with the primary entry
-		// so that a typical 1-key commit uses exactly ONE CAS instead of two,
-		// and avoids creating a hot txn-marker bucket under concurrency.
-		var primaryBucket int
-		for _, e := range entries {
-			if e.meta&bitFinTxn == 0 {
-				primaryBucket = lockFreeBucket(e.Key)
+		node := &upsertNode{kvs: entries}
+		var retries int64
+		for {
+			old := txn.db.root.Load()
+			node.next = old
+			if txn.db.root.CompareAndSwap(old, node) {
 				break
 			}
-		}
-
-		// Fast path: all entries land in a single bucket (by far the common case
-		// for 1-key transactions — 1 data entry + 1 txn marker, both go to
-		// primaryBucket). This avoids a heap-allocated map entirely.
-		singleBucket := true
-		for _, e := range entries {
-			if e.meta&bitFinTxn == 0 && lockFreeBucket(e.Key) != primaryBucket {
-				singleBucket = false
-				break
-			}
-		}
-
-		var totalRetries int64
-		if singleBucket {
-			node := &upsertNode{kvs: entries}
-			for {
-				old := txn.db.roots[primaryBucket].Load()
-				node.next = old
-				if txn.db.roots[primaryBucket].CompareAndSwap(old, node) {
-					break
-				}
-				totalRetries++
-			}
-		} else {
-			// Multi-key transaction: group entries by bucket, one CAS per bucket.
-			bucketEntries := make(map[int][]*Entry)
-			for _, e := range entries {
-				var b int
-				if e.meta&bitFinTxn != 0 {
-					b = primaryBucket
-				} else {
-					b = lockFreeBucket(e.Key)
-				}
-				bucketEntries[b] = append(bucketEntries[b], e)
-			}
-			for b, kvs := range bucketEntries {
-				node := &upsertNode{kvs: kvs}
-				for {
-					old := txn.db.roots[b].Load()
-					node.next = old
-					if txn.db.roots[b].CompareAndSwap(old, node) {
-						break
-					}
-					totalRetries++
-				}
-			}
+			retries++
 		}
 		// Record CAS contention metrics — always enabled (cheap atomic adds).
 		y.NumCASSuccessesAdd(1)
-		if totalRetries > 0 {
-			y.NumCASRetriesAdd(totalRetries)
+		if retries > 0 {
+			y.NumCASRetriesAdd(retries)
 		}
 		// doneCommit must be called before returning so the watermark advances.
 		orc.doneCommit(commitTs)
@@ -952,7 +912,7 @@ func (txn *Txn) Commit() error {
 		return err
 	}
 	if req == nil {
-		// Lock-free CAS path: data is already in db.roots and doneCommit was called.
+		// Lock-free CAS path: data is already in db.root and doneCommit was called.
 		return nil
 	}
 	// If batchSet failed, LSM would not have been updated. So, no need to rollback anything.
@@ -1019,7 +979,7 @@ func (txn *Txn) CommitWith(cb func(error)) {
 		return
 	}
 	if req == nil {
-		// Lock-free CAS path: data is already in db.roots and doneCommit was called.
+		// Lock-free CAS path: data is already in db.root and doneCommit was called.
 		go runTxnCallback(&txnCb{user: cb})
 		return
 	}

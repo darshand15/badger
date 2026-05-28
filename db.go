@@ -41,20 +41,6 @@ var (
 	bannedNsKey  = []byte("!badger!banned") // For storing the banned namespaces.
 )
 
-const numLockFreeBuckets = 101
-
-// lockFreeBucket maps a raw Badger key (with timestamp suffix) to its bucket index.
-// Uses FNV-1a over the logical key bytes (timestamp stripped by y.ParseKey).
-func lockFreeBucket(key []byte) int {
-	logicalKey := y.ParseKey(key)
-	var h uint32 = 2166136261 // FNV offset basis
-	for _, b := range logicalKey {
-		h ^= uint32(b)
-		h *= 16777619 // FNV prime
-	}
-	return int(h % numLockFreeBuckets)
-}
-
 type closers struct {
 	updateSize  *z.Closer
 	compactors  *z.Closer
@@ -168,7 +154,7 @@ type DB struct {
 
 	mt   *memTable   // Our latest (actively written) in-memory table
 	imm  []*memTable // Add here only AFTER pushing to flushChan.
-	roots [numLockFreeBuckets]atomic.Pointer[upsertNode]
+	root atomic.Pointer[upsertNode]
 
 	// Initialized via openMemTables.
 	nextMemFid int
@@ -346,9 +332,7 @@ func Open(opt Options) (*DB, error) {
 		bannedNamespaces: &lockedKeys{keys: make(map[uint64]struct{})},
 		threshold:        initVlogThreshold(&opt),
 	}
-	for i := range db.roots {
-		db.roots[i].Store(nil)
-	}
+	db.root.Store(nil)
 
 	// Cleanup all the goroutines started by badger in case of an error.
 	defer func() {
@@ -679,20 +663,12 @@ func (db *DB) close() (err error) {
 	// trying to push stuff into the memtable. This will also resolve the value
 	// offset problem: as we push into memtable, we update value offsets there.
 	if db.mt != nil {
-		// For the lock-free (non-DuckDB) path, db.roots may hold unflushed entries.
-		// handleMemTableFlushClassic already drains db.roots before building the L0
+		// For the lock-free (non-DuckDB) path, db.root may hold unflushed entries.
+		// handleMemTableFlushClassic already drains db.root before building the L0
 		// table, so we just need to ensure db.mt is pushed to flushChan even when its
-		// skiplist is empty, as long as any db.roots bucket is non-nil. Do NOT drain into db.mt.sl
+		// skiplist is empty, as long as db.root is non-nil. Do NOT drain into db.mt.sl
 		// here — the arena may be full.
-		hasRootEntries := false
-		if !db.opt.UseDuckDB && db.opt.NumCompactors == 0 {
-			for i := range db.roots {
-				if db.roots[i].Load() != nil {
-					hasRootEntries = true
-					break
-				}
-			}
-		}
+		hasRootEntries := !db.opt.UseDuckDB && db.opt.NumCompactors == 0 && db.root.Load() != nil
 		if db.mt.sl.Empty() && !hasRootEntries {
 			// Nothing to flush — safe to discard.
 			db.mt.DecrRef()
@@ -902,11 +878,10 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 
 	// 1. 🚀 Check the lock-free CAS-prepend root list first (non-DuckDB writes
 	// with NumCompactors==0 land here before being drained to L0). When the
-	// standard write channel is used, db.roots is always nil and this is a no-op.
+	// standard write channel is used, db.root is always nil and this is a no-op.
 	var best y.ValueStruct
-	bucket := lockFreeBucket(key)
 	var rootListLen int64
-	for n := db.roots[bucket].Load(); n != nil; n = n.next {
+	for n := db.root.Load(); n != nil; n = n.next {
 		rootListLen++
 		for _, e := range n.kvs {
 			if !bytes.Equal(y.ParseKey(e.Key), logicalKey) {
@@ -1261,45 +1236,35 @@ func buildL0Table(iter y.Iterator, dropPrefixes [][]byte, bopts table.Options) *
 func (db *DB) handleMemTableFlushClassic(mt *memTable, dropPrefixes [][]byte) error {
 	bopts := buildTableOptions(db)
 
-	// For the lock-free (non-DuckDB) path, db.roots may hold entries that
+	// For the lock-free (non-DuckDB) path, db.root may hold entries that
 	// bypassed the write channel.  mt.sl is already full (that's why the flush
 	// was triggered), so we CANNOT put more entries into its arena.  Instead,
-	// collect the roots entries into a fresh temporary skiplist sized exactly for
+	// collect the root entries into a fresh temporary skiplist sized exactly for
 	// them, then merge the two sorted streams when building the L0 table.
 	var itr y.Iterator
 	if !db.opt.UseDuckDB && db.opt.NumCompactors == 0 {
-		// Atomically drain all 101 buckets.
-		var arenaBytes int64
-		heads := make([]*upsertNode, numLockFreeBuckets)
-		anyHead := false
-		for i := range db.roots {
-			if head := db.roots[i].Swap(nil); head != nil {
-				heads[i] = head
-				anyHead = true
-				for n := head; n != nil; n = n.next {
-					for _, e := range n.kvs {
-						arenaBytes += int64(len(e.Key)) + int64(len(e.Value)) + int64(skl.MaxNodeSize)
-					}
+		if head := db.root.Swap(nil); head != nil {
+			// First pass: compute total byte budget for the temp arena.
+			var arenaBytes int64
+			for n := head; n != nil; n = n.next {
+				for _, e := range n.kvs {
+					arenaBytes += int64(len(e.Key)) + int64(len(e.Value)) + int64(skl.MaxNodeSize)
 				}
 			}
-		}
-		if anyHead {
 			const minArena = 4 << 10 // 4 KiB floor
 			if arenaBytes < minArena {
 				arenaBytes = minArena
 			}
 			tmpSl := skl.NewSkiplist(arenaBytes * 2) // 2× headroom for skl overhead
 			defer tmpSl.DecrRef()
-			for _, head := range heads {
-				for n := head; n != nil; n = n.next {
-					for _, e := range n.kvs {
-						tmpSl.Put(e.Key, y.ValueStruct{
-							Value:     e.Value,
-							Meta:      e.meta,
-							UserMeta:  e.UserMeta,
-							ExpiresAt: e.ExpiresAt,
-						})
-					}
+			for n := head; n != nil; n = n.next {
+				for _, e := range n.kvs {
+					tmpSl.Put(e.Key, y.ValueStruct{
+						Value:     e.Value,
+						Meta:      e.meta,
+						UserMeta:  e.UserMeta,
+						ExpiresAt: e.ExpiresAt,
+					})
 				}
 			}
 			itr = table.NewMergeIterator([]y.Iterator{
