@@ -60,14 +60,17 @@ var sbWeights = []int{15, 15, 15, 25, 15, 15} // cumulative built below
 // Key helpers  (identical to server/smallbank_transactions.go)
 // ---------------------------------------------------------------------------
 
+// Key format: "<id>:accounts_id" so all three keys for a given customer
+// share the same routing prefix and land in the same DuckDB partition.
+// This lets ReadBatch serve all reads for a transaction in one SQL query.
 func sbAccountKey(id int64) []byte {
-	return []byte(fmt.Sprintf("accounts_id_%d", id))
+	return []byte(fmt.Sprintf("%d:accounts_id", id))
 }
 func sbSavingsKey(id int64) []byte {
-	return []byte(fmt.Sprintf("savings_bal_%d", id))
+	return []byte(fmt.Sprintf("%d:savings_bal", id))
 }
 func sbCheckingKey(id int64) []byte {
-	return []byte(fmt.Sprintf("checking_bal_%d", id))
+	return []byte(fmt.Sprintf("%d:checking_bal", id))
 }
 
 // ---------------------------------------------------------------------------

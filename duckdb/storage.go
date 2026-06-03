@@ -5,9 +5,11 @@
 package duckdb
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/dgraph-io/ristretto/v2/z"
@@ -454,11 +456,12 @@ type ReadBatchResult struct {
 	Found     bool
 }
 
-// ReadBatch retrieves the latest value for multiple keys, grouping by partition
-// so that pendingKeys is flushed at most once per partition. Each key is then
-// queried with the same index-friendly LIMIT 1 query as Read(), routed through
-// the partition's persistent pa.sqlConn instead of the shared pool — avoiding
-// connection acquisition overhead while keeping efficient primary-key lookups.
+// ReadBatch retrieves the latest value for multiple keys in as few SQL queries
+// as possible. Keys are grouped by partition; a partition with only one
+// requested key uses the pre-compiled LIMIT 1 prepared statement. A partition
+// with multiple keys issues a single IN-clause query with ROW_NUMBER() OVER
+// (PARTITION BY key) so DuckDB fetches the latest visible row for every key
+// in one round-trip instead of N separate queries.
 //
 // The returned slice is in the same order as the input requests.
 // If a key is not found its ReadBatchResult has Found=false and Value=nil.
@@ -472,11 +475,18 @@ func (s *DuckDBStorage) ReadBatch(requests []ReadBatchRequest) ([]ReadBatchResul
 		results[i].Key = req.Key
 	}
 
+	// key string → slice of result indices (a key may appear more than once).
+	keyToIndices := make(map[string][]int, len(requests))
+	for i, req := range requests {
+		k := string(req.Key)
+		keyToIndices[k] = append(keyToIndices[k], i)
+	}
+
 	// Group requests by partition.
 	type partReq struct {
 		key    []byte
 		readTs CustomTs
-		idx    int // original position in requests
+		idx    int
 	}
 	partGroups := make(map[int][]partReq)
 	for i, req := range requests {
@@ -484,12 +494,10 @@ func (s *DuckDBStorage) ReadBatch(requests []ReadBatchRequest) ([]ReadBatchResul
 		partGroups[pid] = append(partGroups[pid], partReq{req.Key, req.ReadTs, i})
 	}
 
-	// For each partition: flush once if needed, then issue one LIMIT 1 query
-	// per key using the partition's persistent connection.
 	for pid, reqs := range partGroups {
 		pa := s.partAppenders[pid]
 
-		// Check under RLock whether any key in this partition needs a flush.
+		// Flush once if any key in this partition is pending.
 		pa.mu.RLock()
 		needFlush := false
 		for _, r := range reqs {
@@ -509,43 +517,97 @@ func (s *DuckDBStorage) ReadBatch(requests []ReadBatchRequest) ([]ReadBatchResul
 			pa.mu.Unlock()
 		}
 
-		// Use the pre-compiled prepared statement — same index-friendly LIMIT 1
-		// query as Read(), executed through the s.db pool so concurrent workers
-		// on different partitions don't serialize through a single connection.
-		stmt := s.readStmts[pid]
+		// All requests in a transaction share the same readTs.
+		readTs := reqs[0].readTs
 
-		for _, r := range reqs {
+		if len(reqs) == 1 {
+			// Single key — fast path: use the pre-compiled LIMIT 1 statement.
+			r := reqs[0]
 			var (
 				key                   []byte
 				epochID, brokerID, ts int64
 				value                 []byte
 				deleted               bool
 			)
-			err := stmt.QueryRowContext(
+			err := s.readStmts[pid].QueryRowContext(
 				s.ctx,
 				r.key,
-				r.readTs.EpochID,
-				r.readTs.EpochID, r.readTs.BrokerID,
-				r.readTs.EpochID, r.readTs.BrokerID, r.readTs.AssignedTs,
+				readTs.EpochID,
+				readTs.EpochID, readTs.BrokerID,
+				readTs.EpochID, readTs.BrokerID, readTs.AssignedTs,
 			).Scan(&key, &epochID, &brokerID, &ts, &value, &deleted)
-
 			if err == sql.ErrNoRows {
-				// results[r.idx] already has Found=false, Value=nil — nothing to do.
 				continue
 			}
 			if err != nil {
 				return nil, fmt.Errorf("ReadBatch scan partition %d key %q: %w", pid, r.key, err)
 			}
+			if !deleted {
+				results[r.idx].Found = true
+				results[r.idx].Value = value
+				results[r.idx].Timestamp = CustomTs{EpochID: epochID, BrokerID: brokerID, AssignedTs: ts}
+			}
+			continue
+		}
+
+		// Multiple keys in the same partition — single IN-clause query with
+		// ROW_NUMBER() OVER (PARTITION BY key) fetches the latest visible row
+		// for every key in one SQL round-trip.
+		tableName := fmt.Sprintf("partition_%d", pid)
+		placeholders := make([]string, len(reqs))
+		args := make([]interface{}, 0, len(reqs)+6)
+		for i, r := range reqs {
+			placeholders[i] = "?"
+			args = append(args, r.key)
+		}
+		inClause := strings.Join(placeholders, ", ")
+		args = append(args,
+			readTs.EpochID,
+			readTs.EpochID, readTs.BrokerID,
+			readTs.EpochID, readTs.BrokerID, readTs.AssignedTs,
+		)
+		querySQL := fmt.Sprintf(`
+			SELECT key, epoch_id, broker_id, assigned_ts, value, deleted
+			FROM (
+				SELECT key, epoch_id, broker_id, assigned_ts, value, deleted,
+				       ROW_NUMBER() OVER (
+				           PARTITION BY key
+				           ORDER BY epoch_id DESC, broker_id DESC, assigned_ts DESC
+				       ) AS rn
+				FROM %s
+				WHERE key IN (%s)
+				  AND (epoch_id < ? OR
+				       (epoch_id = ? AND broker_id < ?) OR
+				       (epoch_id = ? AND broker_id = ? AND assigned_ts <= ?))
+			) sub
+			WHERE rn = 1`, tableName, inClause)
+
+		rows, err := s.db.QueryContext(s.ctx, querySQL, args...)
+		if err != nil {
+			return nil, fmt.Errorf("ReadBatch query partition %d: %w", pid, err)
+		}
+		for rows.Next() {
+			var (
+				key                   []byte
+				epochID, brokerID, ts int64
+				value                 []byte
+				deleted               bool
+			)
+			if err := rows.Scan(&key, &epochID, &brokerID, &ts, &value, &deleted); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("ReadBatch scan partition %d: %w", pid, err)
+			}
 			if deleted {
 				continue
 			}
-			results[r.idx].Found = true
-			results[r.idx].Value = value
-			results[r.idx].Timestamp = CustomTs{
-				EpochID:    epochID,
-				BrokerID:   brokerID,
-				AssignedTs: ts,
+			for _, idx := range keyToIndices[string(key)] {
+				results[idx].Found = true
+				results[idx].Value = value
+				results[idx].Timestamp = CustomTs{EpochID: epochID, BrokerID: brokerID, AssignedTs: ts}
 			}
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("ReadBatch close rows partition %d: %w", pid, err)
 		}
 	}
 
@@ -718,5 +780,13 @@ func (pc *partitionCalculator) getPartition(key []byte) int {
 	if pc.numPartitions <= 1 {
 		return 0
 	}
-	return int(z.MemHash(key) % uint64(pc.numPartitions))
+	// Co-locate related keys: if the key contains ':', hash only the prefix
+	// (bytes before the first ':') so that e.g. "42:accounts_id",
+	// "42:savings_bal", "42:checking_bal" all land in the same partition.
+	// Keys without ':' are hashed in full (backward-compatible).
+	partKey := key
+	if idx := bytes.IndexByte(key, ':'); idx >= 0 {
+		partKey = key[:idx]
+	}
+	return int(z.MemHash(partKey) % uint64(pc.numPartitions))
 }
