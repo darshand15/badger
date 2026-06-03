@@ -1380,12 +1380,12 @@ func TestLoad(t *testing.T) {
 				k := []byte(fmt.Sprintf("%09d", i))
 				txnSet(t, kv, k, k, 0x00)
 			}
-			require.Equal(t, 10000, kv.orc.readTs().AssignedTs)
+			require.Equal(t, uint32(10000), kv.orc.readTs().AssignedTs)
 			kv.Close()
 		}
 		kv, err := Open(opt)
 		require.NoError(t, err)
-		require.Equal(t, 10000, kv.orc.readTs().AssignedTs)
+		require.Equal(t, uint32(10000), kv.orc.readTs().AssignedTs)
 
 		for i := 0; i < n; i++ {
 			if (i % 10000) == 0 {
@@ -2379,10 +2379,10 @@ func TestMinReadTs(t *testing.T) {
 		time.Sleep(time.Millisecond)
 
 		readTxn0 := db.NewTransaction(false)
-		require.Equal(t, uint64(10), readTxn0.readTs)
+		require.Equal(t, types.CustomTs{AssignedTs: 10}, readTxn0.readTs)
 
 		min := db.orc.readMark.DoneUntil()
-		require.Equal(t, uint64(9), min)
+		require.Equal(t, types.CustomTs{AssignedTs: 9}, min)
 
 		readTxn := db.NewTransaction(false)
 		for i := 0; i < 10; i++ {
@@ -2390,7 +2390,7 @@ func TestMinReadTs(t *testing.T) {
 				return txn.SetEntry(NewEntry([]byte("x"), []byte("y")))
 			}))
 		}
-		require.Equal(t, uint64(20), db.orc.readTs())
+		require.Equal(t, types.CustomTs{AssignedTs: 20}, db.orc.readTs())
 
 		time.Sleep(time.Millisecond)
 		require.Equal(t, min, db.orc.readMark.DoneUntil())
@@ -2398,7 +2398,7 @@ func TestMinReadTs(t *testing.T) {
 		readTxn0.Discard()
 		readTxn.Discard()
 		time.Sleep(time.Millisecond)
-		require.Equal(t, uint64(19), db.orc.readMark.DoneUntil())
+		require.Equal(t, types.CustomTs{AssignedTs: 19}, db.orc.readMark.DoneUntil())
 		db.orc.readMark.Done(types.CustomTs{AssignedTs: 20}) // Because we called readTs.
 
 		for i := 0; i < 10; i++ {
@@ -2407,7 +2407,7 @@ func TestMinReadTs(t *testing.T) {
 			}))
 		}
 		time.Sleep(time.Millisecond)
-		require.Equal(t, uint64(20), db.orc.readMark.DoneUntil())
+		require.Equal(t, types.CustomTs{AssignedTs: 20}, db.orc.readMark.DoneUntil())
 	})
 }
 
@@ -2741,7 +2741,7 @@ func TestVerifyChecksum(t *testing.T) {
 					Key:      key,
 					Value:    value,
 					StreamId: uint32(st),
-					Version:  types.CustomTs{AssignedTs: 1},
+					Version:  types.CustomTs{AssignedTs: 1}.ToUint64(),
 				}, buf)
 				if i%100 == 0 {
 					st++

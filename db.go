@@ -448,10 +448,6 @@ func Open(opt Options) (*DB, error) {
 	// We do increment nextTxnTs below. So, no need to do it here.
 	db.orc.nextTxnTs = db.MaxVersion()
 
-	if db.orc.nextTxnTs.IsZero() {
-		db.orc.nextTxnTs = db.orc.nextTxnTs.Incr()
-	}
-
 	db.opt.Infof("Set nextTxnTs to %s", db.orc.nextTxnTs)
 
 	if err = db.vlog.open(db); err != nil {
@@ -1181,14 +1177,33 @@ var errNoRoom = stderrors.New("No room for write")
 
 // ensureRoomForWrite is always called serially.
 func (db *DB) ensureRoomForWrite() error {
-	var err error
+	// ensureRoomForWrite is always called serially (single doWrites goroutine).
+
+	// Fast pre-check without acquiring any lock.  db.mt is only written inside
+	// the write lock by this goroutine, so reading it here is safe.
+	if !db.mt.isFull() {
+		return nil
+	}
+
+	// If flushChan is already at capacity we will hit the default branch below
+	// anyway — skip the expensive pre-allocation entirely.
+	if len(db.flushChan) == cap(db.flushChan) {
+		return errNoRoom
+	}
+
+	// Pre-allocate the replacement memtable BEFORE acquiring the write lock.
+	// Holding db.lock while newMemTable runs (skiplist arena alloc + WAL mmap)
+	// stalls every concurrent reader goroutine for the full allocation time.
+	// Moving the allocation outside the lock eliminates that stall.
+	newMT, allocErr := db.newMemTable()
+	if allocErr != nil {
+		return y.Wrapf(allocErr, "ensureRoomForWrite: pre-alloc")
+	}
+
 	db.lock.Lock()
 	defer db.lock.Unlock()
 
 	y.AssertTrue(db.mt != nil) // A nil mt indicates that DB is being closed.
-	if !db.mt.isFull() {
-		return nil
-	}
 
 	select {
 	case db.flushChan <- db.mt:
@@ -1196,14 +1211,14 @@ func (db *DB) ensureRoomForWrite() error {
 			db.mt.sl.MemSize(), len(db.flushChan))
 		// We manage to push this task. Let's modify imm.
 		db.imm = append(db.imm, db.mt)
-		db.mt, err = db.newMemTable()
-		if err != nil {
-			return y.Wrapf(err, "cannot create new mem table")
-		}
+		db.mt = newMT
 		// New memtable is empty. We certainly have room.
 		return nil
 	default:
-		// We need to do this to unlock and allow the flusher to modify imm.
+		// flushChan filled up between our check and the lock acquisition.
+		// Release the pre-allocated memtable (its OnClose will delete the WAL
+		// file) and tell the caller to retry after sleeping.
+		newMT.sl.DecrRef()
 		return errNoRoom
 	}
 }

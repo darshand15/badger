@@ -207,7 +207,7 @@ func writeSorted(db *badger.DB, num uint64) error {
 			kv := &pb.KV{
 				Key:      key,
 				Value:    value,
-				Version:  types.CustomTs{AssignedTs: 1},
+				Version:  types.CustomTs{AssignedTs: 1}.ToUint64(),
 				StreamId: streamId,
 			}
 			badger.KVToBuffer(kv, kvBuf)

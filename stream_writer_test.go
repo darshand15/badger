@@ -31,7 +31,7 @@ func getSortedKVList(valueSize, listSize int) *z.Buffer {
 		KVToBuffer(&pb.KV{
 			Key:     key,
 			Value:   value,
-			Version: types.CustomTs{AssignedTs: 20},
+			Version: types.CustomTs{AssignedTs: 20}.ToUint64(),
 		}, buf)
 	}
 
@@ -171,7 +171,7 @@ func TestStreamWriter3(t *testing.T) {
 				KVToBuffer(&pb.KV{
 					Key:     key,
 					Value:   value,
-					Version: types.CustomTs{AssignedTs: 20},
+					Version: types.CustomTs{AssignedTs: 20}.ToUint64(),
 				}, buf)
 				counter = counter + 2
 			}
@@ -265,7 +265,7 @@ func TestStreamWriter4(t *testing.T) {
 		KVToBuffer(&pb.KV{
 			Key:     []byte("key-1"),
 			Value:   []byte("value-1"),
-			Version: types.CustomTs{AssignedTs: 1},
+			Version: types.CustomTs{AssignedTs: 1}.ToUint64(),
 		}, buf)
 
 		sw := db.NewStreamWriter()
@@ -290,12 +290,12 @@ func TestStreamWriter5(t *testing.T) {
 		KVToBuffer(&pb.KV{
 			Key:     left,
 			Value:   []byte("val"),
-			Version: types.CustomTs{AssignedTs: 1},
+			Version: types.CustomTs{AssignedTs: 1}.ToUint64(),
 		}, buf)
 		KVToBuffer(&pb.KV{
 			Key:     right,
 			Value:   []byte("val"),
-			Version: types.CustomTs{AssignedTs: 1},
+			Version: types.CustomTs{AssignedTs: 1}.ToUint64(),
 		}, buf)
 
 		sw := db.NewStreamWriter()
@@ -332,7 +332,7 @@ func TestStreamWriter6(t *testing.T) {
 				kv := &pb.KV{
 					Key:     bytes.Repeat([]byte(str[i]), int(db.opt.BaseTableSize)),
 					Value:   []byte("val"),
-					Version: types.CustomTs{AssignedTs: uint32(keyCount - j)},
+					Version: types.CustomTs{AssignedTs: uint32(keyCount - j)}.ToUint64(),
 				}
 				KVToBuffer(kv, buf)
 			}
@@ -371,7 +371,7 @@ func TestStreamWriterCancel(t *testing.T) {
 			kv := &pb.KV{
 				Key:     bytes.Repeat([]byte(str[i]), int(db.opt.BaseTableSize)),
 				Value:   []byte("val"),
-				Version: types.CustomTs{AssignedTs: uint32(ver)},
+				Version: types.CustomTs{AssignedTs: uint32(ver)}.ToUint64(),
 			}
 			KVToBuffer(kv, buf)
 			ver = (ver + 1) % 2
@@ -404,7 +404,7 @@ func TestStreamDone(t *testing.T) {
 			kv1 := &pb.KV{
 				Key:      []byte(fmt.Sprintf("%d", i)),
 				Value:    val[:],
-				Version:  types.CustomTs{AssignedTs: 1},
+				Version:  types.CustomTs{AssignedTs: 1}.ToUint64(),
 				StreamId: uint32(i),
 			}
 			kv2 := &pb.KV{
@@ -445,7 +445,7 @@ func TestSendOnClosedStream(t *testing.T) {
 	kv1 := &pb.KV{
 		Key:      []byte(fmt.Sprintf("%d", 1)),
 		Value:    val[:],
-		Version:  types.CustomTs{AssignedTs: 1},
+		Version:  types.CustomTs{AssignedTs: 1}.ToUint64(),
 		StreamId: uint32(1),
 	}
 	kv2 := &pb.KV{
@@ -468,7 +468,7 @@ func TestSendOnClosedStream(t *testing.T) {
 	kv1 = &pb.KV{
 		Key:      []byte(fmt.Sprintf("%d", 2)),
 		Value:    val[:],
-		Version:  types.CustomTs{AssignedTs: 1},
+		Version:  types.CustomTs{AssignedTs: 1}.ToUint64(),
 		StreamId: uint32(1),
 	}
 	KVToBuffer(kv1, buf1)
@@ -495,7 +495,7 @@ func TestSendOnClosedStream2(t *testing.T) {
 	kv1 := &pb.KV{
 		Key:      []byte(fmt.Sprintf("%d", 1)),
 		Value:    val[:],
-		Version:  types.CustomTs{AssignedTs: 1},
+		Version:  types.CustomTs{AssignedTs: 1}.ToUint64(),
 		StreamId: uint32(1),
 	}
 	kv2 := &pb.KV{
@@ -505,7 +505,7 @@ func TestSendOnClosedStream2(t *testing.T) {
 	kv3 := &pb.KV{
 		Key:      []byte(fmt.Sprintf("%d", 2)),
 		Value:    val[:],
-		Version:  types.CustomTs{AssignedTs: 1},
+		Version:  types.CustomTs{AssignedTs: 1}.ToUint64(),
 		StreamId: uint32(1),
 	}
 	KVToBuffer(kv1, buf)
@@ -542,7 +542,7 @@ func TestStreamWriterEncrypted(t *testing.T) {
 	KVToBuffer(&pb.KV{
 		Key:     key,
 		Value:   value,
-		Version: types.CustomTs{AssignedTs: 20},
+		Version: types.CustomTs{AssignedTs: 20}.ToUint64(),
 	}, buf)
 
 	sw := db.NewStreamWriter()
@@ -580,7 +580,7 @@ func TestStreamWriterWithLargeValue(t *testing.T) {
 		KVToBuffer(&pb.KV{
 			Key:     []byte("key"),
 			Value:   val,
-			Version: types.CustomTs{AssignedTs: 1},
+			Version: types.CustomTs{AssignedTs: 1}.ToUint64(),
 		}, buf)
 
 		sw := db.NewStreamWriter()
@@ -598,7 +598,7 @@ func TestStreamWriterIncremental(t *testing.T) {
 			KVToBuffer(&pb.KV{
 				Key:     key,
 				Value:   []byte("val"),
-				Version: types.CustomTs{AssignedTs: 1},
+				Version: types.CustomTs{AssignedTs: 1}.ToUint64(),
 			}, buf)
 		}
 		// Now do an incremental stream write.
@@ -615,7 +615,7 @@ func TestStreamWriterIncremental(t *testing.T) {
 			KVToBuffer(&pb.KV{
 				Key:     []byte("key-1"),
 				Value:   []byte("val"),
-				Version: types.CustomTs{AssignedTs: 1},
+				Version: types.CustomTs{AssignedTs: 1}.ToUint64(),
 			}, buf)
 			sw := db.NewStreamWriter()
 			require.NoError(t, sw.Prepare(), "sw.Prepare() failed")
@@ -747,7 +747,7 @@ func TestStreamWriterIncremental(t *testing.T) {
 			KVToBuffer(&pb.KV{
 				Key:     []byte("a1"),
 				Value:   []byte("val1"),
-				Version: types.CustomTs{AssignedTs: 11},
+				Version: types.CustomTs{AssignedTs: 11}.ToUint64(),
 			}, buf)
 			sw := db.NewStreamWriter()
 			require.NoError(t, sw.PrepareIncremental(), "sw.PrepareIncremental() failed")
@@ -759,7 +759,7 @@ func TestStreamWriterIncremental(t *testing.T) {
 			KVToBuffer(&pb.KV{
 				Key:     []byte("a2"),
 				Value:   []byte("val2"),
-				Version: types.CustomTs{AssignedTs: 9},
+				Version: types.CustomTs{AssignedTs: 9}.ToUint64(),
 			}, buf)
 			sw = db.NewStreamWriter()
 			require.NoError(t, sw.PrepareIncremental(), "sw.PrepareIncremental() failed")

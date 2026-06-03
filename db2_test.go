@@ -852,7 +852,7 @@ func TestMaxVersion(t *testing.T) {
 				txnSet(t, db, key(i), nil, 0)
 			}
 			ver := db.MaxVersion()
-			require.Equal(t, N, ver.AssignedTs)
+			require.Equal(t, uint32(N), ver.AssignedTs)
 		})
 	})
 	t.Run("multiple versions", func(t *testing.T) {
@@ -877,7 +877,7 @@ func TestMaxVersion(t *testing.T) {
 		require.NoError(t, wb.Flush())
 
 		ver := db.MaxVersion()
-		require.Equal(t, N, ver.AssignedTs)
+		require.Equal(t, uint32(N), ver.AssignedTs)
 
 		require.NoError(t, db.Close())
 	})
@@ -901,7 +901,7 @@ func TestMaxVersion(t *testing.T) {
 
 		ver := db.MaxVersion()
 		require.NoError(t, err)
-		require.Equal(t, N, ver.AssignedTs)
+		require.Equal(t, uint32(N), ver.AssignedTs)
 
 		require.NoError(t, db.Close())
 	})
@@ -918,13 +918,13 @@ func TestTxnReadTs(t *testing.T) {
 	require.Equal(t, types.CustomTs{}, db.orc.readTs())
 
 	txnSet(t, db, []byte("foo"), nil, 0)
-	require.Equal(t, 1, db.orc.readTs().AssignedTs)
+	require.Equal(t, uint32(1), db.orc.readTs().AssignedTs)
 	require.NoError(t, db.Close())
-	require.Equal(t, 1, db.orc.readTs().AssignedTs)
+	require.Equal(t, uint32(1), db.orc.readTs().AssignedTs)
 
 	db, err = Open(opt)
 	require.NoError(t, err)
-	require.Equal(t, 1, db.orc.readTs().AssignedTs)
+	require.Equal(t, uint32(1), db.orc.readTs().AssignedTs)
 }
 
 // This tests failed for stream writer with jemalloc and compression enabled.
@@ -956,7 +956,7 @@ func TestKeyCount(t *testing.T) {
 				kvs.Kv = append(kvs.Kv, &pb.KV{
 					Key:      key,
 					Value:    value,
-					Version:  types.CustomTs{AssignedTs: 1},
+					Version:  types.CustomTs{AssignedTs: 1}.ToUint64(),
 					StreamId: streamId,
 				})
 

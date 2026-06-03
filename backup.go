@@ -87,7 +87,7 @@ func (stream *Stream) Backup(w io.Writer, since types.CustomTs) (types.CustomTs,
 				Key:       a.Copy(item.Key()),
 				Value:     valCopy,
 				UserMeta:  a.Copy([]byte{item.UserMeta()}),
-				Version:   item.Version(),
+				Version:   item.Version().ToUint64(),
 				ExpiresAt: item.ExpiresAt(),
 				Meta:      a.Copy([]byte{meta}),
 			}
@@ -99,7 +99,7 @@ func (stream *Stream) Backup(w io.Writer, since types.CustomTs) (types.CustomTs,
 				// marker just below the current version.
 				list.Kv = append(list.Kv, &pb.KV{
 					Key:     item.KeyCopy(nil),
-					Version: item.Version().Decr(),
+				Version: item.Version().Decr().ToUint64(),
 					Meta:    []byte{bitDelete},
 				})
 				return list, nil
@@ -119,8 +119,8 @@ func (stream *Stream) Backup(w io.Writer, since types.CustomTs) (types.CustomTs,
 		}
 		out := list.Kv[:0]
 		for _, kv := range list.Kv {
-			if maxVersion.Less(kv.Version) {
-				maxVersion = kv.Version
+			if maxVersion.Less(types.CustomTsFromUint64(kv.Version)) {
+				maxVersion = types.CustomTsFromUint64(kv.Version)
 			}
 			if !kv.StreamDone {
 				// Don't pick stream done changes.
@@ -177,7 +177,7 @@ func (l *KVLoader) Set(kv *pb.KV) error {
 		meta = kv.Meta[0]
 	}
 	e := &Entry{
-		Key:       y.KeyWithTs(kv.Key, kv.Version),
+		Key:       y.KeyWithTs(kv.Key, types.CustomTsFromUint64(kv.Version)),
 		Value:     kv.Value,
 		UserMeta:  userMeta,
 		ExpiresAt: kv.ExpiresAt,
@@ -265,8 +265,8 @@ func (db *DB) Load(r io.Reader, maxPendingWrites int) error {
 
 			// Update nextTxnTs, memtable stores this
 			// timestamp in badger head when flushed.
-			if !(kv.Version.Less(db.orc.nextTxnTs)) {
-				db.orc.nextTxnTs = kv.Version.Incr()
+			if !(types.CustomTsFromUint64(kv.Version).Less(db.orc.nextTxnTs)) {
+				db.orc.nextTxnTs = types.CustomTsFromUint64(kv.Version).Incr()
 			}
 		}
 	}

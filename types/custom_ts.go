@@ -174,3 +174,19 @@ func ParseCustomTsString(s string) (CustomTs, error) {
 		AssignedTs: uint32(ts),
 	}, nil
 }
+
+// ToUint64 packs CustomTs into a single uint64 for protobuf varint serialization.
+// Encoding: EpochID[63:48] | BrokerID[47:32] | AssignedTs[31:0].
+// Supports EpochID/BrokerID 0-65535 and AssignedTs 0-4294967295.
+func (t CustomTs) ToUint64() uint64 {
+	return uint64(t.EpochID)<<48 | uint64(t.BrokerID)<<32 | uint64(t.AssignedTs)
+}
+
+// CustomTsFromUint64 is the inverse of ToUint64.
+func CustomTsFromUint64(v uint64) CustomTs {
+	return CustomTs{
+		EpochID:    uint32(v >> 48),
+		BrokerID:   uint32((v >> 32) & 0xFFFF),
+		AssignedTs: uint32(v & 0xFFFFFFFF),
+	}
+}

@@ -34,10 +34,10 @@ func TestBackupRestore1(t *testing.T) {
 		key      []byte
 		val      []byte
 		userMeta byte
-		version  uint64
+		version  types.CustomTs
 	}{
-		{key: []byte("answer1"), val: []byte("42"), version: 1},
-		{key: []byte("answer2"), val: []byte("43"), userMeta: 1, version: 2},
+		{key: []byte("answer1"), val: []byte("42"), version: types.CustomTs{AssignedTs: 1}},
+		{key: []byte("answer2"), val: []byte("43"), userMeta: 1, version: types.CustomTs{AssignedTs: 2}},
 	}
 
 	err = db.Update(func(txn *Txn) error {
@@ -103,7 +103,7 @@ func TestBackupRestore1(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	require.Equal(t, 3, db.orc.nextTs().AssignedTs)
+	require.Equal(t, uint32(3), db.orc.nextTs().AssignedTs)
 }
 
 func TestBackupRestore2(t *testing.T) {
@@ -255,7 +255,7 @@ func populateEntries(db *DB, entries []*pb.KV) error {
 			if err = txn.SetEntry(NewEntry(e.Key, e.Value)); err != nil {
 				return err
 			}
-			entries[i].Version = types.CustomTs{AssignedTs: 1}
+			entries[i].Version = types.CustomTs{AssignedTs: 1}.ToUint64()
 		}
 		return nil
 	})

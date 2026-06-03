@@ -16,7 +16,6 @@ import (
 	reflect "reflect"
 	sync "sync"
 
-	"github.com/dgraph-io/badger/v4/types"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
@@ -171,7 +170,7 @@ type KV struct {
 	Key       []byte         `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
 	Value     []byte         `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
 	UserMeta  []byte         `protobuf:"bytes,3,opt,name=user_meta,json=userMeta,proto3" json:"user_meta,omitempty"`
-	Version   types.CustomTs `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`
+	Version   uint64         `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`
 	ExpiresAt uint64         `protobuf:"varint,5,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
 	Meta      []byte         `protobuf:"bytes,6,opt,name=meta,proto3" json:"meta,omitempty"`
 	// Stream id is used to identify which stream the KV came from.
@@ -233,11 +232,11 @@ func (x *KV) GetUserMeta() []byte {
 	return nil
 }
 
-func (x *KV) GetVersion() types.CustomTs {
+func (x *KV) GetVersion() uint64 {
 	if x != nil {
 		return x.Version
 	}
-	return types.CustomTs{}
+	return 0
 }
 
 func (x *KV) GetExpiresAt() uint64 {

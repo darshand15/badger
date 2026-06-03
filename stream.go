@@ -125,7 +125,7 @@ func (st *Stream) ToList(key []byte, itr *Iterator) (*pb.KVList, error) {
 		}); err != nil {
 			return nil, err
 		}
-		kv.Version = item.Version()
+		kv.Version = item.Version().ToUint64()
 		kv.ExpiresAt = item.ExpiresAt()
 		kv.UserMeta = a.Copy([]byte{item.UserMeta()})
 

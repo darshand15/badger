@@ -904,7 +904,7 @@ func (vlog *valueLog) write(reqs []*request) error {
 		y.NumBytesWrittenVlogAdd(vlog.opt.MetricsEnabled, int64(bytesWritten))
 
 		vlog.numEntriesWritten += uint32(written)
-		vlog.db.threshold.update(valueSizes)
+		vlog.db.threshold.update(append([]int64(nil), valueSizes...))
 		// We write to disk here so that all entries that are part of the same transaction are
 		// written to the same vlog file.
 		var err error

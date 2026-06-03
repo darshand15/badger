@@ -1,0 +1,39 @@
+panic: invalid Go type types.CustomTs for field badgerpb4.KV.version
+
+goroutine 67 [running]:
+google.golang.org/protobuf/internal/impl.newSingularConverter({0x1043bc780, 0x10434ffe0}, {0x1043bbb10, 0x140001c1520})
+	/Users/AshleyLuo1/go/pkg/mod/google.golang.org/protobuf@v1.36.8/internal/impl/convert.go:142 +0xa80
+google.golang.org/protobuf/internal/impl.NewConverter({0x1043bc780, 0x10434ffe0}, {0x1043bbb10, 0x140001c1520})
+	/Users/AshleyLuo1/go/pkg/mod/google.golang.org/protobuf@v1.36.8/internal/impl/convert.go:60 +0x8c
+google.golang.org/protobuf/internal/impl.fieldInfoForScalar({0x1043bbb10, 0x140001c1520}, {{0x10427d634, 0x7}, {0x0, 0x0}, {0x1043bc780, 0x10434ffe0}, {0x10427d63c, 0x44}, ...}, ...)
+	/Users/AshleyLuo1/go/pkg/mod/google.golang.org/protobuf@v1.36.8/internal/impl/message_reflect_field.go:268 +0x184
+google.golang.org/protobuf/internal/impl.(*MessageInfo).makeKnownFieldsFunc(0x140001ec008, {0x8, {0x1043bc780, 0x10424ce80}, 0x10, {0x1043bc780, 0x10423bd40}, 0xffffffffffffffff, {0x0, 0x0}, ...})
+	/Users/AshleyLuo1/go/pkg/mod/google.golang.org/protobuf@v1.36.8/internal/impl/message_reflect.go:78 +0x4e0
+google.golang.org/protobuf/internal/impl.(*MessageInfo).makeReflectFuncs(0x140001ec008, {0x1043bc780, 0x10435a5e0}, {0x8, {0x1043bc780, 0x10424ce80}, 0x10, {0x1043bc780, 0x10423bd40}, 0xffffffffffffffff, ...})
+	/Users/AshleyLuo1/go/pkg/mod/google.golang.org/protobuf@v1.36.8/internal/impl/message_reflect.go:42 +0x50
+google.golang.org/protobuf/internal/impl.(*MessageInfo).initOnce(0x140001ec008)
+	/Users/AshleyLuo1/go/pkg/mod/google.golang.org/protobuf@v1.36.8/internal/impl/message.go:92 +0x1a8
+google.golang.org/protobuf/internal/impl.(*MessageInfo).init(...)
+	/Users/AshleyLuo1/go/pkg/mod/google.golang.org/protobuf@v1.36.8/internal/impl/message.go:71
+google.golang.org/protobuf/internal/impl.(*messageState).ProtoMethods(0x14000471af8?)
+	/Users/AshleyLuo1/go/pkg/mod/google.golang.org/protobuf@v1.36.8/internal/impl/message_reflect_gen.go:31 +0x40
+google.golang.org/protobuf/proto.protoMethods(...)
+	/Users/AshleyLuo1/go/pkg/mod/google.golang.org/protobuf@v1.36.8/proto/proto_methods.go:19
+google.golang.org/protobuf/proto.MarshalOptions.size({{}, 0x0?, 0x0?, 0x10?}, {0x1043b2fd8, 0x1400bb3c008})
+	/Users/AshleyLuo1/go/pkg/mod/google.golang.org/protobuf@v1.36.8/proto/size.go:41 +0x3c
+google.golang.org/protobuf/proto.MarshalOptions.Size({{}, 0x0?, 0x0?, 0x0?}, {0x10439fd80?, 0x1400bb3c008?})
+	/Users/AshleyLuo1/go/pkg/mod/google.golang.org/protobuf@v1.36.8/proto/size.go:34 +0x54
+google.golang.org/protobuf/proto.Size(...)
+	/Users/AshleyLuo1/go/pkg/mod/google.golang.org/protobuf@v1.36.8/proto/size.go:20
+github.com/dgraph-io/badger/v4.KVToBuffer(0x1400bb3c008, 0x140001d8080)
+	/Users/AshleyLuo1/GolandProjects/darshan-badger/stream.go:490 +0x3c
+github.com/dgraph-io/badger/v4.(*Stream).produceKVs.func2({{0x1400016c030, 0x13, 0x18}, {0x0, 0x0, 0x0}, 0x0, 0x0})
+	/Users/AshleyLuo1/GolandProjects/darshan-badger/stream.go:247 +0x684
+github.com/dgraph-io/badger/v4.(*Stream).produceKVs(0x140002641e0, {0x1043a5a10, 0x1400001c050}, 0x7)
+	/Users/AshleyLuo1/GolandProjects/darshan-badger/stream.go:274 +0x2b0
+github.com/dgraph-io/badger/v4.(*Stream).Orchestrate.func1(0x0?)
+	/Users/AshleyLuo1/GolandProjects/darshan-badger/stream.go:410 +0x58
+created by github.com/dgraph-io/badger/v4.(*Stream).Orchestrate in goroutine 36
+	/Users/AshleyLuo1/GolandProjects/darshan-badger/stream.go:407 +0x208
+exit status 2
+FAIL	github.com/dgraph-io/badger/v4	0.513s

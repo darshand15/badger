@@ -93,8 +93,8 @@ func (wb *WriteBatch) writeKV(kv *pb.KV) error {
 	if len(kv.UserMeta) > 0 {
 		e.UserMeta = kv.UserMeta[0]
 	}
-	y.AssertTrue(kv.Version != types.CustomTs{})
-	e.version = kv.Version
+	y.AssertTrue(kv.Version != 0)
+	e.version = types.CustomTsFromUint64(kv.Version)
 	return wb.handleEntry(&e)
 }
 

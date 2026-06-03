@@ -17,6 +17,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 )
 
@@ -84,34 +85,34 @@ func TestBasic(t *testing.T) {
 
 	// Try inserting values.
 	// Somehow require.Nil doesn't work when checking for unsafe.Pointer(nil).
-	l.Put(y.KeyWithTs([]byte("key1"), 0), y.ValueStruct{Value: val1, Meta: 55, UserMeta: 0})
-	l.Put(y.KeyWithTs([]byte("key2"), 2), y.ValueStruct{Value: val2, Meta: 56, UserMeta: 0})
-	l.Put(y.KeyWithTs([]byte("key3"), 0), y.ValueStruct{Value: val3, Meta: 57, UserMeta: 0})
+	l.Put(y.KeyWithTs([]byte("key1"), types.CustomTs{}), y.ValueStruct{Value: val1, Meta: 55, UserMeta: 0})
+	l.Put(y.KeyWithTs([]byte("key2"), types.CustomTs{AssignedTs: 2}), y.ValueStruct{Value: val2, Meta: 56, UserMeta: 0})
+	l.Put(y.KeyWithTs([]byte("key3"), types.CustomTs{}), y.ValueStruct{Value: val3, Meta: 57, UserMeta: 0})
 
-	v := l.Get(y.KeyWithTs([]byte("key"), 0))
+	v := l.Get(y.KeyWithTs([]byte("key"), types.CustomTs{}))
 	require.True(t, v.Value == nil)
 
-	v = l.Get(y.KeyWithTs([]byte("key1"), 0))
+	v = l.Get(y.KeyWithTs([]byte("key1"), types.CustomTs{}))
 	require.True(t, v.Value != nil)
 	require.EqualValues(t, "00042", string(v.Value))
 	require.EqualValues(t, 55, v.Meta)
 
-	v = l.Get(y.KeyWithTs([]byte("key2"), 0))
+	v = l.Get(y.KeyWithTs([]byte("key2"), types.CustomTs{}))
 	require.True(t, v.Value == nil)
 
-	v = l.Get(y.KeyWithTs([]byte("key3"), 0))
+	v = l.Get(y.KeyWithTs([]byte("key3"), types.CustomTs{}))
 	require.True(t, v.Value != nil)
 	require.EqualValues(t, "00062", string(v.Value))
 	require.EqualValues(t, 57, v.Meta)
 
-	l.Put(y.KeyWithTs([]byte("key3"), 1), y.ValueStruct{Value: val4, Meta: 12, UserMeta: 0})
-	v = l.Get(y.KeyWithTs([]byte("key3"), 1))
+	l.Put(y.KeyWithTs([]byte("key3"), types.CustomTs{AssignedTs: 1}), y.ValueStruct{Value: val4, Meta: 12, UserMeta: 0})
+	v = l.Get(y.KeyWithTs([]byte("key3"), types.CustomTs{AssignedTs: 1}))
 	require.True(t, v.Value != nil)
 	require.EqualValues(t, "00072", string(v.Value))
 	require.EqualValues(t, 12, v.Meta)
 
-	l.Put(y.KeyWithTs([]byte("key4"), 1), y.ValueStruct{Value: val5, Meta: 60, UserMeta: 0})
-	v = l.Get(y.KeyWithTs([]byte("key4"), 1))
+	l.Put(y.KeyWithTs([]byte("key4"), types.CustomTs{AssignedTs: 1}), y.ValueStruct{Value: val5, Meta: 60, UserMeta: 0})
+	v = l.Get(y.KeyWithTs([]byte("key4"), types.CustomTs{AssignedTs: 1}))
 	require.NotNil(t, v.Value)
 	require.EqualValues(t, val5, v.Value)
 	require.EqualValues(t, 60, v.Meta)
@@ -123,7 +124,7 @@ func TestConcurrentBasic(t *testing.T) {
 	l := NewSkiplist(arenaSize)
 	var wg sync.WaitGroup
 	key := func(i int) []byte {
-		return y.KeyWithTs([]byte(fmt.Sprintf("%05d", i)), 0)
+		return y.KeyWithTs([]byte(fmt.Sprintf("%05d", i)), types.CustomTs{})
 	}
 	for i := 0; i < n; i++ {
 		wg.Add(1)
@@ -154,7 +155,7 @@ func TestConcurrentBasicBigValues(t *testing.T) {
 	l := NewSkiplist(arenaSize)
 	var wg sync.WaitGroup
 	key := func(i int) []byte {
-		return y.KeyWithTs([]byte(fmt.Sprintf("%05d", i)), 0)
+		return y.KeyWithTs([]byte(fmt.Sprintf("%05d", i)), types.CustomTs{})
 	}
 	BigValue := func(i int) []byte {
 		return []byte(fmt.Sprintf("%01048576d", i)) // Have 1 MB value which is > math.MaxUint16.
@@ -185,7 +186,7 @@ func TestConcurrentBasicBigValues(t *testing.T) {
 // TestOneKey will read while writing to one single key.
 func TestOneKey(t *testing.T) {
 	const n = 100
-	key := y.KeyWithTs([]byte("thekey"), 0)
+	key := y.KeyWithTs([]byte("thekey"), types.CustomTs{})
 	l := NewSkiplist(arenaSize)
 	defer l.DecrRef()
 
@@ -223,103 +224,103 @@ func TestFindNear(t *testing.T) {
 	defer l.DecrRef()
 	for i := 0; i < 1000; i++ {
 		key := fmt.Sprintf("%05d", i*10+5)
-		l.Put(y.KeyWithTs([]byte(key), 0), y.ValueStruct{Value: newValue(i), Meta: 0, UserMeta: 0})
+		l.Put(y.KeyWithTs([]byte(key), types.CustomTs{}), y.ValueStruct{Value: newValue(i), Meta: 0, UserMeta: 0})
 	}
 
-	n, eq := l.findNear(y.KeyWithTs([]byte("00001"), 0), false, false)
+	n, eq := l.findNear(y.KeyWithTs([]byte("00001"), types.CustomTs{}), false, false)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("00005"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("00005"), types.CustomTs{}), string(n.key(l.arena)))
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("00001"), 0), false, true)
+	n, eq = l.findNear(y.KeyWithTs([]byte("00001"), types.CustomTs{}), false, true)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("00005"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("00005"), types.CustomTs{}), string(n.key(l.arena)))
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("00001"), 0), true, false)
+	n, eq = l.findNear(y.KeyWithTs([]byte("00001"), types.CustomTs{}), true, false)
 	require.Nil(t, n)
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("00001"), 0), true, true)
+	n, eq = l.findNear(y.KeyWithTs([]byte("00001"), types.CustomTs{}), true, true)
 	require.Nil(t, n)
 	require.False(t, eq)
 
-	n, eq = l.findNear(y.KeyWithTs([]byte("00005"), 0), false, false)
+	n, eq = l.findNear(y.KeyWithTs([]byte("00005"), types.CustomTs{}), false, false)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("00015"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("00015"), types.CustomTs{}), string(n.key(l.arena)))
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("00005"), 0), false, true)
+	n, eq = l.findNear(y.KeyWithTs([]byte("00005"), types.CustomTs{}), false, true)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("00005"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("00005"), types.CustomTs{}), string(n.key(l.arena)))
 	require.True(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("00005"), 0), true, false)
+	n, eq = l.findNear(y.KeyWithTs([]byte("00005"), types.CustomTs{}), true, false)
 	require.Nil(t, n)
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("00005"), 0), true, true)
+	n, eq = l.findNear(y.KeyWithTs([]byte("00005"), types.CustomTs{}), true, true)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("00005"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("00005"), types.CustomTs{}), string(n.key(l.arena)))
 	require.True(t, eq)
 
-	n, eq = l.findNear(y.KeyWithTs([]byte("05555"), 0), false, false)
+	n, eq = l.findNear(y.KeyWithTs([]byte("05555"), types.CustomTs{}), false, false)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("05565"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("05565"), types.CustomTs{}), string(n.key(l.arena)))
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("05555"), 0), false, true)
+	n, eq = l.findNear(y.KeyWithTs([]byte("05555"), types.CustomTs{}), false, true)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("05555"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("05555"), types.CustomTs{}), string(n.key(l.arena)))
 	require.True(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("05555"), 0), true, false)
+	n, eq = l.findNear(y.KeyWithTs([]byte("05555"), types.CustomTs{}), true, false)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("05545"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("05545"), types.CustomTs{}), string(n.key(l.arena)))
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("05555"), 0), true, true)
+	n, eq = l.findNear(y.KeyWithTs([]byte("05555"), types.CustomTs{}), true, true)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("05555"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("05555"), types.CustomTs{}), string(n.key(l.arena)))
 	require.True(t, eq)
 
-	n, eq = l.findNear(y.KeyWithTs([]byte("05558"), 0), false, false)
+	n, eq = l.findNear(y.KeyWithTs([]byte("05558"), types.CustomTs{}), false, false)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("05565"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("05565"), types.CustomTs{}), string(n.key(l.arena)))
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("05558"), 0), false, true)
+	n, eq = l.findNear(y.KeyWithTs([]byte("05558"), types.CustomTs{}), false, true)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("05565"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("05565"), types.CustomTs{}), string(n.key(l.arena)))
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("05558"), 0), true, false)
+	n, eq = l.findNear(y.KeyWithTs([]byte("05558"), types.CustomTs{}), true, false)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("05555"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("05555"), types.CustomTs{}), string(n.key(l.arena)))
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("05558"), 0), true, true)
+	n, eq = l.findNear(y.KeyWithTs([]byte("05558"), types.CustomTs{}), true, true)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("05555"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("05555"), types.CustomTs{}), string(n.key(l.arena)))
 	require.False(t, eq)
 
-	n, eq = l.findNear(y.KeyWithTs([]byte("09995"), 0), false, false)
+	n, eq = l.findNear(y.KeyWithTs([]byte("09995"), types.CustomTs{}), false, false)
 	require.Nil(t, n)
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("09995"), 0), false, true)
+	n, eq = l.findNear(y.KeyWithTs([]byte("09995"), types.CustomTs{}), false, true)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("09995"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("09995"), types.CustomTs{}), string(n.key(l.arena)))
 	require.True(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("09995"), 0), true, false)
+	n, eq = l.findNear(y.KeyWithTs([]byte("09995"), types.CustomTs{}), true, false)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("09985"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("09985"), types.CustomTs{}), string(n.key(l.arena)))
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("09995"), 0), true, true)
+	n, eq = l.findNear(y.KeyWithTs([]byte("09995"), types.CustomTs{}), true, true)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("09995"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("09995"), types.CustomTs{}), string(n.key(l.arena)))
 	require.True(t, eq)
 
-	n, eq = l.findNear(y.KeyWithTs([]byte("59995"), 0), false, false)
+	n, eq = l.findNear(y.KeyWithTs([]byte("59995"), types.CustomTs{}), false, false)
 	require.Nil(t, n)
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("59995"), 0), false, true)
+	n, eq = l.findNear(y.KeyWithTs([]byte("59995"), types.CustomTs{}), false, true)
 	require.Nil(t, n)
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("59995"), 0), true, false)
+	n, eq = l.findNear(y.KeyWithTs([]byte("59995"), types.CustomTs{}), true, false)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("09995"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("09995"), types.CustomTs{}), string(n.key(l.arena)))
 	require.False(t, eq)
-	n, eq = l.findNear(y.KeyWithTs([]byte("59995"), 0), true, true)
+	n, eq = l.findNear(y.KeyWithTs([]byte("59995"), types.CustomTs{}), true, true)
 	require.NotNil(t, n)
-	require.EqualValues(t, y.KeyWithTs([]byte("09995"), 0), string(n.key(l.arena)))
+	require.EqualValues(t, y.KeyWithTs([]byte("09995"), types.CustomTs{}), string(n.key(l.arena)))
 	require.False(t, eq)
 }
 
@@ -334,7 +335,7 @@ func TestIteratorNext(t *testing.T) {
 	it.SeekToFirst()
 	require.False(t, it.Valid())
 	for i := n - 1; i >= 0; i-- {
-		l.Put(y.KeyWithTs([]byte(fmt.Sprintf("%05d", i)), 0),
+		l.Put(y.KeyWithTs([]byte(fmt.Sprintf("%05d", i)), types.CustomTs{}),
 			y.ValueStruct{Value: newValue(i), Meta: 0, UserMeta: 0})
 	}
 	it.SeekToFirst()
@@ -358,7 +359,7 @@ func TestIteratorPrev(t *testing.T) {
 	it.SeekToFirst()
 	require.False(t, it.Valid())
 	for i := 0; i < n; i++ {
-		l.Put(y.KeyWithTs([]byte(fmt.Sprintf("%05d", i)), 0),
+		l.Put(y.KeyWithTs([]byte(fmt.Sprintf("%05d", i)), types.CustomTs{}),
 			y.ValueStruct{Value: newValue(i), Meta: 0, UserMeta: 0})
 	}
 	it.SeekToLast()
@@ -386,7 +387,7 @@ func TestIteratorSeek(t *testing.T) {
 	// 1000, 1010, 1020, ..., 1990.
 	for i := n - 1; i >= 0; i-- {
 		v := i*10 + 1000
-		l.Put(y.KeyWithTs([]byte(fmt.Sprintf("%05d", i*10+1000)), 0),
+		l.Put(y.KeyWithTs([]byte(fmt.Sprintf("%05d", i*10+1000)), types.CustomTs{}),
 			y.ValueStruct{Value: newValue(v), Meta: 0, UserMeta: 0})
 	}
 	it.SeekToFirst()
@@ -394,44 +395,44 @@ func TestIteratorSeek(t *testing.T) {
 	v := it.Value()
 	require.EqualValues(t, "01000", v.Value)
 
-	it.Seek(y.KeyWithTs([]byte("01000"), 0))
+	it.Seek(y.KeyWithTs([]byte("01000"), types.CustomTs{}))
 	require.True(t, it.Valid())
 	v = it.Value()
 	require.EqualValues(t, "01000", v.Value)
 
-	it.Seek(y.KeyWithTs([]byte("01005"), 0))
+	it.Seek(y.KeyWithTs([]byte("01005"), types.CustomTs{}))
 	require.True(t, it.Valid())
 	v = it.Value()
 	require.EqualValues(t, "01010", v.Value)
 
-	it.Seek(y.KeyWithTs([]byte("01010"), 0))
+	it.Seek(y.KeyWithTs([]byte("01010"), types.CustomTs{}))
 	require.True(t, it.Valid())
 	v = it.Value()
 	require.EqualValues(t, "01010", v.Value)
 
-	it.Seek(y.KeyWithTs([]byte("99999"), 0))
+	it.Seek(y.KeyWithTs([]byte("99999"), types.CustomTs{}))
 	require.False(t, it.Valid())
 
 	// Try SeekForPrev.
-	it.SeekForPrev(y.KeyWithTs([]byte("00"), 0))
+	it.SeekForPrev(y.KeyWithTs([]byte("00"), types.CustomTs{}))
 	require.False(t, it.Valid())
 
-	it.SeekForPrev(y.KeyWithTs([]byte("01000"), 0))
+	it.SeekForPrev(y.KeyWithTs([]byte("01000"), types.CustomTs{}))
 	require.True(t, it.Valid())
 	v = it.Value()
 	require.EqualValues(t, "01000", v.Value)
 
-	it.SeekForPrev(y.KeyWithTs([]byte("01005"), 0))
+	it.SeekForPrev(y.KeyWithTs([]byte("01005"), types.CustomTs{}))
 	require.True(t, it.Valid())
 	v = it.Value()
 	require.EqualValues(t, "01000", v.Value)
 
-	it.SeekForPrev(y.KeyWithTs([]byte("01010"), 0))
+	it.SeekForPrev(y.KeyWithTs([]byte("01010"), types.CustomTs{}))
 	require.True(t, it.Valid())
 	v = it.Value()
 	require.EqualValues(t, "01010", v.Value)
 
-	it.SeekForPrev(y.KeyWithTs([]byte("99999"), 0))
+	it.SeekForPrev(y.KeyWithTs([]byte("99999"), types.CustomTs{}))
 	require.True(t, it.Valid())
 	v = it.Value()
 	require.EqualValues(t, "01990", v.Value)
@@ -443,7 +444,7 @@ func randomKey(rng *rand.Rand) []byte {
 	key2 := rng.Uint32()
 	binary.LittleEndian.PutUint32(b, key)
 	binary.LittleEndian.PutUint32(b[4:], key2)
-	return y.KeyWithTs(b, 0)
+	return y.KeyWithTs(b, types.CustomTs{})
 }
 
 // Standard test. Some fraction is read. Some fraction is write. Writes have
