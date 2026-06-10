@@ -90,8 +90,14 @@ const defaultFlushBatchSize int64 = 1
 // per-commit DirectAppendEntries path.  Each transaction commit appends
 // its rows to the Appender buffer; a CGo Appender.Flush() is issued only
 // once this many rows have accumulated, amortising the fixed CGo cost across
-// many commits.  Reads flush pending rows before querying so correctness
-// is not affected by this value.
+// many commits.
+//
+// Correctness note: the race between logical commit registration and physical
+// DuckDB write is handled at the DB level by holding writeChLock for the
+// full oracle→DirectFlush window, and by having NewTransactionAt (DuckDB
+// mode) acquire+release writeChLock as a read barrier before any reads.
+// The pendingKeys mechanism then ensures keys buffered in the Appender are
+// flushed before the SQL query that needs them.
 const directFlushBatchSize int64 = 512
 
 // partitionAppender owns a persistent DuckDB connection and Appender for a

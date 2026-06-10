@@ -712,17 +712,20 @@ func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 	orc := txn.db.orc
 
 	// useDuckDBDirect: bypass WAL+memtable entirely; write straight into the
-	// persistent DuckDB Appender buffer.  Like the lock-free CAS path this
-	// does NOT hold writeChLock — the per-partition Appender mutexes handle
-	// concurrent safety, and the oracle provides unique commit timestamps.
+	// persistent DuckDB Appender buffer.
 	useDuckDBDirect := txn.db.opt.UseDuckDB && txn.db.duckDBStorage != nil
 
 	// useLockFree is true only for non-DuckDB databases that explicitly set
-	// NumCompactors=0 (e.g. BenchmarkLockFreeIngest). All other writes use the
-	// standard write-channel path which requires writeChLock so that commit
-	// timestamps and write-channel position stay in lockstep.
+	// NumCompactors=0 (e.g. BenchmarkLockFreeIngest). All other writes (including
+	// DuckDB) hold writeChLock for the full oracle→DirectFlush window.
+	//
+	// For DuckDB this lock is the write-barrier that prevents a concurrent
+	// reader from opening a transaction between oracle registration and the
+	// physical DuckDB write.  NewTransactionAt (DuckDB mode) acquires and
+	// immediately releases writeChLock as a read fence before any reads, which
+	// guarantees it cannot start reading until the in-flight commit completes.
 	useLockFree := !txn.db.opt.UseDuckDB && txn.db.opt.NumCompactors == 0
-	if !useLockFree && !useDuckDBDirect {
+	if !useLockFree {
 		orc.writeChLock.Lock()
 		defer orc.writeChLock.Unlock()
 	}

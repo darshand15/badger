@@ -241,6 +241,25 @@ func seedDuckDBAccounts(tb testing.TB, db *DB, oracle *divytime.Oracle) {
 // execTransfer moves transferAmount from a random source to a random
 // destination using an atomic read-modify-write via Badger optimistic
 // concurrency control. Returns the elapsed time.
+//
+// Correctness design
+// ------------------
+// We call the oracle TWICE per attempt: once for readTs and once for commitTs,
+// so readTs < commitTs is always guaranteed.  This is the critical invariant
+// that makes Badger's conflict detection work correctly in managed mode.
+//
+// Badger's hasConflict check fires when:
+//   committedTxn.ts > txn.readTs  (another txn committed a key we read
+//                                   after our read snapshot was taken)
+//
+// When readTs == commitTs (the old single-call pattern), any transaction that
+// committed between our read and our commit has ts ≤ readTs, so the check is
+// always skipped — write skew goes undetected.
+//
+// With readTs < commitTs, a concurrent transaction whose commitTs falls in
+// the window (readTs, commitTs] is correctly detected as a conflict, and we
+// retry with fresh timestamps.  DetectConflicts is true in DefaultOptions, so
+// no further configuration is needed.
 func execTransfer(tb testing.TB, db *DB, oracle *divytime.Oracle, rng *rand.Rand) time.Duration {
 	start := time.Now()
 	from := rng.Intn(numBankAccounts)
@@ -249,49 +268,67 @@ func execTransfer(tb testing.TB, db *DB, oracle *divytime.Oracle, rng *rand.Rand
 		to = rng.Intn(numBankAccounts)
 	}
 
-	ts, _ := oracle.GetTimestamp(int64(time.Now().UnixNano()))
-	readTs := divyToTs(ts)
+	const maxRetries = 20
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Two oracle calls: readTs is a stable snapshot, commitTs is strictly
+		// higher so conflict detection can observe writes that landed between
+		// the two.
+		readTsRaw, _ := oracle.GetTimestamp(int64(time.Now().UnixNano()))
+		readTs := divyToTs(readTsRaw)
+		commitTsRaw, _ := oracle.GetTimestamp(int64(time.Now().UnixNano()))
+		commitTs := divyToTs(commitTsRaw)
 
-	txn := db.NewTransactionAt(readTs, true)
-	defer txn.Discard()
+		txn := db.NewTransactionAt(readTs, true)
 
-	fromItem, err := txn.Get(bankKey(from))
-	if err != nil {
+		fromItem, err := txn.Get(bankKey(from))
+		if err != nil {
+			txn.Discard()
+			return time.Since(start)
+		}
+		fromBal, _ := fromItem.ValueCopy(nil)
+		if bankDecodeUint64(fromBal) < transferAmount {
+			txn.Discard()
+			return time.Since(start)
+		}
+
+		toItem, err := txn.Get(bankKey(to))
+		if err != nil {
+			txn.Discard()
+			return time.Since(start)
+		}
+		toBal, _ := toItem.ValueCopy(nil)
+
+		newFrom := bankDecodeUint64(fromBal) - transferAmount
+		newTo := bankDecodeUint64(toBal) + transferAmount
+
+		if err := txn.Set(bankKey(from), bankEncodeUint64(newFrom)); err != nil {
+			txn.Discard()
+			return time.Since(start)
+		}
+		if err := txn.Set(bankKey(to), bankEncodeUint64(newTo)); err != nil {
+			txn.Discard()
+			return time.Since(start)
+		}
+
+		commitErr := txn.CommitAt(commitTs, nil)
+		txn.Discard()
+		if commitErr == ErrConflict {
+			continue // retry with fresh timestamps
+		}
 		return time.Since(start)
 	}
-	fromBal, _ := fromItem.ValueCopy(nil)
-	bal := bankDecodeUint64(fromBal)
-	if bal < transferAmount {
-		return time.Since(start)
-	}
-
-	toItem, err := txn.Get(bankKey(to))
-	if err != nil {
-		return time.Since(start)
-	}
-	toBal, _ := toItem.ValueCopy(nil)
-
-	newFrom := bankDecodeUint64(fromBal) - transferAmount
-	newTo := bankDecodeUint64(toBal) + transferAmount
-
-	if err := txn.Set(bankKey(from), bankEncodeUint64(newFrom)); err != nil {
-		return time.Since(start)
-	}
-	if err := txn.Set(bankKey(to), bankEncodeUint64(newTo)); err != nil {
-		return time.Since(start)
-	}
-	_ = txn.CommitAt(readTs, nil)
 	return time.Since(start)
 }
 
-// verifyBankTotal reads the latest balance of every account and logs the total.
-// In managed-mode with snapshot isolation, concurrent write-skew can cause the
-// total to drift by small amounts (each lost unit = one transferAmount). This is
-// an expected trade-off of the snapshot-isolation model — strict balance
-// invariants require serializable isolation (not tested here).
+// verifyBankTotal reads the latest balance of every account and asserts the
+// total exactly matches the expected value.
+//
+// With the two-oracle-call + conflict-detection fix in execTransfer, write
+// skew is no longer expected: any transfer that would produce an inconsistent
+// state is detected as a conflict and retried until it succeeds cleanly.
+// A mismatch here is a real bug.
 func verifyBankTotal(tb testing.TB, db *DB) {
 	tb.Helper()
-	// Read at MaxTs to see the globally latest value of every account.
 	txn := db.NewTransactionAt(types.MaxTs, false)
 	defer txn.Discard()
 
@@ -305,14 +342,12 @@ func verifyBankTotal(tb testing.TB, db *DB) {
 		total += bankDecodeUint64(v)
 	}
 	expected := uint64(numBankAccounts) * initialBankBal
-	switch t := tb.(type) {
-	case *testing.T:
-		if total != expected {
-			t.Logf("NOTE: balance total=%d want=%d (delta=%d = %d lost transfers; write-skew expected in snapshot isolation)",
-				total, expected, int64(expected)-int64(total), (int64(expected)-int64(total))/int64(transferAmount))
-		} else {
-			t.Logf("balance invariant holds: total=%d", total)
-		}
+	if total != expected {
+		tb.Errorf("balance invariant violated: want=%d got=%d (delta=%d = %d lost transfers)",
+			expected, total, int64(expected)-int64(total),
+			(int64(expected)-int64(total))/int64(transferAmount))
+	} else {
+		tb.Logf("balance invariant holds: total=%d", total)
 	}
 }
 
