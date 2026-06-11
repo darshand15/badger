@@ -244,22 +244,33 @@ func seedDuckDBAccounts(tb testing.TB, db *DB, oracle *divytime.Oracle) {
 //
 // Correctness design
 // ------------------
-// We call the oracle TWICE per attempt: once for readTs and once for commitTs,
-// so readTs < commitTs is always guaranteed.  This is the critical invariant
-// that makes Badger's conflict detection work correctly in managed mode.
+// We call the oracle TWICE per attempt: once for readTs (before reads) and
+// once for commitTs (after reads, immediately before CommitAt).
 //
-// Badger's hasConflict check fires when:
-//   committedTxn.ts > txn.readTs  (another txn committed a key we read
-//                                   after our read snapshot was taken)
+// Key invariant: readTs < commitTs is always guaranteed within a single
+// goroutine since the oracle counter is monotonically increasing.
 //
-// When readTs == commitTs (the old single-call pattern), any transaction that
-// committed between our read and our commit has ts ≤ readTs, so the check is
-// always skipped — write skew goes undetected.
+// Why commitTs must come AFTER reads
+// ------------------------------------
+// With a distributed oracle that has latency (e.g. 50 µs), multiple goroutines
+// may call GetTimestamp concurrently and receive timestamps in an order that
+// does not match physical wall time.  Specifically, transaction C can obtain a
+// commitTs that is numerically less than B's readTs even though C's data has
+// not yet been physically written (DirectFlush not yet called).
 //
-// With readTs < commitTs, a concurrent transaction whose commitTs falls in
-// the window (readTs, commitTs] is correctly detected as a conflict, and we
-// retry with fresh timestamps.  DetectConflicts is true in DefaultOptions, so
-// no further configuration is needed.
+// If commitTs were obtained before reads, C's CommitAt fires after C's reads
+// (~ms later), so C may physically commit long after B has already read the
+// affected keys — and since C.commitTs ≤ B.readTs, Badger's conflict detection
+// (which only fires for ts > readTs) will not catch the overlap.
+//
+// By obtaining commitTs immediately before CommitAt (with no reads in between),
+// we ensure that any transaction whose commitTs is less than our readTs has
+// already called CommitAt before we read.  Combined with the writeChLock
+// fence in NewTransactionAt, such a transaction is guaranteed to have
+// completed its DirectFlush before our reads begin.
+//
+// Conflict detection remains correct: any concurrent write that commits in the
+// window (readTs, commitTs] is caught by hasConflict and triggers a retry.
 func execTransfer(tb testing.TB, db *DB, oracle *divytime.Oracle, rng *rand.Rand) time.Duration {
 	start := time.Now()
 	from := rng.Intn(numBankAccounts)
@@ -270,13 +281,9 @@ func execTransfer(tb testing.TB, db *DB, oracle *divytime.Oracle, rng *rand.Rand
 
 	const maxRetries = 20
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		// Two oracle calls: readTs is a stable snapshot, commitTs is strictly
-		// higher so conflict detection can observe writes that landed between
-		// the two.
+		// Oracle call 1: snapshot timestamp — taken before any reads.
 		readTsRaw, _ := oracle.GetTimestamp(int64(time.Now().UnixNano()))
 		readTs := divyToTs(readTsRaw)
-		commitTsRaw, _ := oracle.GetTimestamp(int64(time.Now().UnixNano()))
-		commitTs := divyToTs(commitTsRaw)
 
 		txn := db.NewTransactionAt(readTs, true)
 
@@ -309,6 +316,13 @@ func execTransfer(tb testing.TB, db *DB, oracle *divytime.Oracle, rng *rand.Rand
 			txn.Discard()
 			return time.Since(start)
 		}
+
+		// Oracle call 2: commit timestamp — obtained after all reads and writes
+		// are staged, immediately before CommitAt.  This minimises the gap
+		// between timestamp assignment and physical write, which is critical for
+		// correctness when the oracle has simulated latency (see comment above).
+		commitTsRaw, _ := oracle.GetTimestamp(int64(time.Now().UnixNano()))
+		commitTs := divyToTs(commitTsRaw)
 
 		commitErr := txn.CommitAt(commitTs, nil)
 		txn.Discard()

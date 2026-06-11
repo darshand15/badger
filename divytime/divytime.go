@@ -29,6 +29,25 @@ type Oracle struct {
 	simulatedDelay time.Duration
 	counter        int64 // atomic; incremented on every GetTimestamp call
 
+	// issueMu serialises GetTimestamp calls when simulatedDelay > 0.
+	//
+	// Rationale: a real distributed oracle (e.g. Divy) is backed by a single
+	// service whose replies arrive in the order the requests were processed.
+	// When multiple goroutines concurrently sleep for simulatedDelay and then
+	// race to increment the counter, the counter-assignment order is random with
+	// respect to the call-site order.  This lets a transaction C obtain a
+	// commitTs that is numerically less than B's readTs even though C called the
+	// oracle after B did — a situation that is impossible with a real serialised
+	// oracle but that breaks MVCC snapshot isolation here (conflict detection
+	// only fires for commitTs > readTs, so C's out-of-order write goes
+	// undetected and produces an inconsistent snapshot).
+	//
+	// By holding issueMu for the full sleep+increment window we restore the
+	// real-oracle invariant: call order == counter-assignment order.  Calls
+	// still take simulatedDelay each (modelling latency), they simply do not
+	// overlap.
+	issueMu sync.Mutex
+
 	mu      sync.Mutex
 	samples []int64 // nanosecond latencies, appended under mu
 }
@@ -45,14 +64,24 @@ func NewOracle(brokerID int64, simulatedDelay time.Duration) *Oracle {
 
 // GetTimestamp returns a unique Timestamp for the given epochID and the
 // wall-clock latency of the call (useful for percentile reporting).
+//
+// When simulatedDelay > 0, calls are serialised (issueMu) so that
+// counter-assignment order matches call-site order — the same invariant that
+// a real centralised oracle provides.
 func (o *Oracle) GetTimestamp(epochID int64) (Timestamp, time.Duration) {
 	start := time.Now()
 
 	if o.simulatedDelay > 0 {
+		o.issueMu.Lock()
 		time.Sleep(o.simulatedDelay)
 	}
 
 	assigned := atomic.AddInt64(&o.counter, 1)
+
+	if o.simulatedDelay > 0 {
+		o.issueMu.Unlock()
+	}
+
 	elapsed := time.Since(start)
 
 	o.mu.Lock()

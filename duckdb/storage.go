@@ -340,8 +340,18 @@ func (s *DuckDBStorage) DirectAppendEntries(entries []*DarshanEntry) error {
 }
 
 // appendPartitionDirect appends rows to the persistent Appender for the given
-// partition without forcing a CGo flush on every call.  A flush is triggered
-// once directFlushBatchSize rows have accumulated, amortising the cost.
+// partition.  No automatic flush is triggered here — all rows stay in the
+// Appender (tracked by pendingKeys) until a Read() flushes them on demand.
+//
+// Why no auto-flush: DirectAppendEntries fans out one goroutine per partition.
+// If partition P1 auto-flushed mid-fan-out, its rows would become visible in
+// DuckDB SQL while partition P2's rows for the same transaction are still
+// buffered.  A concurrent reader could then observe from=new (P1) and to=old
+// (P2) for the same committed transaction — an inconsistent snapshot that
+// bypasses conflict detection when commitTs ≤ readTs.  Keeping all rows in
+// pendingKeys until a read explicitly flushes them preserves the invariant
+// that every key written by a transaction is equally visible or invisible to
+// any snapshot query.
 func (s *DuckDBStorage) appendPartitionDirect(partition int, entries []*DarshanEntry) error {
 	pa := s.partAppenders[partition]
 	pa.mu.Lock()
@@ -360,12 +370,6 @@ func (s *DuckDBStorage) appendPartitionDirect(partition int, entries []*DarshanE
 		}
 		pa.markPending(e.Key)
 		pa.pendingRows++
-	}
-
-	if pa.pendingRows >= directFlushBatchSize {
-		if err := pa.flush(); err != nil {
-			return fmt.Errorf("partition %d: direct flush: %w", partition, err)
-		}
 	}
 	return nil
 }
@@ -390,33 +394,46 @@ func (s *DuckDBStorage) initializeTables() error {
 
 // Read retrieves the latest value for a key with timestamp <= readTs.
 //
-// Flush-on-demand: checks the pendingKeys set under a cheap RLock.
-//   - Key not in set → data already committed to DuckDB, query SQL directly.
-//   - Key in set → acquire write lock and flush (one CGo Flush() covering all
-//     buffered rows for this partition), then query SQL.
+// Correctness invariant: the partition lock (pa.mu) is held for the entire
+// window from the pendingKeys check through the SQL query.  This closes the
+// TOCTTOU race where a concurrent appendPartitionDirect could write the key
+// into the Appender buffer between the check and the query, making the SQL
+// result stale.
 //
-// For write-heavy workloads the vast majority of reads are on keys that were
-// committed in a prior flush cycle and are not in pendingKeys, so the flush
-// is skipped entirely.  Reads on freshly-written keys (hot keys in the
-// current 512-row window) pay one flush, but only once per window, not once
-// per read.
+// Lock protocol:
+//   - Key NOT in pendingKeys: hold RLock through the SQL query.  Multiple
+//     concurrent readers proceed in parallel; writers block until every
+//     in-progress reader finishes.
+//   - Key IS in pendingKeys: upgrade to write-lock, flush (so all buffered
+//     rows are now in DuckDB), then run the SQL query while still holding
+//     the write-lock.  The write-lock prevents a new concurrent write with
+//     commitTs ≤ readTs from landing in the Appender between flush and query.
 func (s *DuckDBStorage) Read(key []byte, readTs CustomTs) (*Entry, error) {
 	partition := s.partCalc.getPartition(key)
 	pa := s.partAppenders[partition]
 
-	// Check whether this key has any unflushed rows — RLock is enough.
 	pa.mu.RLock()
 	needFlush := pa.hasPending(key)
-	pa.mu.RUnlock()
 
 	if needFlush {
-		// Upgrade to write-lock and flush so the SQL query below sees all rows.
+		// Upgrade to write-lock: release RLock first (Go sync.RWMutex does not
+		// support atomic upgrade).
+		pa.mu.RUnlock()
 		pa.mu.Lock()
-		if err := pa.flush(); err != nil {
-			pa.mu.Unlock()
-			return nil, fmt.Errorf("flush pending before read: %w", err)
+		defer pa.mu.Unlock()
+
+		// Re-check: another goroutine may have already flushed while we
+		// re-acquired the lock.
+		if pa.hasPending(key) {
+			if err := pa.flush(); err != nil {
+				return nil, fmt.Errorf("flush pending before read: %w", err)
+			}
 		}
-		pa.mu.Unlock()
+		// Fall through to SQL query while holding write-lock.
+	} else {
+		// Hold RLock through the SQL query so no concurrent write can slip in
+		// between the pendingKeys check and the query.
+		defer pa.mu.RUnlock()
 	}
 
 	var entry Entry
@@ -503,7 +520,10 @@ func (s *DuckDBStorage) ReadBatch(requests []ReadBatchRequest) ([]ReadBatchResul
 	for pid, reqs := range partGroups {
 		pa := s.partAppenders[pid]
 
-		// Flush once if any key in this partition is pending.
+		// Hold the partition lock for the entire check+flush+query window to
+		// close the TOCTTOU race (same invariant as Read): no concurrent
+		// appendPartitionDirect can slip a row into the Appender buffer between
+		// our pendingKeys check and the SQL query.
 		pa.mu.RLock()
 		needFlush := false
 		for _, r := range reqs {
@@ -512,16 +532,28 @@ func (s *DuckDBStorage) ReadBatch(requests []ReadBatchRequest) ([]ReadBatchResul
 				break
 			}
 		}
-		pa.mu.RUnlock()
 
 		if needFlush {
+			// Upgrade to write-lock.
+			pa.mu.RUnlock()
 			pa.mu.Lock()
-			if err := pa.flush(); err != nil {
-				pa.mu.Unlock()
-				return nil, fmt.Errorf("ReadBatch flush partition %d: %w", pid, err)
+			// Re-check after lock upgrade.
+			stillNeedsFlush := false
+			for _, r := range reqs {
+				if pa.hasPending(r.key) {
+					stillNeedsFlush = true
+					break
+				}
 			}
-			pa.mu.Unlock()
+			if stillNeedsFlush {
+				if err := pa.flush(); err != nil {
+					pa.mu.Unlock()
+					return nil, fmt.Errorf("ReadBatch flush partition %d: %w", pid, err)
+				}
+			}
+			// SQL queries below run under write-lock; released after each query.
 		}
+		// If needFlush==false we still hold RLock through the SQL query.
 
 		// All requests in a transaction share the same readTs.
 		readTs := reqs[0].readTs
@@ -542,6 +574,11 @@ func (s *DuckDBStorage) ReadBatch(requests []ReadBatchRequest) ([]ReadBatchResul
 				readTs.EpochID, readTs.BrokerID,
 				readTs.EpochID, readTs.BrokerID, readTs.AssignedTs,
 			).Scan(&key, &epochID, &brokerID, &ts, &value, &deleted)
+			if needFlush {
+				pa.mu.Unlock()
+			} else {
+				pa.mu.RUnlock()
+			}
 			if err == sql.ErrNoRows {
 				continue
 			}
@@ -589,6 +626,11 @@ func (s *DuckDBStorage) ReadBatch(requests []ReadBatchRequest) ([]ReadBatchResul
 			WHERE rn = 1`, tableName, inClause)
 
 		rows, err := s.db.QueryContext(s.ctx, querySQL, args...)
+		if needFlush {
+			pa.mu.Unlock()
+		} else {
+			pa.mu.RUnlock()
+		}
 		if err != nil {
 			return nil, fmt.Errorf("ReadBatch query partition %d: %w", pid, err)
 		}

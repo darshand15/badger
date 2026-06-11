@@ -28,18 +28,18 @@ func (db *DB) NewTransactionAt(readTs types.CustomTs, update bool) *Txn {
 	}
 	txn := db.newTransaction(update, true)
 	txn.readTs = readTs
-	// DuckDB read barrier: ensure that any commit currently in the oracle→DirectFlush
-	// window (registered in committedTxns but not yet written to DuckDB SQL) has
-	// finished before this transaction starts reading.
+	// DuckDB read barrier: wait for all in-flight commits with ts ≤ readTs to
+	// complete DirectFlush across all partitions before this transaction reads.
 	//
-	// commitAndSend holds writeChLock for the full oracle→DirectFlush window.
-	// Acquiring and immediately releasing it here acts as a memory fence:
-	// when we get the lock, no commit is mid-flight, so every committed
-	// timestamp ≤ readTs is physically present in DuckDB (or in the Appender
-	// buffer tracked by pendingKeys, which Read() flushes on demand).
+	// Without this, a multi-key read (e.g. SUM_CHECK over all accounts) can see
+	// a partial view of a committed transaction: it reads partition P1 before
+	// commit C writes to P1, then reads partition P2 after C writes to P2,
+	// producing an inconsistent snapshot (money appears created or destroyed).
+	//
+	// duckDBTracker.begin/done is called around each DirectFlush in txn.go.
+	// waitUntil spins (via cond.Wait) until no pending commit has ts ≤ readTs.
 	if db.opt.UseDuckDB && db.duckDBStorage != nil {
-		db.orc.writeChLock.Lock()
-		db.orc.writeChLock.Unlock()
+		db.orc.duckDBTracker.waitUntil(readTs)
 	}
 	return txn
 }

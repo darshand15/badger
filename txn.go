@@ -21,6 +21,69 @@ import (
 	"github.com/dgraph-io/ristretto/v2/z"
 )
 
+// duckDBCommitTracker tracks in-flight DuckDB commits for managed mode.
+// NewTransactionAt calls waitUntil(readTs) to block until every commit with
+// ts ≤ readTs has completed DirectFlush across all partitions, preventing
+// cross-partition snapshot inconsistencies (e.g. SUM_CHECK seeing a partial
+// transfer where the debit is written but the credit is not yet visible).
+//
+// Unlike WaterMark, this tracker has no ordering requirement: Begin/Done can
+// arrive in any order, which is necessary because managed-mode EpochIDs are
+// time.Now().UnixNano() values — faster commits at later wall-clock times can
+// complete before slower commits at earlier wall-clock times.
+type duckDBCommitTracker struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	pending []types.CustomTs // in-flight commit ts values (unsorted, small set)
+}
+
+func newDuckDBCommitTracker() *duckDBCommitTracker {
+	t := &duckDBCommitTracker{}
+	t.cond = sync.NewCond(&t.mu)
+	return t
+}
+
+func (t *duckDBCommitTracker) begin(ts types.CustomTs) {
+	t.mu.Lock()
+	t.pending = append(t.pending, ts)
+	t.mu.Unlock()
+}
+
+func (t *duckDBCommitTracker) done(ts types.CustomTs) {
+	t.mu.Lock()
+	for i, v := range t.pending {
+		if v == ts {
+			last := len(t.pending) - 1
+			t.pending[i] = t.pending[last]
+			t.pending = t.pending[:last]
+			break
+		}
+	}
+	t.cond.Broadcast()
+	t.mu.Unlock()
+}
+
+// waitUntil blocks until no in-flight commit has commitTs ≤ readTs.
+// Returns immediately if the pending set is empty or all pending commits
+// have commitTs > readTs (they won't affect our snapshot).
+func (t *duckDBCommitTracker) waitUntil(readTs types.CustomTs) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for {
+		stale := false
+		for _, ts := range t.pending {
+			if !ts.Greater(readTs) { // ts ≤ readTs
+				stale = true
+				break
+			}
+		}
+		if !stale {
+			return
+		}
+		t.cond.Wait()
+	}
+}
+
 type oracle struct {
 	isManaged       bool // Does not change value, so no locking required.
 	detectConflicts bool // Determines if the txns should be checked for conflicts.
@@ -34,6 +97,10 @@ type oracle struct {
 
 	// Used to block NewTransaction, so all previous commits are visible to a new read.
 	txnMark *y.WaterMark
+
+	// duckDBTracker is used in managed DuckDB mode to wait for all in-flight
+	// commits with ts ≤ readTs to complete DirectFlush before reads begin.
+	duckDBTracker *duckDBCommitTracker
 
 	// Either of these is used to determine which versions can be permanently
 	// discarded during compaction.
@@ -63,9 +130,10 @@ func newOracle(opt Options) *oracle {
 		//
 		// WaterMarks must be 64-bit aligned for atomic package, hence we must use pointers here.
 		// See https://golang.org/pkg/sync/atomic/#pkg-note-BUG.
-		readMark: &y.WaterMark{Name: "badger.PendingReads"},
-		txnMark:  &y.WaterMark{Name: "badger.TxnTimestamp"},
-		closer:   z.NewCloser(2),
+		readMark:      &y.WaterMark{Name: "badger.PendingReads"},
+		txnMark:       &y.WaterMark{Name: "badger.TxnTimestamp"},
+		closer:        z.NewCloser(2),
+		duckDBTracker: newDuckDBCommitTracker(),
 	}
 	orc.readMark.Init(orc.closer)
 	orc.txnMark.Init(orc.closer)
@@ -181,6 +249,10 @@ func (o *oracle) newCommitTs(txn *Txn) (types.CustomTs, bool) {
 		o.txnMark.Begin(ts)
 	} else {
 		ts = txn.commitTs
+		// Register with duckDBTracker so NewTransactionAt can wait for all
+		// in-flight commits with ts ≤ readTs to complete DirectFlush.
+		// doneCommit (called after DirectFlush) removes the entry.
+		o.duckDBTracker.begin(ts)
 	}
 
 	// y.AssertTrue(ts >= o.lastCleanupTs)
@@ -240,9 +312,12 @@ func (o *oracle) cleanupCommittedTransactions() { // Must be called under o.Lock
 
 func (o *oracle) doneCommit(cts types.CustomTs) {
 	if o.isManaged {
-		return
+		// Signal duckDBTracker so waitUntil callers can re-check.
+		// begin(ts) was called in newCommitTs for the managed path.
+		o.duckDBTracker.done(cts)
+	} else {
+		o.txnMark.Done(cts)
 	}
-	o.txnMark.Done(cts)
 }
 
 

@@ -726,3 +726,33 @@ func TestSmallBankDuckDBPhases(t *testing.T) {
 		t.Logf("NOTE: If write avg ≈ 0 but commit avg is high, the DirectFlush path is the bottleneck.")
 	})
 }
+
+// ---------------------------------------------------------------------------
+// BenchmarkSmallBankBalance — pprof-friendly benchmark for the Balance txn
+// ---------------------------------------------------------------------------
+
+// BenchmarkSmallBankBalance runs the Balance transaction (3 reads, 0 writes)
+// in a tight loop so that cpu/memory profiles capture where the time goes.
+//
+//	go test -tags duckdb -bench='^BenchmarkSmallBankBalance$' -benchtime=30s \
+//	        -cpuprofile=cpu_duckdb.prof
+//	go tool pprof -top cpu_duckdb.prof
+func BenchmarkSmallBankBalance(b *testing.B) {
+	oracle := divytime.NewOracle(1, 0)
+	withDuckDB(b, true, func(db *DB) {
+		sbSeed(b, db, oracle)
+		rng := rand.New(rand.NewSource(42))
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			id := rng.Int63n(sbNumCustomers)
+			ts := sbTs(oracle)
+			txn := db.NewTransactionAt(ts, false)
+			_ = txn.PrefetchKeys([][]byte{sbAccountKey(id), sbSavingsKey(id), sbCheckingKey(id)})
+			_, _ = txn.Get(sbAccountKey(id))
+			_, _ = txn.Get(sbSavingsKey(id))
+			_, _ = txn.Get(sbCheckingKey(id))
+			_ = txn.CommitAt(ts, nil)
+			txn.Discard()
+		}
+	})
+}
