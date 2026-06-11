@@ -263,11 +263,15 @@ func seedDuckDBAccounts(tb testing.TB, db *DB, oracle *divytime.Oracle) {
 // affected keys — and since C.commitTs ≤ B.readTs, Badger's conflict detection
 // (which only fires for ts > readTs) will not catch the overlap.
 //
-// By obtaining commitTs immediately before CommitAt (with no reads in between),
-// we ensure that any transaction whose commitTs is less than our readTs has
-// already called CommitAt before we read.  Combined with the writeChLock
-// fence in NewTransactionAt, such a transaction is guaranteed to have
-// completed its DirectFlush before our reads begin.
+// Obtaining commitTs immediately before CommitAt is necessary but NOT
+// sufficient: between GetTimestamp returning and CommitAt registering the ts
+// inside newCommitTs (behind writeChLock, which is contended), the commit is
+// invisible to NewTransactionAt's read barrier. A reader with a higher readTs
+// can slip through that window, read stale data, and later commit because
+// hasConflict skips committed txns with ts <= readTs. The fix is
+// GetCommitTimestamp, which registers the ts with the commit tracker
+// atomically with issuance (while the oracle's issue lock is held), so every
+// later-issued readTs is guaranteed to wait for this commit's DirectFlush.
 //
 // Conflict detection remains correct: any concurrent write that commits in the
 // window (readTs, commitTs] is caught by hasConflict and triggers a retry.
@@ -318,10 +322,19 @@ func execTransfer(tb testing.TB, db *DB, oracle *divytime.Oracle, rng *rand.Rand
 		}
 
 		// Oracle call 2: commit timestamp — obtained after all reads and writes
-		// are staged, immediately before CommitAt.  This minimises the gap
-		// between timestamp assignment and physical write, which is critical for
-		// correctness when the oracle has simulated latency (see comment above).
-		commitTsRaw, _ := oracle.GetTimestamp(int64(time.Now().UnixNano()))
+		// are staged, immediately before CommitAt.
+		//
+		// GetCommitTimestamp (not GetTimestamp) is required for correctness: it
+		// registers the ts with the DuckDB commit tracker atomically with
+		// issuance, while the oracle's issue lock is still held. With plain
+		// GetTimestamp there is a window between issuance and CommitAt's
+		// internal registration (widened by writeChLock contention) in which a
+		// reader can obtain a higher readTs, pass NewTransactionAt's barrier,
+		// and read stale data that conflict detection then cannot catch
+		// (hasConflict skips committed txns with ts <= readTs) — a lost update.
+		commitTsRaw, _ := oracle.GetCommitTimestamp(func(ts divytime.Timestamp) {
+			db.RegisterPendingCommit(divyToTs(ts))
+		})
 		commitTs := divyToTs(commitTsRaw)
 
 		commitErr := txn.CommitAt(commitTs, nil)

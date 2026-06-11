@@ -43,8 +43,19 @@ func newDuckDBCommitTracker() *duckDBCommitTracker {
 	return t
 }
 
+// begin registers ts as an in-flight commit. It is idempotent: in managed
+// DuckDB mode the ts may already have been pre-registered at issuance time
+// (see Oracle.GetCommitTimestamp / DB.RegisterPendingCommit) before
+// newCommitTs calls begin again; a duplicate entry would leak after the
+// single doneCommit and deadlock every future reader.
 func (t *duckDBCommitTracker) begin(ts types.CustomTs) {
 	t.mu.Lock()
+	for _, v := range t.pending {
+		if v == ts {
+			t.mu.Unlock()
+			return
+		}
+	}
 	t.pending = append(t.pending, ts)
 	t.mu.Unlock()
 }
@@ -794,11 +805,13 @@ func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 	// NumCompactors=0 (e.g. BenchmarkLockFreeIngest). All other writes (including
 	// DuckDB) hold writeChLock for the full oracle→DirectFlush window.
 	//
-	// For DuckDB this lock is the write-barrier that prevents a concurrent
-	// reader from opening a transaction between oracle registration and the
-	// physical DuckDB write.  NewTransactionAt (DuckDB mode) acquires and
-	// immediately releases writeChLock as a read fence before any reads, which
-	// guarantees it cannot start reading until the in-flight commit completes.
+	// For DuckDB the read barrier is duckDBTracker, NOT this lock:
+	// NewTransactionAt calls duckDBTracker.waitUntil(readTs) to block until all
+	// in-flight commits with ts <= readTs have completed DirectFlush. For that
+	// barrier to be sound, the commitTs must be registered with the tracker
+	// atomically with issuance (DB.RegisterPendingCommit via
+	// Oracle.GetCommitTimestamp); newCommitTs's begin() below is idempotent
+	// with respect to that pre-registration.
 	useLockFree := !txn.db.opt.UseDuckDB && txn.db.opt.NumCompactors == 0
 	if !useLockFree {
 		orc.writeChLock.Lock()
@@ -807,6 +820,11 @@ func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 
 	commitTs, conflict := orc.newCommitTs(txn)
 	if conflict {
+		// The commitTs may have been pre-registered with duckDBTracker at
+		// issuance time (Oracle.GetCommitTimestamp). newCommitTs returned
+		// before begin(), so nothing else will remove it — do it here or
+		// readers at readTs >= commitTs block forever. No-op if absent.
+		txn.deregisterPendingCommit()
 		return nil, types.CustomTs{}, ErrConflict
 	}
 
@@ -929,6 +947,17 @@ func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 	return req, commitTs, nil
 }
 
+// deregisterPendingCommit removes txn.commitTs from the duckDBTracker pending
+// set. Called on every CommitAt path that aborts before doneCommit would run
+// (conflict, precheck failure, empty write set), so a commitTs that was
+// pre-registered at issuance time cannot leak and stall readers. Safe no-op if
+// the ts was never registered.
+func (txn *Txn) deregisterPendingCommit() {
+	if txn.db.opt.managedTxns && !txn.commitTs.IsZero() {
+		txn.db.orc.duckDBTracker.done(txn.commitTs)
+	}
+}
+
 func (txn *Txn) commitPrecheck() error {
 	if txn.discarded {
 		return errors.New("Trying to commit a discarded txn")
@@ -973,12 +1002,14 @@ func (txn *Txn) Commit() error {
 	// txn.conflictKeys can be zero if conflict detection is turned off. So we
 	// should check txn.pendingWrites.
 	if len(txn.pendingWrites) == 0 {
+		txn.deregisterPendingCommit()
 		// Discard the transaction so that the read is marked done.
 		txn.Discard()
 		return nil
 	}
 	// Precheck before discarding txn.
 	if err := txn.commitPrecheck(); err != nil {
+		txn.deregisterPendingCommit()
 		return err
 	}
 	defer txn.Discard()
@@ -1034,6 +1065,7 @@ func (txn *Txn) CommitWith(cb func(error)) {
 	}
 
 	if len(txn.pendingWrites) == 0 {
+		txn.deregisterPendingCommit()
 		// Do not run these callbacks from here, because the CommitWith and the
 		// callback might be acquiring the same locks. Instead run the callback
 		// from another goroutine.
@@ -1045,6 +1077,7 @@ func (txn *Txn) CommitWith(cb func(error)) {
 
 	// Precheck before discarding txn.
 	if err := txn.commitPrecheck(); err != nil {
+		txn.deregisterPendingCommit()
 		cb(err)
 		return
 	}

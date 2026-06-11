@@ -44,6 +44,32 @@ func (db *DB) NewTransactionAt(readTs types.CustomTs, update bool) *Txn {
 	return txn
 }
 
+// RegisterPendingCommit registers a commit timestamp as in-flight with the
+// DuckDB commit tracker BEFORE CommitAt is called. It must be invoked
+// atomically with timestamp issuance (e.g. from the register callback of
+// divytime.Oracle.GetCommitTimestamp, which runs while the oracle's issue lock
+// is held).
+//
+// Why: NewTransactionAt's read barrier (duckDBTracker.waitUntil) can only wait
+// for commits it knows about. Without pre-registration there is a window
+// between a commitTs being issued and CommitAt registering it inside
+// newCommitTs — a window that widens with writeChLock contention — during
+// which a reader with a higher readTs starts, reads stale data, and later
+// passes conflict detection because hasConflict skips committed txns with
+// ts <= readTs. That is a lost update (observed as bank-invariant violations
+// at high worker counts).
+//
+// Contract: after calling this, the caller MUST call CommitAt with the same
+// ts. Every abort path inside CommitAt (conflict, precheck failure, empty
+// write set, flush error) deregisters the ts; an abandoned registration
+// blocks all future readers at readTs >= ts.
+func (db *DB) RegisterPendingCommit(ts types.CustomTs) {
+	if !db.opt.managedTxns {
+		panic("Cannot use RegisterPendingCommit with managedDB=false.")
+	}
+	db.orc.duckDBTracker.begin(ts)
+}
+
 // NewWriteBatchAt is similar to NewWriteBatch but it allows user to set the commit timestamp.
 // NewWriteBatchAt is supposed to be used only in the managed mode.
 func (db *DB) NewWriteBatchAt(commitTs types.CustomTs) *WriteBatch {
