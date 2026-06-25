@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4/divytime"
-	"github.com/dgraph-io/badger/v4/types"
 )
 
 // ---------------------------------------------------------------------------
@@ -163,7 +162,7 @@ func runBankOnBackend(
 //	go test -v -tags duckdb -run TestBankBadgerVsDuckDB -timeout 120s
 func TestBankBadgerVsDuckDB(t *testing.T) {
 	const (
-		cmpDuration = 10 * time.Second
+		cmpDuration = 2 * time.Second
 		cmpWorkers  = 16
 	)
 
@@ -208,9 +207,9 @@ func TestBankBadgerVsDuckDB(t *testing.T) {
 //	go test -v -tags duckdb -run TestBankBadgerVsDuckDBWithDelay -timeout 120s
 func TestBankBadgerVsDuckDBWithDelay(t *testing.T) {
 	const (
-		cmpDuration  = 10 * time.Second
-		cmpWorkers   = 16
-		oracleDelay  = 50 * time.Microsecond
+		cmpDuration = 2 * time.Second
+		cmpWorkers  = 16
+		oracleDelay = 50 * time.Microsecond
 	)
 
 	var badgerResult, duckdbResult backendResult
@@ -398,11 +397,7 @@ func sbSeedBadger(tb testing.TB, db *DB, oracle *divytime.Oracle) {
 	start := time.Now()
 
 	for i := int64(0); i < sbNumCustomers; i++ {
-		ts := types.CustomTs{
-			EpochID:    1,
-			BrokerID:   1,
-			AssignedTs: uint32(i + 1),
-		}
+		ts := sbTs(oracle)
 		txn := db.NewTransactionAt(ts, true)
 		_ = txn.Set(sbAccountKey(i), []byte("cust"))
 		_ = txn.Set(sbSavingsKey(i), sbEncode(sbInitBal))

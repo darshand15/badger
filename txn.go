@@ -331,7 +331,6 @@ func (o *oracle) doneCommit(cts types.CustomTs) {
 	}
 }
 
-
 // Txn represents a Badger transaction.
 type Txn struct {
 	readTs   types.CustomTs
@@ -813,9 +812,15 @@ func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 	// Oracle.GetCommitTimestamp); newCommitTs's begin() below is idempotent
 	// with respect to that pre-registration.
 	useLockFree := !txn.db.opt.UseDuckDB && txn.db.opt.NumCompactors == 0
+	writeChLocked := false
 	if !useLockFree {
 		orc.writeChLock.Lock()
-		defer orc.writeChLock.Unlock()
+		writeChLocked = true
+		defer func() {
+			if writeChLocked {
+				orc.writeChLock.Unlock()
+			}
+		}()
 	}
 
 	commitTs, conflict := orc.newCommitTs(txn)
@@ -899,6 +904,10 @@ func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 				Version: version,
 				Deleted: deleted,
 			})
+		}
+		if writeChLocked {
+			orc.writeChLock.Unlock()
+			writeChLocked = false
 		}
 		if err := txn.db.duckDBStorage.DirectFlush(ducks); err != nil {
 			orc.doneCommit(commitTs)

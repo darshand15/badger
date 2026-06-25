@@ -109,6 +109,14 @@ type duckDBIface interface {
 	// All entries in requests should share the same ReadTs.
 	ReadBatch(requests []duckReadBatchReq) ([]duckReadBatchResult, error)
 
+	// ScanPrefix returns the latest visible (version <= readTs, non-deleted)
+	// value for every key starting with prefix, using one SQL query per
+	// partition instead of one point read per key. Callers needing a
+	// consistent cross-partition snapshot must first create a transaction via
+	// NewTransactionAt with the same readTs (its read barrier waits for all
+	// in-flight commits <= readTs to flush).
+	ScanPrefix(prefix []byte, readTs types.CustomTs) ([]duckReadBatchResult, error)
+
 	// CompactPartitions removes superseded key versions to reclaim space.
 	CompactPartitions() error
 
@@ -650,6 +658,15 @@ func (db *DB) close() (err error) {
 	// Don't accept any more write.
 	close(db.writeCh)
 
+	// Drain any requests that were sent to writeCh in the race window between
+	// sendToWriteCh reading blockWrites==0 and doWrites finishing its drain.
+	// Without this, those requests' WaitGroups would never be decremented.
+	for req := range db.writeCh {
+		req.Err = ErrBlockedWrites
+		req.Wg.Done()
+		req.DecrRef()
+	}
+
 	db.closers.pub.SignalAndWait()
 	db.closers.cacheHealth.Signal()
 
@@ -1025,6 +1042,10 @@ func (db *DB) writeRequests(reqs []*request) error {
 			i++
 			if i%100 == 0 {
 				db.opt.Debugf("Making room for writes")
+			}
+			if db.isClosed.Load() > 0 {
+				completeRequests(reqs, ErrDBClosed)
+				return ErrDBClosed
 			}
 			// We need to poll a bit because both hasRoomForWrite and the flusher need access to s.imm.
 			// When flushChan is full and you are blocked there, and the flusher is trying to update s.imm,
@@ -1415,6 +1436,9 @@ func (db *DB) flushMemtable(lc *z.Closer) {
 
 		for {
 			if err := db.handleMemTableFlush(mt, nil); err != nil {
+				if err == ErrDBClosed {
+					return
+				}
 				// Encountered error. Retry indefinitely.
 				db.opt.Errorf("error flushing memtable to disk: %v, retrying", err)
 				time.Sleep(time.Second)

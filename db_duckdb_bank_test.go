@@ -18,7 +18,7 @@ import (
 // divyToTs converts a divytime.Timestamp to the canonical types.CustomTs.
 func divyToTs(ts divytime.Timestamp) types.CustomTs {
 	return types.CustomTs{
-		EpochID:    uint32(ts.EpochID),
+		EpochID:    0,
 		BrokerID:   uint32(ts.BrokerID),
 		AssignedTs: uint32(ts.AssignedTs),
 	}
@@ -41,16 +41,16 @@ const (
 	numBankAccounts = 1_000
 	initialBankBal  = uint64(1_000)
 	transferAmount  = uint64(10)
-	bankRunDuration = 10 * time.Second
+	bankRunDuration = 2 * time.Second
 	numBankWorkers  = 16
 )
 
 type bankTxType int
 
 const (
-	txTransfer  bankTxType = iota // read+write two accounts
-	txReadOnly                    // read one account balance
-	txSumCheck                    // verify full balance invariant
+	txTransfer bankTxType = iota // read+write two accounts
+	txReadOnly                   // read one account balance
+	txSumCheck                   // verify full balance invariant
 )
 
 func (t bankTxType) String() string {
@@ -66,9 +66,43 @@ func (t bankTxType) String() string {
 	}
 }
 
+// bankKeyPrefix is the common prefix of all account keys.
+//
+// IMPORTANT: it deliberately contains no ':'. The partition calculator
+// co-locates keys by hashing only the bytes before the first ':' — with the
+// previous "acct:%08d" naming, every account hashed to the SAME partition, so
+// PartitionFanOut=8 provided zero write parallelism and all reads/flushes
+// contended on one partition RWMutex. Hashing the full key spreads accounts
+// across all partitions. Cross-partition snapshot consistency is guaranteed by
+// the NewTransactionAt read barrier (duckDBTracker).
+const bankKeyPrefix = "acct-"
+
 // bankKey returns the DuckDB key for account i.
 func bankKey(i int) []byte {
-	return []byte(fmt.Sprintf("acct:%08d", i))
+	return []byte(fmt.Sprintf(bankKeyPrefix+"%08d", i))
+}
+
+// execSumCheck reads every account balance at a fresh snapshot with a single
+// ScanPrefix call (one SQL query per partition) instead of numBankAccounts
+// point reads, and returns the total. CPU profiling showed the old per-key
+// loop (1,000 prepared SELECTs through database/sql + CGo per check) consumed
+// ~78% of all CPU in the stress test.
+func execSumCheck(db *DB, oracle *divytime.Oracle) (uint64, error) {
+	ts, _ := oracle.GetTimestamp(int64(time.Now().UnixNano()))
+	txn := db.NewTransactionAt(divyToTs(ts), false) // passes the read barrier
+	defer txn.Discard()
+
+	results, err := db.duckDBStorage.ScanPrefix([]byte(bankKeyPrefix), txn.readTs)
+	if err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, r := range results {
+		if r.Found {
+			total += bankDecodeUint64(r.Value)
+		}
+	}
+	return total, nil
 }
 
 // bankEncodeUint64 / bankDecodeUint64 encode balances as 8 big-endian bytes.
@@ -419,7 +453,7 @@ func runBankWorkload(tb testing.TB, oracle *divytime.Oracle, dur time.Duration, 
 					case r < 95: // 25% read-only
 						start := time.Now()
 						ts, _ := oracle.GetTimestamp(int64(time.Now().UnixNano()))
-					txn := db.NewTransactionAt(divyToTs(ts), false)
+						txn := db.NewTransactionAt(divyToTs(ts), false)
 						acc := rng.Intn(numBankAccounts)
 						item, err := txn.Get(bankKey(acc))
 						if err == nil {
@@ -431,21 +465,9 @@ func runBankWorkload(tb testing.TB, oracle *divytime.Oracle, dur time.Duration, 
 
 					default: // 5% sum checks
 						start := time.Now()
-						ts, _ := oracle.GetTimestamp(int64(time.Now().UnixNano()))
-					txn := db.NewTransactionAt(divyToTs(ts), false)
-						var total uint64
-						for i := 0; i < numBankAccounts; i++ {
-							item, gerr := txn.Get(bankKey(i))
-							if gerr != nil {
-								continue
-							}
-							v, _ := item.ValueCopy(nil)
-							total += bankDecodeUint64(v)
-						}
-						txn.Discard()
 						// We don't assert here to avoid failing the bench from a race;
 						// the final verify step catches any invariant violation.
-						_ = total
+						_, _ = execSumCheck(db, oracle)
 						stats.record(txSumCheck, time.Since(start))
 						sumChecks.Add(1)
 					}

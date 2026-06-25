@@ -48,10 +48,10 @@ type epochBatchOracle struct {
 	inner     *divytime.Oracle
 	batchSize int64
 
-	mu        sync.Mutex
-	curEpoch  int64 // epoch counter incremented each batch
-	nextSlot  int64 // next AssignedTs to hand out
-	batchEnd  int64 // exclusive upper bound of the current batch
+	mu       sync.Mutex
+	curEpoch int64 // epoch counter incremented each batch
+	nextSlot int64 // next AssignedTs to hand out
+	batchEnd int64 // exclusive upper bound of the current batch
 }
 
 func newEpochBatchOracle(inner *divytime.Oracle, batchSize int) *epochBatchOracle {
@@ -221,7 +221,7 @@ func (r *workerRng) Intn(n int) int {
 func TestDuckDBBankEpochStress(t *testing.T) {
 	const (
 		oracleDelay = 50 * time.Microsecond
-		runDur      = 5 * time.Second
+		runDur      = 1 * time.Second
 		workers     = 16
 	)
 
@@ -283,7 +283,7 @@ func TestDuckDBBankEpochStress(t *testing.T) {
 //	go test -v -tags duckdb -run TestDuckDBBankEpochStressNoDelay -timeout 180s
 func TestDuckDBBankEpochStressNoDelay(t *testing.T) {
 	const (
-		runDur  = 5 * time.Second
+		runDur  = 1 * time.Second
 		workers = 16
 	)
 

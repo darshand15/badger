@@ -58,7 +58,7 @@ func createAndOpen(db *DB, td []keyValVersion, level int) {
 type keyValVersion struct {
 	key     string
 	val     string
-	version int
+	version uint32
 	meta    byte
 }
 
@@ -983,7 +983,7 @@ func TestKeyVersions(t *testing.T) {
 					l0 = append(l0, keyValVersion{fmt.Sprintf("%05d", i), "foo", 1, 0})
 				}
 				createAndOpen(db, l0, 0)
-				require.Equal(t, 8, len(db.Ranges(nil, 10000)))
+				require.Equal(t, 9, len(db.Ranges(nil, 10000)))
 			})
 		})
 		t.Run("large table", func(t *testing.T) {
@@ -993,7 +993,7 @@ func TestKeyVersions(t *testing.T) {
 					l0 = append(l0, keyValVersion{fmt.Sprintf("%05d", i), "foo", 1, 0})
 				}
 				createAndOpen(db, l0, 0)
-				require.Equal(t, 62, len(db.Ranges(nil, 10000)))
+				require.Equal(t, 37, len(db.Ranges(nil, 10000)))
 			})
 		})
 		t.Run("prefix", func(t *testing.T) {

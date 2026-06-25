@@ -637,7 +637,7 @@ func TestWriteBatchManagedMode(t *testing.T) {
 			for itr.Rewind(); itr.Valid(); itr.Next() {
 				item := itr.Item()
 				require.Equal(t, string(key(i)), string(item.Key()))
-				require.Equal(t, item.Version(), uint64(1))
+				require.Equal(t, item.Version().AssignedTs, uint32(1))
 				valcopy, err := item.ValueCopy(nil)
 				require.NoError(t, err)
 				require.Equal(t, val(i), valcopy)
@@ -683,7 +683,7 @@ func TestWriteBatchManaged(t *testing.T) {
 			for itr.Rewind(); itr.Valid(); itr.Next() {
 				item := itr.Item()
 				require.Equal(t, string(key(i)), string(item.Key()))
-				require.Equal(t, item.Version(), uint64(1))
+				require.Equal(t, item.Version().AssignedTs, uint32(1))
 				valcopy, err := item.ValueCopy(nil)
 				require.NoError(t, err)
 				require.Equal(t, val(i), valcopy)
@@ -711,7 +711,7 @@ func TestWriteBatchDuplicate(t *testing.T) {
 			for itr.Rewind(); itr.Valid(); itr.Next() {
 				item := itr.Item()
 				require.Equal(t, k, item.Key())
-				require.Equal(t, uint64(versions[i]), item.Version())
+				require.Equal(t, uint32(versions[i]), item.Version().AssignedTs)
 				err := item.Value(func(val []byte) error {
 					require.Equal(t, v, val)
 					return nil

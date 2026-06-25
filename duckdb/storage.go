@@ -662,6 +662,134 @@ func (s *DuckDBStorage) ReadBatch(requests []ReadBatchRequest) ([]ReadBatchResul
 	return results, nil
 }
 
+// prefixUpperBound returns the smallest byte slice that is greater than every
+// key beginning with prefix, or nil when no finite bound exists (prefix is
+// empty or all 0xff).
+func prefixUpperBound(prefix []byte) []byte {
+	ub := append([]byte(nil), prefix...)
+	for i := len(ub) - 1; i >= 0; i-- {
+		if ub[i] < 0xff {
+			ub[i]++
+			return ub[:i+1]
+		}
+	}
+	return nil
+}
+
+// ScanPrefix returns the latest visible (version <= readTs, non-deleted) value
+// for every key that starts with prefix, across all partitions.
+//
+// Motivation: aggregate checks (e.g. the bank SUM_CHECK) previously issued one
+// point SELECT per key — 1,000 keys = 1,000 CGo round-trips through
+// database/sql, which CPU profiling showed was ~78% of all CPU in the stress
+// test. ScanPrefix replaces that with ONE query per partition.
+//
+// Locking matches Read/ReadBatch: per partition, hold RLock through the query;
+// if any pending (unflushed) key matches the prefix, upgrade to the write lock,
+// flush, and query under the write lock. Callers needing snapshot consistency
+// across partitions must first pass the NewTransactionAt read barrier
+// (duckDBTracker.waitUntil) with the same readTs, exactly as for Read.
+func (s *DuckDBStorage) ScanPrefix(prefix []byte, readTs CustomTs) ([]ReadBatchResult, error) {
+	ub := prefixUpperBound(prefix)
+	prefixStr := string(prefix)
+	var out []ReadBatchResult
+
+	for pid := 0; pid < s.numParts; pid++ {
+		pa := s.partAppenders[pid]
+
+		pa.mu.RLock()
+		needFlush := false
+		for k := range pa.pendingKeys {
+			if strings.HasPrefix(k, prefixStr) {
+				needFlush = true
+				break
+			}
+		}
+
+		if needFlush {
+			// Upgrade to write lock (no atomic upgrade in Go).
+			pa.mu.RUnlock()
+			pa.mu.Lock()
+			still := false
+			for k := range pa.pendingKeys {
+				if strings.HasPrefix(k, prefixStr) {
+					still = true
+					break
+				}
+			}
+			if still {
+				if err := pa.flush(); err != nil {
+					pa.mu.Unlock()
+					return nil, fmt.Errorf("ScanPrefix flush partition %d: %w", pid, err)
+				}
+			}
+		}
+
+		tableName := fmt.Sprintf("partition_%d", pid)
+		keyCond := "key >= ?"
+		args := []interface{}{prefix}
+		if ub != nil {
+			keyCond += " AND key < ?"
+			args = append(args, ub)
+		}
+		args = append(args,
+			readTs.EpochID,
+			readTs.EpochID, readTs.BrokerID,
+			readTs.EpochID, readTs.BrokerID, readTs.AssignedTs,
+		)
+		querySQL := fmt.Sprintf(`
+			SELECT key, epoch_id, broker_id, assigned_ts, value, deleted
+			FROM (
+				SELECT key, epoch_id, broker_id, assigned_ts, value, deleted,
+				       ROW_NUMBER() OVER (
+				           PARTITION BY key
+				           ORDER BY epoch_id DESC, broker_id DESC, assigned_ts DESC
+				       ) AS rn
+				FROM %s
+				WHERE %s
+				  AND (epoch_id < ? OR
+				       (epoch_id = ? AND broker_id < ?) OR
+				       (epoch_id = ? AND broker_id = ? AND assigned_ts <= ?))
+			) sub
+			WHERE rn = 1`, tableName, keyCond)
+
+		rows, err := s.db.QueryContext(s.ctx, querySQL, args...)
+		if needFlush {
+			pa.mu.Unlock()
+		} else {
+			pa.mu.RUnlock()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("ScanPrefix query partition %d: %w", pid, err)
+		}
+		for rows.Next() {
+			var (
+				key                   []byte
+				epochID, brokerID, ts int64
+				value                 []byte
+				deleted               bool
+			)
+			if err := rows.Scan(&key, &epochID, &brokerID, &ts, &value, &deleted); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("ScanPrefix scan partition %d: %w", pid, err)
+			}
+			if deleted {
+				continue
+			}
+			out = append(out, ReadBatchResult{
+				Key:       key,
+				Value:     value,
+				Timestamp: CustomTs{EpochID: epochID, BrokerID: brokerID, AssignedTs: ts},
+				Found:     true,
+			})
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("ScanPrefix close rows partition %d: %w", pid, err)
+		}
+	}
+	return out, nil
+}
+
 // FlushDarshanEntries writes a batch of entries to DuckDB.
 func (s *DuckDBStorage) FlushDarshanEntries(entries []*DarshanEntry) error {
 	if len(entries) == 0 {

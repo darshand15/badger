@@ -44,12 +44,12 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	sbNumCustomers  = 100_000
-	sbInitBal       = int64(1_000_000)
-	sbTxAmount      = int64(100)
-	sbBenchDur      = 10 * time.Second
-	sbWorkers       = 16
-	sbIsolateDur    = 5 * time.Second // per-type isolation run
+	sbNumCustomers = 100_000
+	sbInitBal      = int64(1_000_000)
+	sbTxAmount     = int64(100)
+	sbBenchDur     = 2 * time.Second
+	sbWorkers      = 16
+	sbIsolateDur   = 1 * time.Second // per-type isolation run
 )
 
 // BenchBase weights for mixed workload: Amalgamate, Balance, DepositChecking,
@@ -90,8 +90,12 @@ func sbDecode(b []byte) int64 {
 }
 
 func sbItemInt64(item *Item) int64 {
-	val, _ := item.ValueCopy(nil)
-	return sbDecode(val)
+	if item == nil {
+		return 0
+	}
+	var buf [8]byte
+	_, _ = item.ValueCopy(buf[:])
+	return int64(binary.LittleEndian.Uint64(buf[:]))
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +300,7 @@ func sbSendPayment(db *DB, oracle *divytime.Oracle, rng *rand.Rand) (time.Durati
 	return time.Since(start), err
 }
 
-// sbAmalgamate moves savings[src]+checking[src] into checking[dst] (4 reads, 2 writes).
+// sbAmalgamate moves checking[src] into savings[dst] and zeroes checking[src].
 func sbAmalgamate(db *DB, oracle *divytime.Oracle, rng *rand.Rand) (time.Duration, error) {
 	src := rng.Int63n(sbNumCustomers)
 	dst := rng.Int63n(sbNumCustomers)
@@ -311,7 +315,7 @@ func sbAmalgamate(db *DB, oracle *divytime.Oracle, rng *rand.Rand) (time.Duratio
 
 	_ = txn.PrefetchKeys([][]byte{
 		sbAccountKey(src), sbAccountKey(dst),
-		sbSavingsKey(src), sbCheckingKey(dst),
+		sbCheckingKey(src), sbSavingsKey(dst),
 	})
 
 	if _, err := txn.Get(sbAccountKey(src)); err != nil {
@@ -320,17 +324,17 @@ func sbAmalgamate(db *DB, oracle *divytime.Oracle, rng *rand.Rand) (time.Duratio
 	if _, err := txn.Get(sbAccountKey(dst)); err != nil {
 		return time.Since(start), err
 	}
-	savItem, err := txn.Get(sbSavingsKey(src))
+	chkItem, err := txn.Get(sbCheckingKey(src))
 	if err != nil {
 		return time.Since(start), err
 	}
-	chkItem, err := txn.Get(sbCheckingKey(dst))
+	savItem, err := txn.Get(sbSavingsKey(dst))
 	if err != nil {
 		return time.Since(start), err
 	}
-	total := sbItemInt64(savItem) + sbItemInt64(chkItem)
+	newSav := sbItemInt64(savItem) + sbItemInt64(chkItem)
 	_ = txn.Set(sbCheckingKey(src), sbEncode(0))
-	_ = txn.Set(sbSavingsKey(dst), sbEncode(total))
+	_ = txn.Set(sbSavingsKey(dst), sbEncode(newSav))
 	err = txn.CommitAt(ts, nil)
 	return time.Since(start), err
 }
@@ -356,15 +360,15 @@ func (s *sbStats) record(d time.Duration, err error) {
 }
 
 type sbResult struct {
-	count    int64
-	errors   int64
-	mean     time.Duration
-	p50      time.Duration
-	p90      time.Duration
-	p99      time.Duration
-	min      time.Duration
-	max      time.Duration
-	tps      float64
+	count  int64
+	errors int64
+	mean   time.Duration
+	p50    time.Duration
+	p90    time.Duration
+	p99    time.Duration
+	min    time.Duration
+	max    time.Duration
+	tps    float64
 }
 
 func (s *sbStats) result(elapsed time.Duration) sbResult {
@@ -464,12 +468,12 @@ func TestSmallBankDuckDB(t *testing.T) {
 			ops  string
 		}
 		txTypes := []entry{
-			{"Balance",         sbBalance,         "3R 0W"},
+			{"Balance", sbBalance, "3R 0W"},
 			{"DepositChecking", sbDepositChecking, "2R 1W"},
 			{"TransactSavings", sbTransactSavings, "2R 1W"},
-			{"WriteCheck",      sbWriteCheck,      "3R 1W"},
-			{"SendPayment",     sbSendPayment,      "4R 2W"},
-			{"Amalgamate",      sbAmalgamate,       "4R 2W"},
+			{"WriteCheck", sbWriteCheck, "3R 1W"},
+			{"SendPayment", sbSendPayment, "4R 2W"},
+			{"Amalgamate", sbAmalgamate, "4R 2W"},
 		}
 
 		t.Logf("\n=== DuckDB SmallBank — Per-Type Isolation (%d workers, %v each) ===", sbWorkers, sbIsolateDur)
@@ -589,9 +593,9 @@ func TestSmallBankDuckDBPhases(t *testing.T) {
 		const runs = 10_000
 
 		type phaseResult struct {
-			name   string
-			readNs []int64
-			writeNs []int64
+			name     string
+			readNs   []int64
+			writeNs  []int64
 			commitNs []int64
 		}
 

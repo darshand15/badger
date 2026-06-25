@@ -50,7 +50,7 @@ func TestWriteMetrics(t *testing.T) {
 			writer.Flush()
 		}
 
-		expectedSize := int64(len(val)) + 48 + 2 // 48 := size of key (40 + 8(ts)), 2 := meta
+		expectedSize := int64(len(val)) + 52 + 2 // 52 := size of key (40 + 12(ts)), 2 := meta
 		write_metric := expvar.Get("badger_write_bytes_user")
 		require.Equal(t, expectedSize*int64(num), write_metric.(*expvar.Int).Value())
 
@@ -106,7 +106,7 @@ func TestVlogMetrics(t *testing.T) {
 		txn := db.NewTransactionAt(types.CustomTs{AssignedTs: 2}, false)
 		item, err := txn.Get(key)
 		require.NoError(t, err)
-		require.Equal(t, uint64(1), item.Version())
+		require.Equal(t, uint32(1), item.Version().AssignedTs)
 
 		err = item.Value(func(val []byte) error {
 			totalReads := expvar.Get("badger_read_num_vlog")
@@ -144,7 +144,7 @@ func TestReadMetrics(t *testing.T) {
 		txn := db.NewTransactionAt(types.CustomTs{AssignedTs: 2}, false)
 		item, err := txn.Get(keys[0])
 		require.NoError(t, err)
-		require.Equal(t, uint64(1), item.Version())
+		require.Equal(t, uint32(1), item.Version().AssignedTs)
 
 		totalGets := expvar.Get("badger_get_num_user")
 		require.Equal(t, int64(1), totalGets.(*expvar.Int).Value())
@@ -164,7 +164,7 @@ func TestReadMetrics(t *testing.T) {
 		txn = db.NewTransactionAt(types.CustomTs{AssignedTs: 2}, false)
 		item, err = txn.Get(keys[0])
 		require.NoError(t, err)
-		require.Equal(t, uint64(1), item.Version())
+		require.Equal(t, uint32(1), item.Version().AssignedTs)
 
 		_, err = txn.Get([]byte(key("abdbyte", 1000))) // val should be far enough that bloom filter doesn't hit
 		require.Error(t, err)

@@ -1589,6 +1589,9 @@ func (s *levelsController) addLevel0Table(t *table.Table) error {
 		// Before we unstall, we need to make sure that level 0 is healthy.
 		timeStart := time.Now()
 		for s.levels[0].numTables() >= s.kv.opt.NumLevelZeroTablesStall {
+			if s.kv.isClosed.Load() > 0 {
+				return ErrDBClosed
+			}
 			time.Sleep(10 * time.Millisecond)
 		}
 		dur := time.Since(timeStart)

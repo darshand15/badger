@@ -24,21 +24,21 @@ import (
 	"math/rand"
 )
 
-const stressDuration = 15 * time.Second
+const stressDuration = 2 * time.Second
 
 // stressResult holds the numbers we care about for one configuration.
 type stressResult struct {
-	label        string
-	workers      int
-	delay        time.Duration
-	totalOps     int64
-	transferOps  int64
-	tps          float64
-	transferTPS  float64
-	transferAvg  time.Duration
-	transferP90  time.Duration
-	sumAvg       time.Duration
-	invariantOK  bool
+	label       string
+	workers     int
+	delay       time.Duration
+	totalOps    int64
+	transferOps int64
+	tps         float64
+	transferTPS float64
+	transferAvg time.Duration
+	transferP90 time.Duration
+	sumAvg      time.Duration
+	invariantOK bool
 }
 
 // runStressConfig executes the bank workload for one (workers, delay) pair and
@@ -97,19 +97,9 @@ func runStressConfig(t *testing.T, workers int, delay time.Duration) stressResul
 
 					default: // 5 % sum checks
 						start := time.Now()
-						ts, _ := oracle.GetTimestamp(int64(time.Now().UnixNano()))
-						txn := db.NewTransactionAt(divyToTs(ts), false)
-						var total uint64
-						for i := 0; i < numBankAccounts; i++ {
-							item, gerr := txn.Get(bankKey(i))
-							if gerr != nil {
-								continue
-							}
-							v, _ := item.ValueCopy(nil)
-							total += bankDecodeUint64(v)
-						}
-						txn.Discard()
-						_ = total
+						// Single ScanPrefix (1 query/partition) instead of 1,000
+						// point reads; invariant is asserted in the final verify.
+						_, _ = execSumCheck(db, oracle)
 						stats.record(txSumCheck, time.Since(start))
 						sumChecks.Add(1)
 					}

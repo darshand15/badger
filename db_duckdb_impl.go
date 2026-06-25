@@ -10,6 +10,7 @@ package badger
 import (
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/dgraph-io/badger/v4/duckdb"
 	"github.com/dgraph-io/badger/v4/types"
@@ -38,9 +39,19 @@ func makeDivyTsFast(version types.CustomTs) duckdb.CustomTs {
 	return toDuckTs(version)
 }
 
+// duckDBWriteTask encapsulates write operations routed to the isolated worker thread.
+type duckDBWriteTask struct {
+	entries  []duckEntry
+	isDirect bool
+	done     chan error
+}
+
 // duckDBStorageWrapper wraps *duckdb.DuckDBStorage to implement duckDBIface.
 type duckDBStorageWrapper struct {
-	s *duckdb.DuckDBStorage
+	s       *duckdb.DuckDBStorage
+	writeCh chan duckDBWriteTask
+	closeCh chan struct{}
+	wg      sync.WaitGroup
 }
 
 // newDuckDBBackend creates a DuckDB-backed storage implementation.
@@ -49,13 +60,60 @@ func newDuckDBBackend(path string, parts int) (duckDBIface, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &duckDBStorageWrapper{s: s}, nil
+	w := &duckDBStorageWrapper{
+		s:       s,
+		writeCh: make(chan duckDBWriteTask, 4096), // Robust buffer bounds for stress tests
+		closeCh: make(chan struct{}),
+	}
+	w.wg.Add(1)
+	go w.duckDBWriteWorker()
+	return w, nil
+}
+
+// duckDBWriteWorker processes all writes sequentially to completely eliminate
+// DuckDB's cross-goroutine transactional deadlocks.
+func (w *duckDBStorageWrapper) duckDBWriteWorker() {
+	defer w.wg.Done()
+	for {
+		select {
+		case task := <-w.writeCh:
+			var err error
+			if task.isDirect {
+				darshanEntries := make([]*duckdb.DarshanEntry, 0, len(task.entries))
+				for _, e := range task.entries {
+					darshanEntries = append(darshanEntries, &duckdb.DarshanEntry{
+						Key:       e.Key,
+						Value:     e.Value,
+						Deleted:   e.Deleted,
+						Timestamp: makeDivyTsFast(e.Version),
+						Version:   uint64(e.Version.EpochID),
+					})
+				}
+				err = w.s.DirectAppendEntries(darshanEntries)
+			} else {
+				darshanEntries := make([]*duckdb.DarshanEntry, len(task.entries))
+				for i, e := range task.entries {
+					darshanEntries[i] = &duckdb.DarshanEntry{
+						Key:       e.Key,
+						Value:     e.Value,
+						Version:   uint64(e.Version.EpochID),
+						Deleted:   e.Deleted,
+						Timestamp: makeDivyTs(e.Version),
+					}
+				}
+				err = w.s.FlushDarshanEntries(darshanEntries)
+			}
+			// Respond to block barrier ensuring strict durability/visibility
+			task.done <- err
+
+		case <-w.closeCh:
+			return
+		}
+	}
 }
 
 func (w *duckDBStorageWrapper) Read(key []byte, readTs types.CustomTs) ([]byte, types.CustomTs, error) {
 	dts := toDuckTs(readTs)
-	// Cap negative values (produced by uint32→int64 overflow wrap of large values)
-	// to MaxInt64 so the SQL WHERE clause matches all rows with that field.
 	if dts.EpochID < 0 {
 		dts.EpochID = math.MaxInt64
 	}
@@ -79,31 +137,53 @@ func (w *duckDBStorageWrapper) Read(key []byte, readTs types.CustomTs) ([]byte, 
 }
 
 func (w *duckDBStorageWrapper) FlushEntries(entries []duckEntry) error {
-	darshanEntries := make([]*duckdb.DarshanEntry, len(entries))
-	for i, e := range entries {
-		darshanEntries[i] = &duckdb.DarshanEntry{
-			Key:       e.Key,
-			Value:     e.Value,
-			Version:   uint64(e.Version.EpochID),
-			Deleted:   e.Deleted,
-			Timestamp: makeDivyTs(e.Version),
-		}
+	if len(entries) == 0 {
+		return nil
 	}
-	return w.s.FlushDarshanEntries(darshanEntries)
+	done := make(chan error, 1)
+	w.writeCh <- duckDBWriteTask{entries: entries, isDirect: false, done: done}
+	return <-done
 }
 
 func (w *duckDBStorageWrapper) DirectFlush(entries []duckEntry) error {
-	darshanEntries := make([]*duckdb.DarshanEntry, 0, len(entries))
-	for _, e := range entries {
-		darshanEntries = append(darshanEntries, &duckdb.DarshanEntry{
-			Key:       e.Key,
-			Value:     e.Value,
-			Deleted:   e.Deleted,
-			Timestamp: makeDivyTsFast(e.Version),
-			Version:   uint64(e.Version.EpochID),
-		})
+	if len(entries) == 0 {
+		return nil
 	}
-	return w.s.DirectAppendEntries(darshanEntries)
+	done := make(chan error, 1)
+	w.writeCh <- duckDBWriteTask{entries: entries, isDirect: true, done: done}
+	return <-done
+}
+
+func (w *duckDBStorageWrapper) ScanPrefix(prefix []byte, readTs types.CustomTs) ([]duckReadBatchResult, error) {
+	dts := toDuckTs(readTs)
+	if dts.EpochID < 0 {
+		dts.EpochID = math.MaxInt64
+	}
+	if dts.BrokerID < 0 {
+		dts.BrokerID = math.MaxInt64
+	}
+	if dts.AssignedTs < 0 {
+		dts.AssignedTs = math.MaxInt64
+	}
+
+	duckResults, err := w.s.ScanPrefix(prefix, dts)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]duckReadBatchResult, len(duckResults))
+	for i, dr := range duckResults {
+		results[i] = duckReadBatchResult{
+			Key:   dr.Key,
+			Value: dr.Value,
+			Found: dr.Found,
+			Version: types.CustomTs{
+				EpochID:    uint32(dr.Timestamp.EpochID),
+				BrokerID:   uint32(dr.Timestamp.BrokerID),
+				AssignedTs: uint32(dr.Timestamp.AssignedTs),
+			},
+		}
+	}
+	return results, nil
 }
 
 func (w *duckDBStorageWrapper) CompactPartitions() error {
@@ -148,6 +228,8 @@ func (w *duckDBStorageWrapper) ReadBatch(requests []duckReadBatchReq) ([]duckRea
 }
 
 func (w *duckDBStorageWrapper) Close() error {
+	close(w.closeCh)
+	w.wg.Wait()
 	return w.s.Close()
 }
 
@@ -184,5 +266,3 @@ func (db *DB) handleMemTableFlushPartitioned(mt *memTable, dropPrefixes [][]byte
 
 	return nil
 }
-
-

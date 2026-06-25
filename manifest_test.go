@@ -238,11 +238,13 @@ func TestConcurrentManifestCompaction(t *testing.T) {
 	defer removeDir(dir)
 
 	// overwrite the sync function to make this race condition easily reproducible
+	origSyncFunc := syncFunc
 	syncFunc = func(f *os.File) error {
 		// effectively making the Sync() take around 1s makes this reproduce every time
 		time.Sleep(1 * time.Second)
 		return f.Sync()
 	}
+	defer func() { syncFunc = origSyncFunc }()
 
 	mf, _, err := helpOpenOrCreateManifestFile(dir, false, 0, 0)
 	require.NoError(t, err)

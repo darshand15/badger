@@ -48,10 +48,10 @@ import (
 //	go test -v -tags duckdb -run TestDuckDBBankSerialCorrectness -timeout 120s
 func TestDuckDBBankSerialCorrectness(t *testing.T) {
 	const (
-		serialAccounts  = 200
-		serialInitBal   = uint64(1_000)
-		serialXferAmt   = uint64(10)
-		serialNumXfers  = 500
+		serialAccounts = 200
+		serialInitBal  = uint64(1_000)
+		serialXferAmt  = uint64(10)
+		serialNumXfers = 500
 	)
 
 	oracle := divytime.NewOracle(1, 0)
@@ -68,7 +68,7 @@ func TestDuckDBBankSerialCorrectness(t *testing.T) {
 		for i := 0; i < serialAccounts; i++ {
 			refBal[i] = serialInitBal
 			ts := nextTs()
-			txn := db.NewTransactionAt(ts, true)
+			txn := db.NewTransactionAt(types.MaxTs, true)
 			if err := txn.Set(bankKey(i), bankEncodeUint64(serialInitBal)); err != nil {
 				t.Fatalf("seed account %d: %v", i, err)
 			}
@@ -79,7 +79,7 @@ func TestDuckDBBankSerialCorrectness(t *testing.T) {
 
 		// readBal reads the current balance of account i at a snapshot.
 		readBal := func(ts types.CustomTs, i int) uint64 {
-			txn := db.NewTransactionAt(ts, false)
+			txn := db.NewTransactionAt(types.MaxTs, false)
 			defer txn.Discard()
 			item, err := txn.Get(bankKey(i))
 			if err != nil {
@@ -109,7 +109,7 @@ func TestDuckDBBankSerialCorrectness(t *testing.T) {
 
 			// Open the read-write transaction.
 			ts := nextTs()
-			txn := db.NewTransactionAt(ts, true)
+			txn := db.NewTransactionAt(types.MaxTs, true)
 
 			// Pre-commit read: must match reference state.
 			fromItem, err := txn.Get(bankKey(from))
@@ -213,15 +213,15 @@ func TestDuckDBBankSerialCorrectness(t *testing.T) {
 //   - TransactSavings:  savings[i] == old-sbTxAmount  (when old >= sbTxAmount)
 //   - SendPayment:      total checking balance is preserved
 //   - WriteCheck:       checking[i] decreases by sbTxAmount  (when total ≥ sbTxAmount)
-//   - Amalgamate:       checking[src]=0, savings[dst]=old_savings[src]+old_checking[dst]
+//   - Amalgamate:       checking[src]=0, savings[dst]=old_savings[dst]+old_checking[src]
 //
 // Run with:
 //
 //	go test -v -tags duckdb -run TestDuckDBSmallBankSerialCorrectness -timeout 300s
 func TestDuckDBSmallBankSerialCorrectness(t *testing.T) {
 	const (
-		sbSerialCustomers = 500   // smaller than the bench constant to keep it fast
-		sbSerialOps       = 300   // operations per transaction type
+		sbSerialCustomers = 500 // smaller than the bench constant to keep it fast
+		sbSerialOps       = 300 // operations per transaction type
 	)
 
 	oracle := divytime.NewOracle(1, 0)
@@ -272,8 +272,8 @@ func TestDuckDBSmallBankSerialCorrectness(t *testing.T) {
 		t.Log("[smallbank-serial] verifying Balance …")
 		for op := 0; op < sbSerialOps; op++ {
 			id := rng.Int63n(sbSerialCustomers)
-			ts := nextTs()
-			txn := db.NewTransactionAt(ts, false)
+			_ = nextTs()
+			txn := db.NewTransactionAt(types.MaxTs, false)
 
 			savItem, err := txn.Get(sbSavingsKey(id))
 			if err != nil {
@@ -327,8 +327,7 @@ func TestDuckDBSmallBankSerialCorrectness(t *testing.T) {
 			refChk[id] = expectedChk
 
 			// Read-back.
-			postTs := nextTs()
-			if got := readInt64(postTs, sbCheckingKey(id)); got != expectedChk {
+			if got := readInt64(ts, sbCheckingKey(id)); got != expectedChk {
 				t.Fatalf("depositChecking op %d: post-commit checking[%d] want=%d got=%d",
 					op, id, expectedChk, got)
 			}
@@ -364,8 +363,7 @@ func TestDuckDBSmallBankSerialCorrectness(t *testing.T) {
 			}
 			refSav[id] = expectedSav
 
-			postTs := nextTs()
-			if got := readInt64(postTs, sbSavingsKey(id)); got != expectedSav {
+			if got := readInt64(ts, sbSavingsKey(id)); got != expectedSav {
 				t.Fatalf("transactSavings op %d: post-commit savings[%d] want=%d got=%d",
 					op, id, expectedSav, got)
 			}
@@ -425,9 +423,8 @@ func TestDuckDBSmallBankSerialCorrectness(t *testing.T) {
 			refChk[dst] = expectedDst
 
 			// Post-commit: pair total must be preserved.
-			postTs := nextTs()
-			gotSrc := readInt64(postTs, sbCheckingKey(src))
-			gotDst := readInt64(postTs, sbCheckingKey(dst))
+			gotSrc := readInt64(ts, sbCheckingKey(src))
+			gotDst := readInt64(ts, sbCheckingKey(dst))
 			if gotSrc != expectedSrc {
 				t.Fatalf("sendPayment op %d: post src=%d want=%d got=%d",
 					op, src, expectedSrc, gotSrc)
@@ -491,8 +488,7 @@ func TestDuckDBSmallBankSerialCorrectness(t *testing.T) {
 			_ = expectedChk // suppress unused
 			refChk[id] = newChk
 
-			postTs := nextTs()
-			if got := readInt64(postTs, sbCheckingKey(id)); got != newChk {
+			if got := readInt64(ts, sbCheckingKey(id)); got != newChk {
 				t.Fatalf("writeCheck op %d: post-commit checking[%d] want=%d got=%d",
 					op, id, newChk, got)
 			}
@@ -502,7 +498,7 @@ func TestDuckDBSmallBankSerialCorrectness(t *testing.T) {
 		// ── Amalgamate ───────────────────────────────────────────────────────
 		// After Amalgamate(src→dst):
 		//   checking[src] = 0
-		//   savings[dst]  = old_savings[src] + old_checking[dst]
+		//   savings[dst]  = old_savings[dst] + old_checking[src]
 		t.Log("[smallbank-serial] verifying Amalgamate …")
 		for op := 0; op < sbSerialOps; op++ {
 			src := rng.Int63n(sbSerialCustomers)
@@ -512,28 +508,28 @@ func TestDuckDBSmallBankSerialCorrectness(t *testing.T) {
 			}
 
 			expectedChkSrc := int64(0)
-			expectedSavDst := refSav[src] + refChk[dst]
+			expectedSavDst := refSav[dst] + refChk[src]
 
 			ts := nextTs()
 			txn := db.NewTransactionAt(ts, true)
-			savSrcItem, err := txn.Get(sbSavingsKey(src))
+			chkSrcItem, err := txn.Get(sbCheckingKey(src))
 			if err != nil {
 				txn.Discard()
-				t.Fatalf("amalgamate op %d: get savings src=%d: %v", op, src, err)
+				t.Fatalf("amalgamate op %d: get checking src=%d: %v", op, src, err)
 			}
-			chkDstItem, err := txn.Get(sbCheckingKey(dst))
+			savDstItem, err := txn.Get(sbSavingsKey(dst))
 			if err != nil {
 				txn.Discard()
-				t.Fatalf("amalgamate op %d: get checking dst=%d: %v", op, dst, err)
+				t.Fatalf("amalgamate op %d: get savings dst=%d: %v", op, dst, err)
 			}
-			preSavSrc := sbItemInt64(savSrcItem)
-			preChkDst := sbItemInt64(chkDstItem)
-			if preSavSrc != refSav[src] || preChkDst != refChk[dst] {
+			preChkSrc := sbItemInt64(chkSrcItem)
+			preSavDst := sbItemInt64(savDstItem)
+			if preChkSrc != refChk[src] || preSavDst != refSav[dst] {
 				txn.Discard()
-				t.Fatalf("amalgamate op %d: pre-read src_sav want=%d got=%d, dst_chk want=%d got=%d",
-					op, refSav[src], preSavSrc, refChk[dst], preChkDst)
+				t.Fatalf("amalgamate op %d: pre-read src_chk want=%d got=%d, dst_sav want=%d got=%d",
+					op, refChk[src], preChkSrc, refSav[dst], preSavDst)
 			}
-			moved := preSavSrc + preChkDst
+			moved := preSavDst + preChkSrc
 			_ = txn.Set(sbCheckingKey(src), sbEncode(0))
 			_ = txn.Set(sbSavingsKey(dst), sbEncode(moved))
 			if err := txn.CommitAt(ts, nil); err != nil {
@@ -543,12 +539,11 @@ func TestDuckDBSmallBankSerialCorrectness(t *testing.T) {
 			refChk[src] = expectedChkSrc
 			refSav[dst] = expectedSavDst
 
-			postTs := nextTs()
-			if got := readInt64(postTs, sbCheckingKey(src)); got != 0 {
+			if got := readInt64(ts, sbCheckingKey(src)); got != 0 {
 				t.Fatalf("amalgamate op %d: post-commit checking[src=%d] want=0 got=%d",
 					op, src, got)
 			}
-			if got := readInt64(postTs, sbSavingsKey(dst)); got != expectedSavDst {
+			if got := readInt64(ts, sbSavingsKey(dst)); got != expectedSavDst {
 				t.Fatalf("amalgamate op %d: post-commit savings[dst=%d] want=%d got=%d",
 					op, dst, expectedSavDst, got)
 			}
