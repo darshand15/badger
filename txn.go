@@ -237,9 +237,9 @@ func (o *oracle) newCommitTs(txn *Txn) (types.CustomTs, bool) {
 	// The DAG executor pre-orders transactions so no conflicts can arrive
 	// concurrently, and txn.commitTs is already assigned by the caller.
 	// No shared oracle state needs updating, so skip the mutex entirely.
-	if o.isManaged && !o.detectConflicts {
-		return txn.commitTs, false
-	}
+	// if o.isManaged && !o.detectConflicts {
+	// 	return txn.commitTs, false
+	// }
 
 	o.Lock()
 	defer o.Unlock()
@@ -330,7 +330,6 @@ func (o *oracle) doneCommit(cts types.CustomTs) {
 		o.txnMark.Done(cts)
 	}
 }
-
 
 // Txn represents a Badger transaction.
 type Txn struct {
