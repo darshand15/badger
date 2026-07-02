@@ -162,7 +162,16 @@ func execEpochTransfer(tb testing.TB, db *DB, ts types.CustomTs) time.Duration {
 	txn := db.NewTransactionAt(ts, true)
 	defer txn.Discard()
 
-	fromItem, err := txn.Get(bankKey(from))
+	// Vectorize: fetch both account balances in one batched SQL round-trip
+	// instead of two sequential Get() calls, each of which pays its own CGo
+	// boundary-crossing cost. PrefetchKeys populates txn.batchCache so the
+	// Get() calls below are served from memory with no further query.
+	fromKey, toKey := bankKey(from), bankKey(to)
+	if err := txn.PrefetchKeys([][]byte{fromKey, toKey}); err != nil {
+		return time.Since(start)
+	}
+
+	fromItem, err := txn.Get(fromKey)
 	if err != nil {
 		return time.Since(start)
 	}
@@ -172,7 +181,7 @@ func execEpochTransfer(tb testing.TB, db *DB, ts types.CustomTs) time.Duration {
 		return time.Since(start)
 	}
 
-	toItem, err := txn.Get(bankKey(to))
+	toItem, err := txn.Get(toKey)
 	if err != nil {
 		return time.Since(start)
 	}
