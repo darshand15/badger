@@ -100,6 +100,13 @@ const defaultFlushBatchSize int64 = 1
 // flushed before the SQL query that needs them.
 const directFlushBatchSize int64 = 512
 
+// readPoolSize is the number of dedicated read connections kept per
+// partition (see partitionAppender.readConns). A single DuckDB connection
+// handles one statement at a time, so this bounds how many readers can be
+// concurrently active against one partition without serializing on either
+// a single shared connection or database/sql's global pool lock.
+const readPoolSize = 4
+
 // partitionAppender owns a persistent DuckDB connection and Appender for a
 // single partition.  Keeping the Appender alive across memtable flushes
 // eliminates the per-flush cost of:
@@ -126,6 +133,38 @@ type partitionAppender struct {
 	appender    *duckdbdriver.Appender
 	pendingRows int64
 	pendingKeys map[string]struct{} // keys with unflushed AppendRow'd rows
+
+	// readConns/readStmts are a small dedicated pool of connections used only
+	// for reads (Read, ReadBatch, ScanPrefix). A single DuckDB connection can
+	// only run one statement at a time — issuing QueryContext on a connection
+	// while a previous Rows from that same connection is still open panics
+	// with "misuse of duckdb driver: ... with active Rows". Routing reads
+	// through database/sql's normal pool avoids that by handing out whichever
+	// connection happens to be free, but the pool checkout serializes on
+	// sql.DB's internal mutex, which shows up under load as CPU spent on Go
+	// lock contention rather than real DuckDB work.
+	//
+	// This per-partition pool splits the difference: readPoolSize dedicated
+	// connections, each with its own prepared LIMIT-1 statement, handed out
+	// via a small buffered channel scoped to this partition. Checkout is a
+	// channel receive local to the partition — no cross-partition contention,
+	// and no interaction with sql.DB's global pool lock — while still
+	// allowing up to readPoolSize concurrent readers per partition instead of
+	// serializing every reader onto one connection.
+	readConns []*sql.Conn
+	readStmts []*sql.Stmt
+	readFree  chan int // free-list of indices into readConns/readStmts
+}
+
+// acquireRead blocks until a read connection/statement pair is free and
+// returns its index. Must be paired with a releaseRead(idx).
+func (pa *partitionAppender) acquireRead() int {
+	return <-pa.readFree
+}
+
+// releaseRead returns a read connection/statement pair to the free pool.
+func (pa *partitionAppender) releaseRead(idx int) {
+	pa.readFree <- idx
 }
 
 // flush pushes buffered rows to DuckDB and clears pendingKeys.
@@ -162,13 +201,11 @@ type DuckDBStorage struct {
 	partCalc       *partitionCalculator
 	mu             sync.RWMutex
 	numParts       int
-	// partAppenders holds one persistent Appender per partition.
-	// Indexed by partition ID; created in initPersistentAppenders.
+	// partAppenders holds one persistent Appender per partition, along with
+	// each partition's dedicated read-connection pool (partitionAppender.
+	// readConns/readStmts). Indexed by partition ID; created in
+	// initPersistentAppenders.
 	partAppenders  []*partitionAppender
-	// readStmts holds one prepared LIMIT 1 read statement per partition.
-	// Prepared once at startup; used by Read() and ReadBatch() to avoid
-	// SQL re-parsing on every query.
-	readStmts      []*sql.Stmt
 	// flushBatchSize is the per-partition row count that triggers an automatic
 	// Appender flush.  Configurable; defaults to defaultFlushBatchSize.
 	flushBatchSize int64
@@ -213,11 +250,11 @@ func NewDuckDBStorage(dbPath string, numPartitions int) (*DuckDBStorage, error) 
 // partition and stores them in s.partAppenders.  These are kept alive for the
 // lifetime of the storage instance; re-using them across flushes eliminates
 // repeated CGo boundary crossings for connection acquisition and Appender
-// construction.  It also prepares one LIMIT 1 read statement per partition so
-// that Read() and ReadBatch() avoid SQL re-parsing on every query.
+// construction.  It also opens a small dedicated read-connection pool per
+// partition (see partitionAppender.readConns) so Read()/ReadBatch()/
+// ScanPrefix() avoid both SQL re-parsing and database/sql's global pool lock.
 func (s *DuckDBStorage) initPersistentAppenders() error {
 	s.partAppenders = make([]*partitionAppender, s.numParts)
-	s.readStmts = make([]*sql.Stmt, s.numParts)
 	for i := 0; i < s.numParts; i++ {
 		tableName := fmt.Sprintf("partition_%d", i)
 
@@ -251,8 +288,25 @@ func (s *DuckDBStorage) initPersistentAppenders() error {
 			pendingKeys: make(map[string]struct{}),
 		}
 
-		// Prepare the LIMIT 1 read statement for this partition once, so every
-		// Read() / ReadBatch() call avoids re-parsing the SQL.
+		// Open a small dedicated pool of read connections for this partition,
+		// each with its own prepared LIMIT-1 statement, so every Read() /
+		// ReadBatch() / ScanPrefix() call avoids both SQL re-parsing and
+		// database/sql's pool-checkout lock.
+		//
+		// Why not just prepare on s.db (the old approach)? A statement
+		// prepared via s.db.PrepareContext can run on any pooled connection,
+		// but every QueryRowContext call still has to check a connection out
+		// of database/sql's pool under sql.DB's internal mutex
+		// (freeConn/connRequests). CPU profiling under load showed this
+		// pool-checkout lock accounted for ~37% of total CPU — pure Go-side
+		// contention, not DuckDB work.
+		//
+		// Why not a single pinned connection per partition (the first attempt
+		// here)? A DuckDB connection can only run one statement at a time —
+		// concurrent QueryContext calls sharing one connection panic with
+		// "misuse of duckdb driver: ... with active Rows". A small
+		// per-partition pool avoids the global pool lock while still allowing
+		// readPoolSize concurrent readers per partition.
 		readSQL := fmt.Sprintf(`
 			SELECT key, epoch_id, broker_id, assigned_ts, value, deleted
 			FROM %s
@@ -262,12 +316,25 @@ func (s *DuckDBStorage) initPersistentAppenders() error {
 			       (epoch_id = ? AND broker_id = ? AND assigned_ts <= ?))
 			ORDER BY epoch_id DESC, broker_id DESC, assigned_ts DESC
 			LIMIT 1`, tableName)
-		stmt, err := s.db.PrepareContext(s.ctx, readSQL)
-		if err != nil {
-			sqlConn.Close()
-			return fmt.Errorf("partition %d: prepare read stmt: %w", i, err)
+
+		pa := s.partAppenders[i]
+		pa.readConns = make([]*sql.Conn, readPoolSize)
+		pa.readStmts = make([]*sql.Stmt, readPoolSize)
+		pa.readFree = make(chan int, readPoolSize)
+		for j := 0; j < readPoolSize; j++ {
+			rc, err := s.db.Conn(s.ctx)
+			if err != nil {
+				return fmt.Errorf("partition %d: get read conn %d: %w", i, j, err)
+			}
+			rstmt, err := rc.PrepareContext(s.ctx, readSQL)
+			if err != nil {
+				rc.Close()
+				return fmt.Errorf("partition %d: prepare read stmt %d: %w", i, j, err)
+			}
+			pa.readConns[j] = rc
+			pa.readStmts[j] = rstmt
+			pa.readFree <- j
 		}
-		s.readStmts[i] = stmt
 	}
 	return nil
 }
@@ -440,14 +507,18 @@ func (s *DuckDBStorage) Read(key []byte, readTs CustomTs) (*Entry, error) {
 	var epochID, brokerID, assignedTs int64
 	var deleted bool
 
-	// Use the pre-compiled prepared statement to avoid SQL re-parsing overhead.
-	err := s.readStmts[partition].QueryRowContext(
+	// Check out one of this partition's dedicated read connections/statements
+	// (pre-compiled, to avoid SQL re-parsing overhead) instead of going
+	// through database/sql's global pool.
+	ridx := pa.acquireRead()
+	err := pa.readStmts[ridx].QueryRowContext(
 		s.ctx,
 		key,
 		readTs.EpochID,
 		readTs.EpochID, readTs.BrokerID,
 		readTs.EpochID, readTs.BrokerID, readTs.AssignedTs,
 	).Scan(&entry.Key, &epochID, &brokerID, &assignedTs, &entry.Value, &deleted)
+	pa.releaseRead(ridx)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -567,13 +638,15 @@ func (s *DuckDBStorage) ReadBatch(requests []ReadBatchRequest) ([]ReadBatchResul
 				value                 []byte
 				deleted               bool
 			)
-			err := s.readStmts[pid].QueryRowContext(
+			ridx := pa.acquireRead()
+			err := pa.readStmts[ridx].QueryRowContext(
 				s.ctx,
 				r.key,
 				readTs.EpochID,
 				readTs.EpochID, readTs.BrokerID,
 				readTs.EpochID, readTs.BrokerID, readTs.AssignedTs,
 			).Scan(&key, &epochID, &brokerID, &ts, &value, &deleted)
+			pa.releaseRead(ridx)
 			if needFlush {
 				pa.mu.Unlock()
 			} else {
@@ -625,13 +698,21 @@ func (s *DuckDBStorage) ReadBatch(requests []ReadBatchRequest) ([]ReadBatchResul
 			) sub
 			WHERE rn = 1`, tableName, inClause)
 
-		rows, err := s.db.QueryContext(s.ctx, querySQL, args...)
+		// Ad hoc IN-clause SQL varies per call (placeholder count depends on
+		// len(reqs)), so it can't use a pre-prepared statement. Still, run it
+		// on one of this partition's dedicated read connections rather than
+		// s.db, to avoid database/sql's global pool-checkout lock. The
+		// connection stays checked out until rows.Close() below — a single
+		// DuckDB connection can only serve one open Rows at a time.
+		ridx := pa.acquireRead()
+		rows, err := pa.readConns[ridx].QueryContext(s.ctx, querySQL, args...)
 		if needFlush {
 			pa.mu.Unlock()
 		} else {
 			pa.mu.RUnlock()
 		}
 		if err != nil {
+			pa.releaseRead(ridx)
 			return nil, fmt.Errorf("ReadBatch query partition %d: %w", pid, err)
 		}
 		for rows.Next() {
@@ -643,6 +724,7 @@ func (s *DuckDBStorage) ReadBatch(requests []ReadBatchRequest) ([]ReadBatchResul
 			)
 			if err := rows.Scan(&key, &epochID, &brokerID, &ts, &value, &deleted); err != nil {
 				_ = rows.Close()
+				pa.releaseRead(ridx)
 				return nil, fmt.Errorf("ReadBatch scan partition %d: %w", pid, err)
 			}
 			if deleted {
@@ -654,8 +736,10 @@ func (s *DuckDBStorage) ReadBatch(requests []ReadBatchRequest) ([]ReadBatchResul
 				results[idx].Timestamp = CustomTs{EpochID: epochID, BrokerID: brokerID, AssignedTs: ts}
 			}
 		}
-		if err := rows.Close(); err != nil {
-			return nil, fmt.Errorf("ReadBatch close rows partition %d: %w", pid, err)
+		closeErr := rows.Close()
+		pa.releaseRead(ridx)
+		if closeErr != nil {
+			return nil, fmt.Errorf("ReadBatch close rows partition %d: %w", pid, closeErr)
 		}
 	}
 
@@ -753,13 +837,18 @@ func (s *DuckDBStorage) ScanPrefix(prefix []byte, readTs CustomTs) ([]ReadBatchR
 			) sub
 			WHERE rn = 1`, tableName, keyCond)
 
-		rows, err := s.db.QueryContext(s.ctx, querySQL, args...)
+		// Same pool-bypass as ReadBatch: check out one of this partition's
+		// dedicated read connections instead of s.db, to avoid database/sql's
+		// pool-checkout lock on the hot scan path. Held until rows.Close().
+		ridx := pa.acquireRead()
+		rows, err := pa.readConns[ridx].QueryContext(s.ctx, querySQL, args...)
 		if needFlush {
 			pa.mu.Unlock()
 		} else {
 			pa.mu.RUnlock()
 		}
 		if err != nil {
+			pa.releaseRead(ridx)
 			return nil, fmt.Errorf("ScanPrefix query partition %d: %w", pid, err)
 		}
 		for rows.Next() {
@@ -771,6 +860,7 @@ func (s *DuckDBStorage) ScanPrefix(prefix []byte, readTs CustomTs) ([]ReadBatchR
 			)
 			if err := rows.Scan(&key, &epochID, &brokerID, &ts, &value, &deleted); err != nil {
 				_ = rows.Close()
+				pa.releaseRead(ridx)
 				return nil, fmt.Errorf("ScanPrefix scan partition %d: %w", pid, err)
 			}
 			if deleted {
@@ -783,8 +873,10 @@ func (s *DuckDBStorage) ScanPrefix(prefix []byte, readTs CustomTs) ([]ReadBatchR
 				Found:     true,
 			})
 		}
-		if err := rows.Close(); err != nil {
-			return nil, fmt.Errorf("ScanPrefix close rows partition %d: %w", pid, err)
+		closeErr := rows.Close()
+		pa.releaseRead(ridx)
+		if closeErr != nil {
+			return nil, fmt.Errorf("ScanPrefix close rows partition %d: %w", pid, closeErr)
 		}
 	}
 	return out, nil
@@ -909,12 +1001,6 @@ func (s *DuckDBStorage) CompactPartitions() error {
 
 // Close releases all DuckDB resources.
 func (s *DuckDBStorage) Close() error {
-	// Close prepared read statements first.
-	for _, stmt := range s.readStmts {
-		if stmt != nil {
-			_ = stmt.Close()
-		}
-	}
 	// Flush + close persistent appenders before closing the underlying DB;
 	// appender.Close() flushes any remaining buffered rows.
 	for i, pa := range s.partAppenders {
@@ -930,6 +1016,17 @@ func (s *DuckDBStorage) Close() error {
 			_ = pa.sqlConn.Close()
 			pa.sqlConn = nil
 		}
+		// Close this partition's dedicated read-connection pool.
+		for j, stmt := range pa.readStmts {
+			if stmt != nil {
+				_ = stmt.Close()
+			}
+			if pa.readConns[j] != nil {
+				_ = pa.readConns[j].Close()
+			}
+		}
+		pa.readStmts = nil
+		pa.readConns = nil
 		pa.pendingRows = 0
 		pa.pendingKeys = nil
 		pa.mu.Unlock()
