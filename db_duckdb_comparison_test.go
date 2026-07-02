@@ -137,7 +137,7 @@ func runBankOnBackend(
 		tps:     float64(totalOps.Load()) / elapsed.Seconds(),
 		avg:     s.avg,
 		p90:     s.p90,
-		p99:     time.Duration(0), // bankStats doesn't track p99; placeholder
+		p99:     s.p99,
 		min:     s.min,
 		max:     s.max,
 	}
@@ -246,15 +246,16 @@ func printBackendComparison(t *testing.T, results []backendResult) {
 	t.Helper()
 	t.Logf("")
 	t.Logf("=== Backend Comparison: Bank Transfer Workload ===")
-	t.Logf("  %-26s  %-12s  %-12s  %-12s  %-12s  %-12s",
-		"Backend", "TPS", "Avg Latency", "p90 Latency", "Min Latency", "Max Latency")
-	t.Logf("  %s", "-------------------------------------------------------------------------------------")
+	t.Logf("  %-26s  %-12s  %-12s  %-12s  %-12s  %-12s  %-12s",
+		"Backend", "TPS", "Avg Latency", "p90 Latency", "p99 Latency", "Min Latency", "Max Latency")
+	t.Logf("  %s", "-------------------------------------------------------------------------------------------------")
 	for _, r := range results {
-		t.Logf("  %-26s  %-12.0f  %-12v  %-12v  %-12v  %-12v",
+		t.Logf("  %-26s  %-12.0f  %-12v  %-12v  %-12v  %-12v  %-12v",
 			r.backend,
 			r.tps,
 			r.avg.Round(time.Microsecond),
 			r.p90.Round(time.Microsecond),
+			r.p99.Round(time.Microsecond),
 			r.min.Round(time.Microsecond),
 			r.max.Round(time.Microsecond))
 	}

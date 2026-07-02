@@ -152,6 +152,7 @@ type txStats struct {
 	count int64
 	avg   time.Duration
 	p90   time.Duration
+	p99   time.Duration
 	min   time.Duration
 	max   time.Duration
 }
@@ -175,10 +176,15 @@ func (s *bankStats) summarize(typ bankTxType) txStats {
 	if p90idx >= len(raw) {
 		p90idx = len(raw) - 1
 	}
+	p99idx := int(float64(len(raw)) * 0.99)
+	if p99idx >= len(raw) {
+		p99idx = len(raw) - 1
+	}
 	return txStats{
 		count: cnt,
 		avg:   time.Duration(total / int64(len(raw))),
 		p90:   time.Duration(raw[p90idx]),
+		p99:   time.Duration(raw[p99idx]),
 		min:   time.Duration(raw[0]),
 		max:   time.Duration(raw[len(raw)-1]),
 	}
@@ -325,7 +331,17 @@ func execTransfer(tb testing.TB, db *DB, oracle *divytime.Oracle, rng *rand.Rand
 
 		txn := db.NewTransactionAt(readTs, true)
 
-		fromItem, err := txn.Get(bankKey(from))
+		// Vectorize: batch both account reads into one SQL round-trip instead
+		// of two sequential Get() calls, each paying its own CGo boundary
+		// cost. No-op on the regular Badger backend (PrefetchKeys only acts
+		// when the DuckDB backend is active), so this is safe either way.
+		fromKey, toKey := bankKey(from), bankKey(to)
+		if err := txn.PrefetchKeys([][]byte{fromKey, toKey}); err != nil {
+			txn.Discard()
+			return time.Since(start)
+		}
+
+		fromItem, err := txn.Get(fromKey)
 		if err != nil {
 			txn.Discard()
 			return time.Since(start)
@@ -336,7 +352,7 @@ func execTransfer(tb testing.TB, db *DB, oracle *divytime.Oracle, rng *rand.Rand
 			return time.Since(start)
 		}
 
-		toItem, err := txn.Get(bankKey(to))
+		toItem, err := txn.Get(toKey)
 		if err != nil {
 			txn.Discard()
 			return time.Since(start)
@@ -388,19 +404,27 @@ func execTransfer(tb testing.TB, db *DB, oracle *divytime.Oracle, rng *rand.Rand
 // skew is no longer expected: any transfer that would produce an inconsistent
 // state is detected as a conflict and retried until it succeeds cleanly.
 // A mismatch here is a real bug.
+//
+// Vectorized like execSumCheck: one ScanPrefix call (one SQL query per
+// partition) instead of numBankAccounts sequential point Get()s. Each point
+// Get crosses the CGo boundary into DuckDB once; profiling showed that
+// per-key round-trip tax at ~57% of CPU in this loop. Fetching the whole
+// key range per partition in a single call amortizes that tax across all
+// accounts in the partition instead of paying it per key.
 func verifyBankTotal(tb testing.TB, db *DB) {
 	tb.Helper()
 	txn := db.NewTransactionAt(types.MaxTs, false)
 	defer txn.Discard()
 
+	results, err := db.duckDBStorage.ScanPrefix([]byte(bankKeyPrefix), txn.readTs)
+	if err != nil {
+		tb.Fatalf("verify: scan accounts: %v", err)
+	}
 	var total uint64
-	for i := 0; i < numBankAccounts; i++ {
-		item, err := txn.Get(bankKey(i))
-		if err != nil {
-			tb.Fatalf("verify: get account %d: %v", i, err)
+	for _, r := range results {
+		if r.Found {
+			total += bankDecodeUint64(r.Value)
 		}
-		v, _ := item.ValueCopy(nil)
-		total += bankDecodeUint64(v)
 	}
 	expected := uint64(numBankAccounts) * initialBankBal
 	if total != expected {
