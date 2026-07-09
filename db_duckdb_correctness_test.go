@@ -5,6 +5,7 @@ package badger
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"github.com/dgraph-io/badger/v4/types"
@@ -216,4 +217,46 @@ func TestDuckDBTimestampScenarios(t *testing.T) {
 	})
 }
 
+// TestDuckDBIntegration is a simple end-to-end smoke check that writes,
+// flushes, and reads back a small fixed dataset through the DuckDB path.
+func TestDuckDBIntegration(t *testing.T) {
+	withDuckDB(t, true, func(db *DB) {
+		for i := 0; i < 100; i++ {
+			key := []byte(fmt.Sprintf("key%03d", i))
+			val := []byte(fmt.Sprintf("val%03d", i))
 
+			ts := types.CustomTs{AssignedTs: uint32(i + 1)}
+			txn := db.NewTransactionAt(ts, true)
+			if err := txn.Set(key, val); err != nil {
+				t.Fatalf("set key%03d: %v", i, err)
+			}
+			if err := txn.CommitAt(ts, nil); err != nil {
+				t.Fatalf("commit key%03d: %v", i, err)
+			}
+		}
+
+		if err := db.handleMemTableFlushPartitioned(db.mt, nil); err != nil {
+			t.Fatalf("flush to DuckDB: %v", err)
+		}
+
+		for i := 0; i < 100; i++ {
+			key := []byte(fmt.Sprintf("key%03d", i))
+			expected := []byte(fmt.Sprintf("val%03d", i))
+
+			txn := db.NewTransactionAt(types.MaxTs, false)
+			item, err := txn.Get(key)
+			if err != nil {
+				txn.Discard()
+				t.Fatalf("read key%03d: %v", i, err)
+			}
+			got, err := item.ValueCopy(nil)
+			txn.Discard()
+			if err != nil {
+				t.Fatalf("value key%03d: %v", i, err)
+			}
+			if !bytes.Equal(got, expected) {
+				t.Fatalf("key%03d: expected %q got %q", i, expected, got)
+			}
+		}
+	})
+}

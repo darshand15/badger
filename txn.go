@@ -900,7 +900,7 @@ func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 			deleted := e.meta&bitDelete != 0
 			var value []byte
 			if !deleted {
-				value = append([]byte(nil), e.Value...)
+				value = e.Value
 			}
 			ducks = append(ducks, duckEntry{
 				Key:     logicalKey,

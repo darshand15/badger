@@ -368,13 +368,11 @@ standard Badger MVCC path.
 | File | Description |
 |------|-------------|
 | `db_duckdb_serial_correctness_test.go` | **Serial correctness tests** (Darshan) |
-| `db_duckdb_epoch_stress_test.go` | **Epoch batching stress test** (Ashley) |
+| `db_duckdb_stress_test.go` | **Stress + epoch batching stress tests** (Ashley) |
 | `db_duckdb_comparison_test.go` | **Badger vs DuckDB comparison** (All) |
 | `db_duckdb_bank_test.go` | Concurrent bank workload + TPS benchmark |
 | `db_duckdb_smallbank_bench_test.go` | SmallBank per-type and mixed workloads |
-| `db_duckdb_correctness_test.go` | Timestamp-scenario correctness tests |
-| `db_duckdb_helpers_test.go` | `withDuckDB` helper + ingest benchmark |
-| `db_duckdb_integration_test.go` | Basic flush + read-back integration test |
+| `db_duckdb_correctness_test.go` | Timestamp-scenario + integration correctness tests |
 | `db_lockfree_test.go` | Regular Badger lock-free tests + `BenchmarkLockFreeIngest` |
 | `duckdb/storage.go` | DuckDB storage layer implementation |
 | `divytime/divytime.go` | In-process timestamp oracle |

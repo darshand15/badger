@@ -215,3 +215,214 @@ func TestDuckDBBankStress(t *testing.T) {
 	}
 	t.Log("============================================================")
 }
+
+// ---------------------------------------------------------------------------
+// Epoch stress tests (merged from db_duckdb_epoch_stress_test.go)
+// ---------------------------------------------------------------------------
+
+// epochBatchOracle wraps a real divytime.Oracle but reserves N AssignedTs
+// slots per oracle call, amortising its simulated latency across N
+// transactions.
+type epochBatchOracle struct {
+	inner     *divytime.Oracle
+	batchSize int64
+
+	mu       sync.Mutex
+	curEpoch int64
+	nextSlot int64
+	batchEnd int64
+}
+
+func newEpochBatchOracle(inner *divytime.Oracle, batchSize int) *epochBatchOracle {
+	return &epochBatchOracle{inner: inner, batchSize: int64(batchSize)}
+}
+
+func (o *epochBatchOracle) GetTimestamp() types.CustomTs {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if o.nextSlot >= o.batchEnd {
+		o.curEpoch++
+		ts, _ := o.inner.GetTimestamp(o.curEpoch)
+		o.nextSlot = ts.AssignedTs
+		o.batchEnd = ts.AssignedTs + o.batchSize
+	}
+
+	assigned := o.nextSlot
+	o.nextSlot++
+	return types.CustomTs{
+		EpochID:    uint32(o.curEpoch),
+		BrokerID:   1,
+		AssignedTs: uint32(assigned),
+	}
+}
+
+func runEpochBankWorkload(
+	t *testing.T,
+	oracle *epochBatchOracle,
+	dur time.Duration,
+	workers int,
+) (tps float64, p90 time.Duration) {
+	t.Helper()
+
+	withDuckDB(t, true, func(db *DB) {
+		seedOracle := divytime.NewOracle(99, 0)
+		for i := 0; i < numBankAccounts; i++ {
+			ts, _ := seedOracle.GetTimestamp(int64(i) + 1)
+			txn := db.NewTransactionAt(divyToTs(ts), true)
+			if err := txn.Set(bankKey(i), bankEncodeUint64(initialBankBal)); err != nil {
+				t.Fatalf("seed account %d: %v", i, err)
+			}
+			if err := txn.CommitAt(divyToTs(ts), nil); err != nil {
+				t.Fatalf("seed commit %d: %v", i, err)
+			}
+		}
+
+		stats := newBankStats()
+		var (
+			totalXfers atomic.Int64
+			stop       int32
+			wg         sync.WaitGroup
+		)
+
+		start := time.Now()
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for atomic.LoadInt32(&stop) == 0 {
+					ts := oracle.GetTimestamp()
+					d := execEpochTransfer(t, db, ts)
+					stats.record(txTransfer, d)
+					totalXfers.Add(1)
+				}
+			}()
+		}
+
+		time.Sleep(dur)
+		atomic.StoreInt32(&stop, 1)
+		wg.Wait()
+		elapsed := time.Since(start)
+
+		tps = float64(totalXfers.Load()) / elapsed.Seconds()
+		p90 = stats.summarize(txTransfer).p90
+	})
+	return
+}
+
+func execEpochTransfer(tb testing.TB, db *DB, ts types.CustomTs) time.Duration {
+	tb.Helper()
+	start := time.Now()
+
+	rng := newWorkerRng()
+	from := rng.Intn(numBankAccounts)
+	to := rng.Intn(numBankAccounts)
+	for to == from {
+		to = rng.Intn(numBankAccounts)
+	}
+
+	txn := db.NewTransactionAt(ts, true)
+	defer txn.Discard()
+
+	fromKey, toKey := bankKey(from), bankKey(to)
+	if err := txn.PrefetchKeys([][]byte{fromKey, toKey}); err != nil {
+		return time.Since(start)
+	}
+
+	fromItem, err := txn.Get(fromKey)
+	if err != nil {
+		return time.Since(start)
+	}
+	fromBal, _ := fromItem.ValueCopy(nil)
+	if bankDecodeUint64(fromBal) < transferAmount {
+		return time.Since(start)
+	}
+
+	toItem, err := txn.Get(toKey)
+	if err != nil {
+		return time.Since(start)
+	}
+	toBal, _ := toItem.ValueCopy(nil)
+
+	if err := txn.Set(fromKey, bankEncodeUint64(bankDecodeUint64(fromBal)-transferAmount)); err != nil {
+		return time.Since(start)
+	}
+	if err := txn.Set(toKey, bankEncodeUint64(bankDecodeUint64(toBal)+transferAmount)); err != nil {
+		return time.Since(start)
+	}
+	_ = txn.CommitAt(ts, nil)
+	return time.Since(start)
+}
+
+type workerRng struct{ seed uint64 }
+
+func newWorkerRng() *workerRng {
+	return &workerRng{seed: uint64(time.Now().UnixNano())}
+}
+
+func (r *workerRng) Intn(n int) int {
+	r.seed ^= r.seed << 13
+	r.seed ^= r.seed >> 7
+	r.seed ^= r.seed << 17
+	return int(r.seed>>1) % n
+}
+
+// TestDuckDBBankEpochStress sweeps over epoch batch sizes [1, 2, 4, 8, 16, 32]
+// and measures bank transfer TPS and p90 latency for each.
+func TestDuckDBBankEpochStress(t *testing.T) {
+	const (
+		oracleDelay = 50 * time.Microsecond
+		runDur      = 1 * time.Second
+		workers     = 16
+	)
+
+	type result struct {
+		batchSize int
+		tps       float64
+		p90       time.Duration
+	}
+
+	batchSizes := []int{1, 2, 4, 8, 16, 32}
+	var results []result
+
+	for _, bs := range batchSizes {
+		inner := divytime.NewOracle(1, oracleDelay)
+		bOracle := newEpochBatchOracle(inner, bs)
+
+		t.Logf("  running batchSize=%d ...", bs)
+		tps, p90 := runEpochBankWorkload(t, bOracle, runDur, workers)
+		results = append(results, result{bs, tps, p90})
+	}
+
+	t.Logf("")
+	t.Logf("=== DuckDB Epoch Stress Results ===")
+	t.Logf("  Oracle simulated delay: %v", oracleDelay)
+	t.Logf("  Workers: %d  |  Run duration per batch size: %v", workers, runDur)
+	t.Logf("")
+	t.Logf("  %-12s  %-14s  %-14s", "BatchSize", "TPS", "p90 Latency")
+	t.Logf("  %s", "--------------------------------------------")
+	for _, r := range results {
+		t.Logf("  %-12d  %-14.0f  %v", r.batchSize, r.tps, r.p90.Round(time.Microsecond))
+	}
+}
+
+// TestDuckDBBankEpochStressNoDelay runs the same sweep but with zero oracle
+// latency to show the pure DuckDB throughput ceiling.
+func TestDuckDBBankEpochStressNoDelay(t *testing.T) {
+	const (
+		runDur  = 1 * time.Second
+		workers = 16
+	)
+
+	batchSizes := []int{1, 4, 16, 64}
+	t.Logf("=== DuckDB Epoch Stress (zero oracle delay) ===")
+	t.Logf("  %-12s  %-14s  %-14s", "BatchSize", "TPS", "p90 Latency")
+	t.Logf("  %s", "--------------------------------------------")
+
+	for _, bs := range batchSizes {
+		inner := divytime.NewOracle(1, 0)
+		bOracle := newEpochBatchOracle(inner, bs)
+		tps, p90 := runEpochBankWorkload(t, bOracle, runDur, workers)
+		t.Logf("  %-12d  %-14.0f  %v", bs, tps, p90.Round(time.Microsecond))
+	}
+}

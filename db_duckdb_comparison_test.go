@@ -411,3 +411,109 @@ func sbSeedBadger(tb testing.TB, db *DB, oracle *divytime.Oracle) {
 	// Silence the oracle parameter (it is unused but kept for API parity with sbSeed).
 	_ = oracle
 }
+
+// ---------------------------------------------------------------------------
+// TestReadHeavyBalanceBadgerVsDuckDB
+// ---------------------------------------------------------------------------
+
+// TestReadHeavyBalanceBadgerVsDuckDB compares a read-heavy SmallBank pattern
+// (Balance txn: 3 snapshot reads, 0 writes). This is a workload shape where
+// the DuckDB backend is expected to be competitive.
+func TestReadHeavyBalanceBadgerVsDuckDB(t *testing.T) {
+	const (
+		cmpDuration = 2 * time.Second
+		cmpWorkers  = 8
+	)
+
+	type analyticalResult struct {
+		backend string
+		opS     float64
+		avg     time.Duration
+		p90     time.Duration
+	}
+
+	runAnalytical := func(
+		t *testing.T,
+		backend string,
+		runFn func(rng *rand.Rand) (time.Duration, error),
+	) analyticalResult {
+		t.Helper()
+		stats := newBankStats()
+		var totalOps atomic.Int64
+		var stop int32
+		var wg sync.WaitGroup
+
+		start := time.Now()
+		for w := 0; w < cmpWorkers; w++ {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+				rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
+				for atomic.LoadInt32(&stop) == 0 {
+					d, err := runFn(rng)
+					if err == nil {
+						stats.record(txSumCheck, d)
+						totalOps.Add(1)
+					}
+				}
+			}(w)
+		}
+
+		time.Sleep(cmpDuration)
+		atomic.StoreInt32(&stop, 1)
+		wg.Wait()
+		elapsed := time.Since(start)
+
+		s := stats.summarize(txSumCheck)
+		return analyticalResult{
+			backend: backend,
+			opS:     float64(totalOps.Load()) / elapsed.Seconds(),
+			avg:     s.avg,
+			p90:     s.p90,
+		}
+	}
+
+	var badgerResult analyticalResult
+	withDB(t, true, func(db *DB) {
+		oracle := divytime.NewOracle(1, 0)
+		sbSeedBadger(t, db, oracle)
+		badgerResult = runAnalytical(t, "Badger (Balance)", func(rng *rand.Rand) (time.Duration, error) {
+			return sbBalance(db, oracle, rng)
+		})
+	})
+
+	var duckdbResult analyticalResult
+	withDuckDB(t, true, func(db *DB) {
+		oracle := divytime.NewOracle(1, 0)
+		sbSeed(t, db, oracle)
+		duckdbResult = runAnalytical(t, "DuckDB (Balance)", func(rng *rand.Rand) (time.Duration, error) {
+			return sbBalance(db, oracle, rng)
+		})
+	})
+
+	t.Logf("")
+	t.Logf("=== Read-Heavy Comparison (SmallBank Balance txn) ===")
+	t.Logf("  %-26s  %-12s  %-12s  %-12s", "Backend", "Ops/sec", "Avg Latency", "p90 Latency")
+	t.Logf("  %s", "------------------------------------------------------------------")
+	t.Logf("  %-26s  %-12.1f  %-12v  %-12v",
+		badgerResult.backend,
+		badgerResult.opS,
+		badgerResult.avg.Round(time.Microsecond),
+		badgerResult.p90.Round(time.Microsecond),
+	)
+	t.Logf("  %-26s  %-12.1f  %-12v  %-12v",
+		duckdbResult.backend,
+		duckdbResult.opS,
+		duckdbResult.avg.Round(time.Microsecond),
+		duckdbResult.p90.Round(time.Microsecond),
+	)
+
+	if badgerResult.opS > 0 {
+		ratio := duckdbResult.opS / badgerResult.opS
+		if ratio >= 1 {
+			t.Logf("  DuckDB is %.2fx faster for this read-heavy pattern", ratio)
+		} else {
+			t.Logf("  Badger is %.2fx faster for this read-heavy pattern", 1/ratio)
+		}
+	}
+}
