@@ -25,7 +25,6 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -240,16 +239,15 @@ func seekTotal(txn *badger.Txn) ([]account, error) {
 }
 
 // Range is [lowTs, highTs).
-func findFirstInvalidTxn(db *badger.DB, lowTs, highTs types.CustomTs) types.CustomTs {
-	checkAt := func(ts types.CustomTs) error {
+func findFirstInvalidTxn(db *badger.DB, lowTs, highTs uint64) uint64 {
+	checkAt := func(ts uint64) error {
 		txn := db.NewTransactionAt(ts, false)
 		_, err := seekTotal(txn)
 		txn.Discard()
 		return err
 	}
 
-	// Original logic: highTs - lowTs < 1 implies highTs <= lowTs
-	if lowTs.Equal(highTs) || lowTs.Greater(highTs) {
+	if highTs-lowTs < 1 {
 		log.Printf("Checking at lowTs: %d\n", lowTs)
 		err := checkAt(lowTs)
 		if err == errFailure {
@@ -257,25 +255,25 @@ func findFirstInvalidTxn(db *badger.DB, lowTs, highTs types.CustomTs) types.Cust
 			return lowTs
 		} else if err != nil {
 			log.Printf("Error at lowTs: %d. Err=%v\n", lowTs, err)
-			return types.CustomTs{}
+			return 0
 		}
 		fmt.Printf("No violation found at ts: %d\n", lowTs)
-		return types.CustomTs{}
+		return 0
 	}
 
-	midTs := lowTs.Avg(highTs)
+	midTs := (lowTs + highTs) / 2
 	log.Println()
 	log.Printf("Checking. low=%d. high=%d. mid=%d\n", lowTs, highTs, midTs)
 	err := checkAt(midTs)
 	if err == badger.ErrKeyNotFound || err == nil {
 		// If no failure, move to higher ts.
-		return findFirstInvalidTxn(db, midTs.Incr(), highTs)
+		return findFirstInvalidTxn(db, midTs+1, highTs)
 	}
 	// Found an error.
 	return findFirstInvalidTxn(db, lowTs, midTs)
 }
 
-func compareTwo(db *badger.DB, before, after types.CustomTs) {
+func compareTwo(db *badger.DB, before, after uint64) {
 	fmt.Printf("Comparing @ts=%d with @ts=%d\n", before, after)
 	txn := db.NewTransactionAt(before, false)
 	prev, err := seekTotal(txn)
@@ -311,18 +309,18 @@ func runDisect(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println("opened db")
 
-	var min, max types.CustomTs = types.MaxTs, types.CustomTs{}
+	var min, max uint64 = math.MaxUint64, 0
 	{
-		txn := db.NewTransactionAt(types.MaxTs, false)
+		txn := db.NewTransactionAt(uint64(math.MaxUint32), false)
 		iopt := badger.DefaultIteratorOptions
 		iopt.AllVersions = true
 		itr := txn.NewIterator(iopt)
 		for itr.Rewind(); itr.Valid(); itr.Next() {
 			item := itr.Item()
-			if min.Greater(item.Version()) {
+			if min > item.Version() {
 				min = item.Version()
 			}
-			if max.Less(item.Version()) {
+			if max < item.Version() {
 				max = item.Version()
 			}
 		}
@@ -330,28 +328,16 @@ func runDisect(cmd *cobra.Command, args []string) error {
 		txn.Discard()
 	}
 
-	log.Printf("min=%s. max=%s\n", min, max)
+	log.Printf("min=%d. max=%d\n", min, max)
 	ts := findFirstInvalidTxn(db, min, max)
 	fmt.Println()
-	if ts.IsZero() {
+	if ts == 0 {
 		fmt.Println("Nothing found. Exiting.")
 		return nil
 	}
 
 	for i := 0; i < numPrevious; i++ {
-		// CHANGED Logic:
-		// Need to compare T vs T-1.
-		// current_ts = ts.Decr() repeatedly 'i' times.
-
-		current := ts
-		// Decrement 'i' times to reach the starting point for this iteration
-		for k := 0; k < i; k++ {
-			current = current.Decr()
-		}
-
-		prev := current.Decr()
-
-		compareTwo(db, prev, current)
+		compareTwo(db, ts-1-uint64(i), ts-uint64(i))
 	}
 	return nil
 }

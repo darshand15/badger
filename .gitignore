@@ -16,10 +16,3 @@ badger-test*/
 #darwin
 .DS_Store
 
-# DuckDB experiment outputs (local, generated)
-artifacts/
-
-# Local one-off reports (generated/manual exports)
-DUCKDB 6.25 Report.pdf
-duckdb_weekly_report.pdf
-

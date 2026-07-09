@@ -26,7 +26,6 @@ import (
 
 	"github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/badger/v4/skl"
-	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -38,7 +37,7 @@ type memTable struct {
 	// TODO: Give skiplist z.Calloc'd []byte.
 	sl         *skl.Skiplist
 	wal        *logFile
-	maxVersion types.CustomTs
+	maxVersion uint64
 	opt        Options
 	buf        *bytes.Buffer
 }
@@ -194,7 +193,7 @@ func (mt *memTable) Put(key []byte, value y.ValueStruct) error {
 
 	// Write to skiplist and update maxVersion encountered.
 	mt.sl.Put(key, value)
-	if ts := y.ParseTs(entry.Key); ts.Greater(mt.maxVersion) {
+	if ts := y.ParseTs(entry.Key); ts > mt.maxVersion {
 		mt.maxVersion = ts
 	}
 	y.NumBytesWrittenToL0Add(mt.opt.MetricsEnabled, entry.estimateSizeAndSetThreshold(mt.opt.ValueThreshold))
@@ -232,7 +231,7 @@ func (mt *memTable) replayFunction(opt Options) func(Entry, valuePointer) error 
 			opt.Debugf("First key=%q\n", e.Key)
 		}
 		first = false
-		if ts := y.ParseTs(e.Key); ts.Greater(mt.maxVersion) {
+		if ts := y.ParseTs(e.Key); ts > mt.maxVersion {
 			mt.maxVersion = ts
 		}
 		v := y.ValueStruct{
@@ -292,16 +291,15 @@ func (lf *logFile) encodeEntry(buf *bytes.Buffer, e *Entry, offset uint32) (int,
 		userMeta:  e.UserMeta,
 	}
 
+	hash := crc32.New(y.CastagnoliCrcTable)
+	writer := io.MultiWriter(buf, hash)
+
 	// encode header.
 	var headerEnc [maxHeaderSize]byte
 	sz := h.Encode(headerEnc[:])
-
+	y.Check2(writer.Write(headerEnc[:sz]))
 	// we'll encrypt only key and value.
 	if lf.encryptionEnabled() {
-		// Encrypted path: use io.MultiWriter + crc32.New (infrequent; encryption is rare).
-		hash := crc32.New(y.CastagnoliCrcTable)
-		writer := io.MultiWriter(buf, hash)
-		y.Check2(writer.Write(headerEnc[:sz]))
 		// TODO: no need to allocate the bytes. we can calculate the encrypted buf one by one
 		// since we're using ctr mode of AES encryption. Ordering won't changed. Need some
 		// refactoring in XORBlock which will work like stream cipher.
@@ -312,35 +310,15 @@ func (lf *logFile) encodeEntry(buf *bytes.Buffer, e *Entry, offset uint32) (int,
 			writer, eBuf, lf.dataKey.Data, lf.generateIV(offset)); err != nil {
 			return 0, y.Wrapf(err, "Error while encoding entry for vlog.")
 		}
-		var crcBuf [crc32.Size]byte
-		binary.BigEndian.PutUint32(crcBuf[:], hash.Sum32())
-		y.Check2(buf.Write(crcBuf[:]))
-		return len(headerEnc[:sz]) + len(e.Key) + len(e.Value) + len(crcBuf), nil
+	} else {
+		// Encryption is disabled so writing directly to the buffer.
+		y.Check2(writer.Write(e.Key))
+		y.Check2(writer.Write(e.Value))
 	}
-
-	// Fast path: no encryption.
-	// Avoid heap allocations from crc32.New and io.MultiWriter by using
-	// crc32.Update with a plain uint32 accumulator instead.
-	// Also avoid y.Check2(buf.Write(...)) which boxes the int return to interface{}.
-	var crcVal uint32
-	if _, err := buf.Write(headerEnc[:sz]); err != nil {
-		return 0, err
-	}
-	crcVal = crc32.Update(crcVal, y.CastagnoliCrcTable, headerEnc[:sz])
-	if _, err := buf.Write(e.Key); err != nil {
-		return 0, err
-	}
-	crcVal = crc32.Update(crcVal, y.CastagnoliCrcTable, e.Key)
-	if _, err := buf.Write(e.Value); err != nil {
-		return 0, err
-	}
-	crcVal = crc32.Update(crcVal, y.CastagnoliCrcTable, e.Value)
 	// write crc32 hash.
 	var crcBuf [crc32.Size]byte
-	binary.BigEndian.PutUint32(crcBuf[:], crcVal)
-	if _, err := buf.Write(crcBuf[:]); err != nil {
-		return 0, err
-	}
+	binary.BigEndian.PutUint32(crcBuf[:], hash.Sum32())
+	y.Check2(buf.Write(crcBuf[:]))
 	// return encoded length.
 	return len(headerEnc[:sz]) + len(e.Key) + len(e.Value) + len(crcBuf), nil
 }
@@ -469,7 +447,7 @@ func (lf *logFile) iterate(readOnly bool, offset uint32, fn logEntry) (uint32, e
 		lf:           lf,
 	}
 
-	var lastCommit types.CustomTs
+	var lastCommit uint64
 	var validEndOffset uint32 = offset
 
 	var entries []*Entry
@@ -504,22 +482,22 @@ loop:
 		switch {
 		case e.meta&bitTxn > 0:
 			txnTs := y.ParseTs(e.Key)
-			if lastCommit.IsZero() {
+			if lastCommit == 0 {
 				lastCommit = txnTs
 			}
-			if !(lastCommit.Equal(txnTs)) {
+			if lastCommit != txnTs {
 				break loop
 			}
 			entries = append(entries, e)
 			vptrs = append(vptrs, vp)
 
 		case e.meta&bitFinTxn > 0:
-			txnTs, err := types.ParseCustomTsString(string(e.Value))
-			if err != nil || !(lastCommit.Equal(txnTs)) {
+			txnTs, err := strconv.ParseUint(string(e.Value), 10, 64)
+			if err != nil || lastCommit != txnTs {
 				break loop
 			}
 			// Got the end of txn. Now we can store them.
-			lastCommit = types.CustomTs{}
+			lastCommit = 0
 			validEndOffset = read.recordOffset
 
 			for i, e := range entries {
@@ -535,7 +513,7 @@ loop:
 			vptrs = vptrs[:0]
 
 		default:
-			if !(lastCommit.IsZero()) {
+			if lastCommit != 0 {
 				// This is most likely an entry which was moved as part of GC.
 				// We shouldn't get this entry in the middle of a transaction.
 				break loop

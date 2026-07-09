@@ -22,7 +22,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/badger/v4/options"
-	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2"
 )
@@ -67,7 +66,7 @@ func buildTable(t *testing.T, keyValues [][]string, opts Options) *Table {
 	})
 	for _, kv := range keyValues {
 		y.AssertTrue(len(kv) == 2)
-		b.Add(y.KeyWithTs([]byte(kv[0]), types.CustomTs{}),
+		b.Add(y.KeyWithTs([]byte(kv[0]), 0),
 			y.ValueStruct{Value: []byte(kv[1]), Meta: 'A', UserMeta: 0}, 0)
 	}
 	tbl, err := CreateTable(filename, b)
@@ -86,7 +85,7 @@ func TestTableIterator(t *testing.T) {
 			count := 0
 			for it.Rewind(); it.Valid(); it.Next() {
 				v := it.Value()
-				k := y.KeyWithTs([]byte(key("key", count)), types.CustomTs{})
+				k := y.KeyWithTs([]byte(key("key", count)), 0)
 				require.EqualValues(t, k, it.Key())
 				require.EqualValues(t, fmt.Sprintf("%d", count), string(v.Value))
 				count++
@@ -158,7 +157,7 @@ func TestSeek(t *testing.T) {
 	}
 
 	for _, tt := range data {
-		it.seek(y.KeyWithTs([]byte(tt.in), types.CustomTs{}))
+		it.seek(y.KeyWithTs([]byte(tt.in), 0))
 		if !tt.valid {
 			require.False(t, it.Valid())
 			continue
@@ -192,7 +191,7 @@ func TestSeekForPrev(t *testing.T) {
 	}
 
 	for _, tt := range data {
-		it.seekForPrev(y.KeyWithTs([]byte(tt.in), types.CustomTs{}))
+		it.seekForPrev(y.KeyWithTs([]byte(tt.in), 0))
 		if !tt.valid {
 			require.False(t, it.Valid())
 			continue
@@ -239,7 +238,7 @@ func TestIterateFromEnd(t *testing.T) {
 			ti := table.NewIterator(0)
 			defer ti.Close()
 			ti.reset()
-			ti.seek(y.KeyWithTs([]byte("zzzzzz"), types.CustomTs{})) // Seek to end, an invalid element.
+			ti.seek(y.KeyWithTs([]byte("zzzzzz"), 0)) // Seek to end, an invalid element.
 			require.False(t, ti.Valid())
 			for i := n - 1; i >= 0; i-- {
 				ti.prev()
@@ -261,7 +260,7 @@ func TestTable(t *testing.T) {
 	ti := table.NewIterator(0)
 	defer ti.Close()
 	kid := 1010
-	seek := y.KeyWithTs([]byte(key("key", kid)), types.CustomTs{})
+	seek := y.KeyWithTs([]byte(key("key", kid)), 0)
 	for ti.seek(seek); ti.Valid(); ti.next() {
 		k := ti.Key()
 		require.EqualValues(t, string(y.ParseKey(k)), key("key", kid))
@@ -271,10 +270,10 @@ func TestTable(t *testing.T) {
 		t.Errorf("Expected kid: 10000. Got: %v", kid)
 	}
 
-	ti.seek(y.KeyWithTs([]byte(key("key", 99999)), types.CustomTs{}))
+	ti.seek(y.KeyWithTs([]byte(key("key", 99999)), 0))
 	require.False(t, ti.Valid())
 
-	ti.seek(y.KeyWithTs([]byte(key("key", -1)), types.CustomTs{}))
+	ti.seek(y.KeyWithTs([]byte(key("key", -1)), 0))
 	require.True(t, ti.Valid())
 	k := ti.Key()
 	require.EqualValues(t, string(y.ParseKey(k)), key("key", 0))
@@ -285,7 +284,7 @@ func TestIterateBackAndForth(t *testing.T) {
 	table := buildTestTable(t, "key", 10000, opts)
 	defer func() { require.NoError(t, table.DecrRef()) }()
 
-	seek := y.KeyWithTs([]byte(key("key", 1010)), types.CustomTs{})
+	seek := y.KeyWithTs([]byte(key("key", 1010)), 0)
 	it := table.NewIterator(0)
 	defer it.Close()
 	it.seek(seek)
@@ -305,7 +304,7 @@ func TestIterateBackAndForth(t *testing.T) {
 	k = it.Key()
 	require.EqualValues(t, key("key", 1010), y.ParseKey(k))
 
-	it.seek(y.KeyWithTs([]byte(key("key", 2000)), types.CustomTs{}))
+	it.seek(y.KeyWithTs([]byte(key("key", 2000)), 0))
 	require.True(t, it.Valid())
 	k = it.Key()
 	require.EqualValues(t, key("key", 2000), y.ParseKey(k))
@@ -394,22 +393,22 @@ func TestConcatIterator(t *testing.T) {
 		}
 		require.EqualValues(t, 30000, count)
 
-		it.Seek(y.KeyWithTs([]byte("a"), types.CustomTs{}))
+		it.Seek(y.KeyWithTs([]byte("a"), 0))
 		require.EqualValues(t, "keya0000", string(y.ParseKey(it.Key())))
 		vs := it.Value()
 		require.EqualValues(t, "0", string(vs.Value))
 
-		it.Seek(y.KeyWithTs([]byte("keyb"), types.CustomTs{}))
+		it.Seek(y.KeyWithTs([]byte("keyb"), 0))
 		require.EqualValues(t, "keyb0000", string(y.ParseKey(it.Key())))
 		vs = it.Value()
 		require.EqualValues(t, "0", string(vs.Value))
 
-		it.Seek(y.KeyWithTs([]byte("keyb9999b"), types.CustomTs{}))
+		it.Seek(y.KeyWithTs([]byte("keyb9999b"), 0))
 		require.EqualValues(t, "keyc0000", string(y.ParseKey(it.Key())))
 		vs = it.Value()
 		require.EqualValues(t, "0", string(vs.Value))
 
-		it.Seek(y.KeyWithTs([]byte("keyd"), types.CustomTs{}))
+		it.Seek(y.KeyWithTs([]byte("keyd"), 0))
 		require.False(t, it.Valid())
 	}
 	{
@@ -426,20 +425,20 @@ func TestConcatIterator(t *testing.T) {
 		}
 		require.EqualValues(t, 30000, count)
 
-		it.Seek(y.KeyWithTs([]byte("a"), types.CustomTs{}))
+		it.Seek(y.KeyWithTs([]byte("a"), 0))
 		require.False(t, it.Valid())
 
-		it.Seek(y.KeyWithTs([]byte("keyb"), types.CustomTs{}))
+		it.Seek(y.KeyWithTs([]byte("keyb"), 0))
 		require.EqualValues(t, "keya9999", string(y.ParseKey(it.Key())))
 		vs := it.Value()
 		require.EqualValues(t, "9999", string(vs.Value))
 
-		it.Seek(y.KeyWithTs([]byte("keyb9999b"), types.CustomTs{}))
+		it.Seek(y.KeyWithTs([]byte("keyb9999b"), 0))
 		require.EqualValues(t, "keyb9999", string(y.ParseKey(it.Key())))
 		vs = it.Value()
 		require.EqualValues(t, "9999", string(vs.Value))
 
-		it.Seek(y.KeyWithTs([]byte("keyd"), types.CustomTs{}))
+		it.Seek(y.KeyWithTs([]byte("keyd"), 0))
 		require.EqualValues(t, "keyc9999", string(y.ParseKey(it.Key())))
 		vs = it.Value()
 		require.EqualValues(t, "9999", string(vs.Value))
@@ -640,7 +639,7 @@ func TestTableBigValues(t *testing.T) {
 	builder := NewTableBuilder(opts)
 	defer builder.Close()
 	for i := 0; i < n; i++ {
-		key := y.KeyWithTs([]byte(key("", i)), types.CustomTs{AssignedTs: uint32(i+1)})
+		key := y.KeyWithTs([]byte(key("", i)), uint64(i+1))
 		vs := y.ValueStruct{Value: value(i)}
 		builder.Add(key, vs, 0)
 	}
@@ -661,7 +660,7 @@ func TestTableBigValues(t *testing.T) {
 	}
 	require.False(t, itr.Valid(), "table iterator should be invalid now")
 	require.Equal(t, n, count)
-	require.Equal(t, uint32(n), tbl.MaxVersion().AssignedTs)
+	require.Equal(t, n, int(tbl.MaxVersion()))
 }
 
 // This test is for verifying checksum failure during table open.
@@ -891,9 +890,9 @@ func TestMaxVersion(t *testing.T) {
 	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
 	N := 1000
 	for i := 0; i < N; i++ {
-		b.Add(y.KeyWithTs([]byte(fmt.Sprintf("foo:%d", i)), types.CustomTs{AssignedTs: uint32(i+1)}), y.ValueStruct{}, 0)
+		b.Add(y.KeyWithTs([]byte(fmt.Sprintf("foo:%d", i)), uint64(i+1)), y.ValueStruct{}, 0)
 	}
 	table, err := CreateTable(filename, b)
 	require.NoError(t, err)
-	require.Equal(t, uint32(N), table.MaxVersion().AssignedTs)
+	require.Equal(t, N, int(table.MaxVersion()))
 }

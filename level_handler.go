@@ -21,9 +21,9 @@ type levelHandler struct {
 	// For level >= 1, tables are sorted by key ranges, which do not overlap.
 	// For level 0, tables are sorted by time.
 	// For level 0, newest table are at the back. Compact the oldest one first, which is at the front.
-	tables            []*table.Table
-	totalSize         int64
-	totalStaleSize    int64
+	tables         []*table.Table
+	totalSize      int64
+	totalStaleSize int64
 	partitionedTables map[int][]*table.Table // pid → SSTables
 
 	// The following are initialized once and const.
@@ -173,21 +173,21 @@ func decrRefs(tables []*table.Table) error {
 
 func newLevelHandler(db *DB, level int) *levelHandler {
 	lh := &levelHandler{
-		level:    level,
-		strLevel: fmt.Sprintf("l%d", level),
-		db:       db,
-	}
+        level:    level,
+        strLevel: fmt.Sprintf("l%d", level),
+        db:       db,
+    }
 
-	if db.opt.PartitionFanOut > 0 {
-		// Compute how many partitions this level has: fanOut^(level+1)
-		parts := 1
-		for i := 0; i < level+1; i++ {
-			parts *= db.opt.PartitionFanOut
-		}
-		lh.partitionedTables = make(map[int][]*table.Table, parts)
-	}
+    if db.opt.PartitionFanOut > 0 {
+        // Compute how many partitions this level has: fanOut^(level+1)
+        parts := 1
+        for i := 0; i < level+1; i++ {
+            parts *= db.opt.PartitionFanOut
+        }
+        lh.partitionedTables = make(map[int][]*table.Table, parts)
+    }
 
-	return lh
+    return lh
 }
 
 // tryAddLevel0Table returns true if ok and no stalling.
@@ -277,8 +277,8 @@ func (s *levelHandler) getTableForKey(key []byte) ([]*table.Table, func() error)
 func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 	tables, decr := s.getTableForKey(key)
 	keyNoTs := y.ParseKey(key)
-	hash := y.Hash(keyNoTs)
 
+	hash := y.Hash(keyNoTs)
 	var maxVs y.ValueStruct
 	for _, th := range tables {
 		if th.DoesNotHave(hash) {
@@ -295,7 +295,7 @@ func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 			continue
 		}
 		if y.SameKey(key, it.Key()) {
-			if version := y.ParseTs(it.Key()); maxVs.Version.Less(version) {
+			if version := y.ParseTs(it.Key()); maxVs.Version < version {
 				maxVs = it.ValueCopy()
 				maxVs.Version = version
 			}

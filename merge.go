@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -49,7 +48,7 @@ func (db *DB) GetMergeOperator(key []byte,
 
 var errNoMerge = stderrors.New("No need for merge")
 
-func (op *MergeOperator) iterateAndMerge() (newVal []byte, latest types.CustomTs, err error) {
+func (op *MergeOperator) iterateAndMerge() (newVal []byte, latest uint64, err error) {
 	txn := op.db.NewTransaction(false)
 	defer txn.Discard()
 	opt := DefaultIteratorOptions
@@ -68,7 +67,7 @@ func (op *MergeOperator) iterateAndMerge() (newVal []byte, latest types.CustomTs
 			// This should be the newVal, considering this is the latest version.
 			newVal, err = item.ValueCopy(newVal)
 			if err != nil {
-				return nil, types.CustomTs{}, err
+				return nil, 0, err
 			}
 			latest = item.Version()
 		} else {
@@ -78,7 +77,7 @@ func (op *MergeOperator) iterateAndMerge() (newVal []byte, latest types.CustomTs
 				newVal = op.f(oldVal, newVal)
 				return nil
 			}); err != nil {
-				return nil, types.CustomTs{}, err
+				return nil, 0, err
 			}
 		}
 		if item.DiscardEarlierVersions() {

@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -23,7 +24,6 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -140,11 +140,11 @@ func writeRandom(db *badger.DB, num uint64) error {
 		if ttlPeriod != 0 {
 			e.WithTTL(ttlPeriod)
 		}
-		err := batch.SetEntryAt(e, types.CustomTs{AssignedTs: 1})
+		err := batch.SetEntryAt(e, 1)
 		for err == badger.ErrBlockedWrites {
 			time.Sleep(time.Second)
 			batch = db.NewManagedWriteBatch()
-			err = batch.SetEntryAt(e, types.CustomTs{AssignedTs: 1})
+			err = batch.SetEntryAt(e, 1)
 		}
 		if err != nil {
 			panic(err)
@@ -207,7 +207,7 @@ func writeSorted(db *badger.DB, num uint64) error {
 			kv := &pb.KV{
 				Key:      key,
 				Value:    value,
-				Version:  types.CustomTs{AssignedTs: 1}.ToUint64(),
+				Version:  1,
 				StreamId: streamId,
 			}
 			badger.KVToBuffer(kv, kvBuf)
@@ -314,7 +314,7 @@ func showKeysStats(db *badger.DB) {
 		validKeyCount    uint32
 	)
 
-	txn := db.NewTransactionAt(types.MaxTs, false)
+	txn := db.NewTransactionAt(math.MaxUint64, false)
 	defer txn.Discard()
 
 	iopt := badger.DefaultIteratorOptions

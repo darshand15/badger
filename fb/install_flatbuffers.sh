@@ -41,9 +41,9 @@ install_linux() {
 	rm -rf "${BUILD_DIR}"
 }
 
-SYSTEM=$(uname -s | tr '[:upper:]' '[:lower:]')
+SYSTEM=$(uname -s)
 
-case ${SYSTEM} in
+case ${SYSTEM,,} in
 linux)
 	sudo bash -c "$(declare -f install_linux); install_linux"
 	;;

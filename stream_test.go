@@ -8,6 +8,7 @@ package badger
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -17,7 +18,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	bpb "github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -68,15 +68,15 @@ func TestStream(t *testing.T) {
 
 	var count int
 	for _, prefix := range []string{"p0", "p1", "p2"} {
-		txn := db.NewTransactionAt(types.MaxTs, true)
+		txn := db.NewTransactionAt(math.MaxUint64, true)
 		for i := 1; i <= 100; i++ {
 			require.NoError(t, txn.SetEntry(NewEntry(keyWithPrefix(prefix, i), value(i))))
 			count++
 		}
-		require.NoError(t, txn.CommitAt(types.CustomTs{AssignedTs: 5}, nil))
+		require.NoError(t, txn.CommitAt(5, nil))
 	}
 
-	stream := db.NewStreamAt(types.MaxTs)
+	stream := db.NewStreamAt(math.MaxUint64)
 	stream.LogPrefix = "Testing"
 	c := &collector{}
 	stream.Send = c.Send
@@ -182,7 +182,7 @@ func TestStreamMaxSize(t *testing.T) {
 	require.NoError(t, err)
 
 	var count int
-	wb := db.NewWriteBatchAt(types.CustomTs{AssignedTs: 5})
+	wb := db.NewWriteBatchAt(5)
 	for _, prefix := range []string{"p0", "p1", "p2"} {
 		for i := 1; i <= testSize; i++ {
 			require.NoError(t, wb.SetEntry(NewEntry(keyWithPrefix(prefix, i), value(i))))
@@ -191,7 +191,7 @@ func TestStreamMaxSize(t *testing.T) {
 	}
 	require.NoError(t, wb.Flush())
 
-	stream := db.NewStreamAt(types.MaxTs)
+	stream := db.NewStreamAt(math.MaxUint64)
 	stream.LogPrefix = "Testing"
 	c := &collector{}
 	stream.Send = c.Send
@@ -231,15 +231,15 @@ func TestStreamWithThreadId(t *testing.T) {
 
 	var count int
 	for _, prefix := range []string{"p0", "p1", "p2"} {
-		txn := db.NewTransactionAt(types.MaxTs, true)
+		txn := db.NewTransactionAt(math.MaxUint64, true)
 		for i := 1; i <= 100; i++ {
 			require.NoError(t, txn.SetEntry(NewEntry(keyWithPrefix(prefix, i), value(i))))
 			count++
 		}
-		require.NoError(t, txn.CommitAt(types.CustomTs{AssignedTs: 5}, nil))
+		require.NoError(t, txn.CommitAt(5, nil))
 	}
 
-	stream := db.NewStreamAt(types.MaxTs)
+	stream := db.NewStreamAt(math.MaxUint64)
 	stream.LogPrefix = "Testing"
 	stream.KeyToList = func(key []byte, itr *Iterator) (
 		*bpb.KVList, error) {
@@ -289,7 +289,7 @@ func TestBigStream(t *testing.T) {
 	require.NoError(t, err)
 
 	var count int
-	wb := db.NewWriteBatchAt(types.CustomTs{AssignedTs: 5})
+	wb := db.NewWriteBatchAt(5)
 	for _, prefix := range []string{"p0", "p1", "p2"} {
 		for i := 1; i <= testSize; i++ {
 			require.NoError(t, wb.SetEntry(NewEntry(keyWithPrefix(prefix, i), value(i))))
@@ -298,7 +298,7 @@ func TestBigStream(t *testing.T) {
 	}
 	require.NoError(t, wb.Flush())
 
-	stream := db.NewStreamAt(types.MaxTs)
+	stream := db.NewStreamAt(math.MaxUint64)
 	stream.LogPrefix = "Testing"
 	c := &collector{}
 	stream.Send = c.Send
@@ -335,14 +335,14 @@ func TestStreamCustomKeyToList(t *testing.T) {
 	var count int
 	for _, key := range []string{"p0", "p1", "p2"} {
 		for i := 1; i <= 100; i++ {
-			txn := db.NewTransactionAt(types.MaxTs, true)
+			txn := db.NewTransactionAt(math.MaxUint64, true)
 			require.NoError(t, txn.SetEntry(NewEntry([]byte(key), value(i))))
 			count++
-			require.NoError(t, txn.CommitAt(types.CustomTs{AssignedTs: uint32(i)}, nil))
+			require.NoError(t, txn.CommitAt(uint64(i), nil))
 		}
 	}
 
-	stream := db.NewStreamAt(types.MaxTs)
+	stream := db.NewStreamAt(math.MaxUint64)
 	stream.LogPrefix = "Testing"
 	stream.KeyToList = func(key []byte, itr *Iterator) (*bpb.KVList, error) {
 		item := itr.Item()

@@ -60,16 +60,6 @@ var (
 	numCompactionTables *expvar.Int
 	// Total writes by a user in bytes
 	numBytesWrittenUser *expvar.Int
-
-	// LOCK-FREE CAS METRICS
-	// numCASSuccesses is the number of successful CAS root-prepend operations.
-	numCASSuccesses *expvar.Int
-	// numCASRetries is the number of failed CAS attempts that had to spin and retry.
-	// High retry/success ratio indicates root-pointer cache-line contention.
-	numCASRetries *expvar.Int
-	// numRootListLength tracks the current length of the lock-free prepend list.
-	// Growing length indicates the drain goroutine is falling behind writers.
-	numRootListLength *expvar.Int
 )
 
 // These variables are global and have cumulative values for all kv stores.
@@ -103,11 +93,6 @@ func init() {
 
 	pendingWrites = expvar.NewMap(BADGER_METRIC_PREFIX + "write_pending_num_memtable")
 	numCompactionTables = expvar.NewInt(BADGER_METRIC_PREFIX + "compaction_current_num_lsm")
-
-	// Lock-free CAS metrics
-	numCASSuccesses = expvar.NewInt(BADGER_METRIC_PREFIX + "lockfree_cas_successes_total")
-	numCASRetries = expvar.NewInt(BADGER_METRIC_PREFIX + "lockfree_cas_retries_total")
-	numRootListLength = expvar.NewInt(BADGER_METRIC_PREFIX + "lockfree_root_list_length")
 }
 
 func NumIteratorsCreatedAdd(enabled bool, val int64) {
@@ -184,30 +169,6 @@ func NumLSMBloomHitsAdd(enabled bool, key string, val int64) {
 
 func NumLSMGetsAdd(enabled bool, key string, val int64) {
 	addToMap(enabled, numLSMGets, key, val)
-}
-
-// NumCASSuccessesAdd increments the count of successful lock-free CAS prepends.
-func NumCASSuccessesAdd(val int64) {
-	numCASSuccesses.Add(val)
-}
-
-// NumCASRetriesAdd increments the count of failed CAS attempts (spin retries).
-func NumCASRetriesAdd(val int64) {
-	numCASRetries.Add(val)
-}
-
-// NumRootListLengthSet sets the current length of the lock-free prepend list.
-func NumRootListLengthSet(val int64) {
-	numRootListLength.Set(val)
-}
-
-// NumCASContention returns retries/successes — > 2.0 means significant contention.
-func NumCASContention() float64 {
-	s := numCASSuccesses.Value()
-	if s == 0 {
-		return 0
-	}
-	return float64(numCASRetries.Value()) / float64(s)
 }
 
 func LSMSizeGet(enabled bool, key string) expvar.Var {

@@ -19,7 +19,6 @@ import (
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/badger/v4/table"
-	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 )
 
@@ -35,7 +34,7 @@ func createAndOpen(db *DB, td []keyValVersion, level int) {
 
 	// Add all keys and versions to the table.
 	for _, item := range td {
-		key := y.KeyWithTs([]byte(item.key), types.CustomTs{AssignedTs: uint32(item.version)})
+		key := y.KeyWithTs([]byte(item.key), uint64(item.version))
 		val := y.ValueStruct{Value: []byte(item.val), Meta: item.meta}
 		b.Add(key, val, 0)
 	}
@@ -58,7 +57,7 @@ func createAndOpen(db *DB, td []keyValVersion, level int) {
 type keyValVersion struct {
 	key     string
 	val     string
-	version uint32
+	version int
 	meta    byte
 }
 
@@ -139,7 +138,7 @@ func getAllAndCheck(t *testing.T, db *DB, expected []keyValVersion) {
 				expect.key, item.Key())
 			require.Equal(t, expect.val, string(v), "key: %s expected value: %s actual %s",
 				item.key, expect.val, v)
-			require.Equal(t, expect.version, item.Version().AssignedTs,
+			require.Equal(t, expect.version, int(item.Version()),
 				"key: %s expected version: %d actual %d", item.key, expect.version, item.Version())
 			require.Equal(t, expect.meta, item.meta,
 				"key: %s expected meta: %d meta %d", item.key, expect.meta, item.meta)
@@ -166,7 +165,7 @@ func TestCompaction(t *testing.T) {
 			createAndOpen(db, l1, 1)
 
 			// Set a high discard timestamp so that all the keys are below the discard timestamp.
-			db.SetDiscardTs(types.CustomTs{AssignedTs: 10})
+			db.SetDiscardTs(10)
 
 			getAllAndCheck(t, db, []keyValVersion{
 				{"foo", "bar", 3, 0}, {"foo", "bar", 2, 0},
@@ -198,7 +197,7 @@ func TestCompaction(t *testing.T) {
 			createAndOpen(db, l1, 1)
 
 			// Set a high discard timestamp so that all the keys are below the discard timestamp.
-			db.SetDiscardTs(types.CustomTs{AssignedTs: 10})
+			db.SetDiscardTs(10)
 
 			getAllAndCheck(t, db, []keyValVersion{
 				{"foo", "bar", 4, 0}, {"foo", "barNew", 3, 0},
@@ -233,7 +232,7 @@ func TestCompaction(t *testing.T) {
 			createAndOpen(db, l2, 2)
 
 			// Set a high discard timestamp so that all the keys are below the discard timestamp.
-			db.SetDiscardTs(types.CustomTs{AssignedTs: 10})
+			db.SetDiscardTs(10)
 
 			getAllAndCheck(t, db, []keyValVersion{
 				{"foo", "bar", 4, 0}, {"foo", "bar", 3, 0}, {"foo", "bar", 2, 0},
@@ -263,7 +262,7 @@ func TestCompaction(t *testing.T) {
 			createAndOpen(db, l2, 2)
 
 			// Set a high discard timestamp so that all the keys are below the discard timestamp.
-			db.SetDiscardTs(types.CustomTs{AssignedTs: 10})
+			db.SetDiscardTs(10)
 
 			getAllAndCheck(t, db, []keyValVersion{
 				{"foo", "bar", 3, 0}, {"foo", "bar", 2, 0}, {"fooz", "baz", 1, 0},
@@ -293,7 +292,7 @@ func TestCompaction(t *testing.T) {
 				createAndOpen(db, l3, 3)
 
 				// Set a high discard timestamp so that all the keys are below the discard timestamp.
-				db.SetDiscardTs(types.CustomTs{AssignedTs: 10})
+				db.SetDiscardTs(10)
 
 				getAllAndCheck(t, db, []keyValVersion{
 					{"foo", "bar", 3, 1},
@@ -344,7 +343,7 @@ func TestCompaction(t *testing.T) {
 				createAndOpen(db, l3, 3)
 
 				// Set a high discard timestamp so that all the keys are below the discard timestamp.
-				db.SetDiscardTs(types.CustomTs{AssignedTs: 10})
+				db.SetDiscardTs(10)
 
 				getAllAndCheck(t, db, []keyValVersion{
 					{"foo", "bar", 3, bitDelete},
@@ -378,7 +377,7 @@ func TestCompaction(t *testing.T) {
 				createAndOpen(db, l2, 2)
 
 				// Set a high discard timestamp so that all the keys are below the discard timestamp.
-				db.SetDiscardTs(types.CustomTs{AssignedTs: 10})
+				db.SetDiscardTs(10)
 
 				getAllAndCheck(t, db, []keyValVersion{
 					{"foo", "bar", 3, 1}, {"fooo", "barr", 2, 0}, {"fooz", "baz", 1, 1},
@@ -412,7 +411,7 @@ func TestCompaction(t *testing.T) {
 				createAndOpen(db, l3, 3)
 
 				// Set a high discard timestamp so that all the keys are below the discard timestamp.
-				db.SetDiscardTs(types.CustomTs{AssignedTs: 10})
+				db.SetDiscardTs(10)
 
 				getAllAndCheck(t, db, []keyValVersion{
 					{"A", "bar", 2, 0},
@@ -456,7 +455,7 @@ func TestCompactionTwoVersions(t *testing.T) {
 			createAndOpen(db, l3, 3)
 
 			// Set a high discard timestamp so that all the keys are below the discard timestamp.
-			db.SetDiscardTs(types.CustomTs{AssignedTs: 10})
+			db.SetDiscardTs(10)
 
 			getAllAndCheck(t, db, []keyValVersion{
 				{"foo", "bar", 3, 0},
@@ -513,7 +512,7 @@ func TestCompactionAllVersions(t *testing.T) {
 			createAndOpen(db, l3, 3)
 
 			// Set a high discard timestamp so that all the keys are below the discard timestamp.
-			db.SetDiscardTs(types.CustomTs{AssignedTs: 10})
+			db.SetDiscardTs(10)
 
 			getAllAndCheck(t, db, []keyValVersion{
 				{"foo", "bar", 3, 0},
@@ -563,7 +562,7 @@ func TestCompactionAllVersions(t *testing.T) {
 			createAndOpen(db, l2, 2)
 
 			// Set a high discard timestamp so that all the keys are below the discard timestamp.
-			db.SetDiscardTs(types.CustomTs{AssignedTs: 10})
+			db.SetDiscardTs(10)
 
 			getAllAndCheck(t, db, []keyValVersion{
 				{"foo", "bar", 3, 1}, {"fooo", "barr", 2, 0}, {"fooz", "baz", 1, 1},
@@ -600,7 +599,7 @@ func TestDiscardTs(t *testing.T) {
 			createAndOpen(db, l1, 1)
 
 			// Set dicardTs to 1. All the keys are above discardTs.
-			db.SetDiscardTs(types.CustomTs{AssignedTs: 1})
+			db.SetDiscardTs(1)
 
 			getAllAndCheck(t, db, []keyValVersion{
 				{"foo", "bar", 4, 0}, {"foo", "bar", 3, 0},
@@ -633,7 +632,7 @@ func TestDiscardTs(t *testing.T) {
 			createAndOpen(db, l1, 1)
 
 			// Set dicardTs to 3. foo2 and foo1 should be dropped.
-			db.SetDiscardTs(types.CustomTs{AssignedTs: 3})
+			db.SetDiscardTs(3)
 
 			getAllAndCheck(t, db, []keyValVersion{
 				{"foo", "bar", 4, 0}, {"foo", "bar", 3, 0}, {"foo", "bar", 2, 0},
@@ -666,7 +665,7 @@ func TestDiscardTs(t *testing.T) {
 			createAndOpen(db, l1, 1)
 
 			// Set dicardTs to 10. All the keys are below discardTs.
-			db.SetDiscardTs(types.CustomTs{AssignedTs: 10})
+			db.SetDiscardTs(10)
 
 			getAllAndCheck(t, db, []keyValVersion{
 				{"foo", "bar", 4, 0}, {"foo", "bar", 3, 0},
@@ -712,7 +711,7 @@ func TestDiscardFirstVersion(t *testing.T) {
 		createAndOpen(db, l05, 0)
 
 		// Discard Time stamp is set to 7.
-		db.SetDiscardTs(types.CustomTs{AssignedTs: 7})
+		db.SetDiscardTs(7)
 
 		// Compact L0 to L1
 		cdef := compactDef{
@@ -801,7 +800,7 @@ func createEmptyTable(db *DB) *table.Table {
 	b := table.NewTableBuilder(opts)
 	defer b.Close()
 	// Add one key so that we can open this table.
-	b.Add(y.KeyWithTs([]byte("foo"), types.CustomTs{AssignedTs: 1}), y.ValueStruct{}, 0)
+	b.Add(y.KeyWithTs([]byte("foo"), 1), y.ValueStruct{}, 0)
 
 	// Open table in memory to avoid adding changes to manifest file.
 	tab, err := table.OpenInMemoryTable(b.Finish(), db.lc.reserveFileID(), &opts)
@@ -882,7 +881,7 @@ func TestLevelGet(t *testing.T) {
 			createLevel(db, level, data)
 		}
 		for _, item := range ti.expect {
-			key := y.KeyWithTs([]byte(item.key), types.CustomTs{AssignedTs: uint32(item.version)})
+			key := y.KeyWithTs([]byte(item.key), uint64(item.version))
 			vs, err := db.get(key)
 			require.NoError(t, err)
 			require.Equal(t, item.val, string(vs.Value), "key:%s ver:%d", item.key, item.version)
@@ -983,7 +982,7 @@ func TestKeyVersions(t *testing.T) {
 					l0 = append(l0, keyValVersion{fmt.Sprintf("%05d", i), "foo", 1, 0})
 				}
 				createAndOpen(db, l0, 0)
-				require.Equal(t, 9, len(db.Ranges(nil, 10000)))
+				require.Equal(t, 8, len(db.Ranges(nil, 10000)))
 			})
 		})
 		t.Run("large table", func(t *testing.T) {
@@ -993,7 +992,7 @@ func TestKeyVersions(t *testing.T) {
 					l0 = append(l0, keyValVersion{fmt.Sprintf("%05d", i), "foo", 1, 0})
 				}
 				createAndOpen(db, l0, 0)
-				require.Equal(t, 37, len(db.Ranges(nil, 10000)))
+				require.Equal(t, 62, len(db.Ranges(nil, 10000)))
 			})
 		})
 		t.Run("prefix", func(t *testing.T) {
@@ -1084,7 +1083,7 @@ func TestSameLevel(t *testing.T) {
 		}
 		cdef.t.baseLevel = 1
 		// Set dicardTs to 3. foo2 and foo1 should be dropped.
-		db.SetDiscardTs(types.CustomTs{AssignedTs: 3})
+		db.SetDiscardTs(3)
 		require.NoError(t, db.lc.runCompactDef(-1, 6, cdef))
 		getAllAndCheck(t, db, []keyValVersion{
 			{"A", "bar", 4, bitDiscardEarlierVersions}, {"A", "bar", 3, 0},
@@ -1097,7 +1096,7 @@ func TestSameLevel(t *testing.T) {
 
 		require.NoError(t, db.lc.validate())
 		// Set dicardTs to 7.
-		db.SetDiscardTs(types.CustomTs{AssignedTs: 7})
+		db.SetDiscardTs(7)
 		cdef = compactDef{
 			thisLevel: db.lc.levels[6],
 			nextLevel: db.lc.levels[6],
@@ -1131,8 +1130,8 @@ func TestTableContainsPrefix(t *testing.T) {
 			return keys[i] < keys[j]
 		})
 		for _, k := range keys {
-			b.Add(y.KeyWithTs([]byte(k), types.CustomTs{AssignedTs: 1}), y.ValueStruct{Value: v}, 0)
-			b.Add(y.KeyWithTs([]byte(k), types.CustomTs{AssignedTs: 2}), y.ValueStruct{Value: v}, 0)
+			b.Add(y.KeyWithTs([]byte(k), 1), y.ValueStruct{Value: v}, 0)
+			b.Add(y.KeyWithTs([]byte(k), 2), y.ValueStruct{Value: v}, 0)
 		}
 		tbl, err := table.CreateTable(filename, b)
 		require.NoError(t, err)
@@ -1181,7 +1180,7 @@ func TestFillTableCleanup(t *testing.T) {
 				if i == 0 {
 					meta = bitDiscardEarlierVersions
 				}
-				b.AddStaleKey(y.KeyWithTs(key, types.CustomTs{AssignedTs: uint32(i)}), y.ValueStruct{Meta: meta, Value: val}, 0)
+				b.AddStaleKey(y.KeyWithTs(key, i), y.ValueStruct{Meta: meta, Value: val}, 0)
 			}
 			tbl, err := table.CreateTable(filename, b)
 			require.NoError(t, err)
@@ -1208,7 +1207,7 @@ func TestFillTableCleanup(t *testing.T) {
 		buildLevel(level-1, 2)
 		buildLevel(level, 2)
 
-		db.SetDiscardTs(types.CustomTs{AssignedTs: 1 << 30})
+		db.SetDiscardTs(1 << 30)
 		// Modify the target file size so that we can compact all tables at once.
 		tt := db.lc.levelTargets()
 		tt.fileSz[6] = 1 << 30
@@ -1258,7 +1257,7 @@ func TestStaleDataCleanup(t *testing.T) {
 				if i == 0 {
 					meta = bitDiscardEarlierVersions
 				}
-				b.AddStaleKey(y.KeyWithTs(key, types.CustomTs{AssignedTs: uint32(i)}), y.ValueStruct{Meta: meta, Value: val}, 0)
+				b.AddStaleKey(y.KeyWithTs(key, i), y.ValueStruct{Meta: meta, Value: val}, 0)
 			}
 			tbl, err := table.CreateTable(filename, b)
 			require.NoError(t, err)
@@ -1280,7 +1279,7 @@ func TestStaleDataCleanup(t *testing.T) {
 
 		require.NotZero(t, lh.getTotalStaleSize())
 
-		db.SetDiscardTs(types.CustomTs{AssignedTs: 1 << 30})
+		db.SetDiscardTs(1 << 30)
 		// Modify the target file size so that we can compact all tables at once.
 		tt := db.lc.levelTargets()
 		tt.fileSz[6] = 1 << 30

@@ -17,7 +17,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -82,8 +81,8 @@ type Stream struct {
 	Send func(buf *z.Buffer) error
 
 	// Read data above the sinceTs. All keys with version =< sinceTs will be ignored.
-	SinceTs      types.CustomTs
-	readTs       types.CustomTs
+	SinceTs      uint64
+	readTs       uint64
 	db           *DB
 	rangeCh      chan keyRange
 	kvChan       chan *z.Buffer
@@ -125,7 +124,7 @@ func (st *Stream) ToList(key []byte, itr *Iterator) (*pb.KVList, error) {
 		}); err != nil {
 			return nil, err
 		}
-		kv.Version = item.Version().ToUint64()
+		kv.Version = item.Version()
 		kv.ExpiresAt = item.ExpiresAt()
 		kv.UserMeta = a.Copy([]byte{item.UserMeta()})
 
@@ -168,7 +167,7 @@ func (st *Stream) produceKVs(ctx context.Context, threadId int) error {
 	defer st.numProducers.Add(-1)
 
 	var txn *Txn
-	if st.readTs.Greater(types.CustomTs{}) {
+	if st.readTs > 0 {
 		txn = st.db.NewTransactionAt(st.readTs, false)
 	} else {
 		txn = st.db.NewTransaction(false)
@@ -464,7 +463,7 @@ func (db *DB) NewStream() *Stream {
 }
 
 // NewStreamAt creates a new Stream at a particular timestamp. Should only be used with managed DB.
-func (db *DB) NewStreamAt(readTs types.CustomTs) *Stream {
+func (db *DB) NewStreamAt(readTs uint64) *Stream {
 	if !db.opt.managedTxns {
 		panic("This API can only be called in managed mode.")
 	}

@@ -13,7 +13,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/dgraph-io/badger/v4/types"
 )
 
 var bo = struct {
@@ -65,7 +64,7 @@ func doBackup(cmd *cobra.Command, args []string) error {
 	}
 
 	bw := bufio.NewWriterSize(f, 64<<20)
-	if _, err = db.Backup(bw, types.CustomTs{}); err != nil {
+	if _, err = db.Backup(bw, 0); err != nil {
 		return err
 	}
 

@@ -21,7 +21,6 @@ import (
 	"github.com/dgraph-io/badger/v4/fb"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -76,8 +75,8 @@ type Builder struct {
 	lenOffsets    uint32
 	keyHashes     []uint32 // Used for building the bloomfilter.
 	opts          *Options
-	maxVersion    types.CustomTs
-	minVersion    types.CustomTs
+	maxVersion    uint64
+	minVersion    uint64
 	onDiskSize    uint32
 	staleDataSize int
 
@@ -122,9 +121,9 @@ func NewTableBuilder(opts Options) *Builder {
 		sz = maxAllocatorInitialSz
 	}
 	b := &Builder{
-		alloc:      opts.AllocPool.Get(sz, "TableBuilder"),
-		opts:       &opts,
-		minVersion: types.MaxTs,
+		alloc: opts.AllocPool.Get(sz, "TableBuilder"),
+		opts:  &opts,
+		minVersion: math.MaxUint64,
 	}
 	b.alloc.Tag = "Builder"
 	b.curBlock = &bblock{
@@ -213,13 +212,13 @@ func (b *Builder) addHelper(key []byte, v y.ValueStruct, vpLen uint32) {
 	b.keyHashes = append(b.keyHashes, y.Hash(y.ParseKey(key)))
 
 	// Update min/max version
-	version := y.ParseTs(key)
-	if version.Less(b.minVersion) {
-		b.minVersion = version
-	}
-	if version.Greater(b.maxVersion) {
-		b.maxVersion = version
-	}
+    version := y.ParseTs(key)
+    if version < b.minVersion {
+        b.minVersion = version
+    }
+    if version > b.maxVersion {
+        b.maxVersion = version
+    }
 
 	// diffKey stores the difference of key with baseKey.
 	var diffKey []byte
@@ -534,12 +533,6 @@ func (b *Builder) compressData(data []byte) ([]byte, error) {
 func (b *Builder) buildIndex(bloom []byte) ([]byte, uint32) {
 	builder := fbs.NewBuilder(3 << 20)
 
-	// maxVerOffset := fb.CreateCustomTs(builder,
-	// 	b.maxVersion.EpochID,
-	// 	b.maxVersion.BrokerID,
-	// 	b.maxVersion.AssignedTs,
-	// )
-
 	boList, dataSize := b.writeBlockOffsets(builder)
 	// Write block offset vector the the idxBuilder.
 	fb.TableIndexStartOffsetsVector(builder, len(boList))
@@ -555,14 +548,11 @@ func (b *Builder) buildIndex(bloom []byte) ([]byte, uint32) {
 	if len(bloom) > 0 {
 		bfoff = builder.CreateByteVector(bloom)
 	}
-
 	b.onDiskSize += dataSize
 	fb.TableIndexStart(builder)
 	fb.TableIndexAddOffsets(builder, boEnd)
 	fb.TableIndexAddBloomFilter(builder, bfoff)
-	fb.TableIndexAddMaxVersionEpoch(builder, b.maxVersion.EpochID)
-	fb.TableIndexAddMaxVersionBroker(builder, b.maxVersion.BrokerID)
-	fb.TableIndexAddMaxVersionAssignedTs(builder, b.maxVersion.AssignedTs)
+	fb.TableIndexAddMaxVersion(builder, b.maxVersion)
 	fb.TableIndexAddUncompressedSize(builder, b.uncompressedSize.Load())
 	fb.TableIndexAddKeyCount(builder, uint32(len(b.keyHashes)))
 	fb.TableIndexAddOnDiskSize(builder, b.onDiskSize)

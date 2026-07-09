@@ -17,7 +17,6 @@ import (
 	"github.com/dgraph-io/badger/v4/fb"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2"
 )
@@ -93,7 +92,7 @@ func TestTableIndex(t *testing.T) {
 			blockFirstKeys := make([][]byte, 0)
 			blockCount := 0
 			for i := 0; i < keysCount; i++ {
-				k := y.KeyWithTs([]byte(fmt.Sprintf("%016x", i)), types.CustomTs{AssignedTs: uint32(i+1)})
+				k := y.KeyWithTs([]byte(fmt.Sprintf("%016x", i)), uint64(i+1))
 				v := fmt.Sprintf("%d", i)
 				vs := y.ValueStruct{Value: []byte(v)}
 				if i == 0 { // This is first key for first block.
@@ -122,7 +121,7 @@ func TestTableIndex(t *testing.T) {
 				require.True(t, idx.Offsets(&bo, i))
 				require.Equal(t, blockFirstKeys[i], bo.KeyBytes())
 			}
-			require.Equal(t, uint32(keysCount), tbl.MaxVersion().AssignedTs)
+			require.Equal(t, keysCount, int(tbl.MaxVersion()))
 			tbl.Close(-1)
 			require.NoError(t, os.RemoveAll(filename))
 		})

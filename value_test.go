@@ -19,7 +19,6 @@ import (
 	humanize "github.com/dustin/go-humanize"
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 )
 
@@ -130,7 +129,7 @@ func TestValueGCManaged(t *testing.T) {
 	require.NoError(t, err)
 	defer removeDir(dir)
 
-	N := 2000
+	N := 10000
 
 	opt := getTestOptions(dir)
 	opt.ValueLogMaxEntries = uint32(N / 10)
@@ -143,15 +142,14 @@ func TestValueGCManaged(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	var ts types.CustomTs
-	newTs := func() types.CustomTs {
-		ts = ts.Incr()
+	var ts uint64
+	newTs := func() uint64 {
+		ts++
 		return ts
 	}
 
 	sz := 64 << 10
 	var wg sync.WaitGroup
-	const maxPendingCommits = 64
 	for i := 0; i < N; i++ {
 		v := make([]byte, sz)
 		rand.Read(v[:rand.Intn(sz)])
@@ -163,11 +161,7 @@ func TestValueGCManaged(t *testing.T) {
 			wg.Done()
 			require.NoError(t, err)
 		}))
-		if (i+1)%maxPendingCommits == 0 {
-			wg.Wait()
-		}
 	}
-	wg.Wait()
 
 	for i := 0; i < N; i++ {
 		wg.Add(1)
@@ -177,9 +171,6 @@ func TestValueGCManaged(t *testing.T) {
 			wg.Done()
 			require.NoError(t, err)
 		}))
-		if (i+1)%maxPendingCommits == 0 {
-			wg.Wait()
-		}
 	}
 	wg.Wait()
 	entries, err := os.ReadDir(dir)
@@ -190,7 +181,7 @@ func TestValueGCManaged(t *testing.T) {
 		t.Logf("File: %s. Size: %s\n", fi.Name(), humanize.IBytes(uint64(fi.Size())))
 	}
 
-	db.SetDiscardTs(types.MaxTs)
+	db.SetDiscardTs(math.MaxUint32)
 	require.NoError(t, db.Flatten(3))
 
 	for i := 0; i < 100; i++ {
@@ -502,11 +493,11 @@ func TestPersistLFDiscardStats(t *testing.T) {
 	capturedDiscardStats := make(map[uint64]uint64)
 	db.onCloseDiscardCapture = capturedDiscardStats
 
-	sz := 32 << 10 // enough to create value log discard stats without overloading -race.
+	sz := 128 << 10 // 5 entries per value log file.
 	v := make([]byte, sz)
 	rand.Read(v[:rand.Intn(sz)])
 	txn := db.NewTransaction(true)
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 500; i++ {
 		require.NoError(t, txn.SetEntry(NewEntry([]byte(fmt.Sprintf("key%d", i)), v)))
 		if i%3 == 0 {
 			require.NoError(t, txn.Commit())
@@ -515,7 +506,7 @@ func TestPersistLFDiscardStats(t *testing.T) {
 	}
 	require.NoError(t, txn.Commit(), "error while committing txn")
 
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 500; i++ {
 		// use Entry.WithDiscard() to delete entries, because this causes data to be flushed on
 		// disk, creating SSTs. Simple Delete was having data in Memtables only.
 		err = db.Update(func(txn *Txn) error {
@@ -523,11 +514,9 @@ func TestPersistLFDiscardStats(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
-	fids := db.vlog.sortedFids()
-	require.Greater(t, len(fids), 1, "test should create multiple value log files")
-	for _, fid := range fids[:len(fids)-1] {
-		db.vlog.discardStats.Update(fid, 1)
-	}
+
+	// Wait for invocation of updateDiscardStats at least once -- timeout after 60 seconds.
+	waitForMessage(tChan, updateDiscardStatsMsg, 1, 60, t)
 
 	db.vlog.discardStats.Lock()
 	require.True(t, db.vlog.discardStats.Len() > 1, "some discardStats should be generated")
@@ -540,6 +529,7 @@ func TestPersistLFDiscardStats(t *testing.T) {
 	db, err = Open(opt)
 	require.NoError(t, err)
 	defer db.Close()
+	waitForMessage(tChan, endVLogInitMsg, 1, 60, t)
 	db.vlog.discardStats.Lock()
 	statsMap := make(map[uint64]uint64)
 	db.vlog.discardStats.Iterate(func(fid, val uint64) {

@@ -9,12 +9,12 @@ import (
 	"bytes"
 	"fmt"
 	"hash/crc32"
+	"math"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/dgraph-io/badger/v4/table"
-	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -31,7 +31,7 @@ type Item struct {
 	key       []byte
 	vptr      []byte
 	val       []byte
-	version   types.CustomTs
+	version   uint64
 	expiresAt uint64
 
 	slice *y.Slice // Used only during prefetching.
@@ -66,7 +66,7 @@ func (item *Item) KeyCopy(dst []byte) []byte {
 }
 
 // Version returns the commit timestamp of the item.
-func (item *Item) Version() types.CustomTs {
+func (item *Item) Version() uint64 {
 	return item.version
 }
 
@@ -161,7 +161,7 @@ func (item *Item) yieldItemValue() ([]byte, func(), error) {
 			" Error: %v", key, item.version, item.meta, item.userMeta, err)
 		var txn *Txn
 		if db.opt.managedTxns {
-			txn = db.NewTransactionAt(types.MaxTs, false)
+			txn = db.NewTransactionAt(math.MaxUint64, false)
 		} else {
 			txn = db.NewTransaction(false)
 		}
@@ -315,9 +315,9 @@ type IteratorOptions struct {
 	// The following option is used to narrow down the SSTables that iterator
 	// picks up. If Prefix is specified, only tables which could have this
 	// prefix are picked based on their range of keys.
-	prefixIsKey bool           // If set, use the prefix for bloom filter lookup.
-	Prefix      []byte         // Only iterate over this given prefix.
-	SinceTs     types.CustomTs // Only read data that has version > SinceTs.
+	prefixIsKey bool   // If set, use the prefix for bloom filter lookup.
+	Prefix      []byte // Only iterate over this given prefix.
+	SinceTs     uint64 // Only read data that has version > SinceTs.
 }
 
 func (opt *IteratorOptions) compareToPrefix(key []byte) int {
@@ -331,7 +331,7 @@ func (opt *IteratorOptions) compareToPrefix(key []byte) int {
 
 func (opt *IteratorOptions) pickTable(t table.TableInterface) bool {
 	// Ignore this table if its max version is less than the sinceTs.
-	if t.MaxVersion().Less(opt.SinceTs) {
+	if t.MaxVersion() < opt.SinceTs {
 		return false
 	}
 	if len(opt.Prefix) == 0 {
@@ -355,10 +355,10 @@ func (opt *IteratorOptions) pickTable(t table.TableInterface) bool {
 // that the tables are sorted in the right order.
 func (opt *IteratorOptions) pickTables(all []*table.Table) []*table.Table {
 	filterTables := func(tables []*table.Table) []*table.Table {
-		if opt.SinceTs.Greater(types.CustomTs{}) {
+		if opt.SinceTs > 0 {
 			tmp := tables[:0]
 			for _, t := range tables {
-				if t.MaxVersion().Less(opt.SinceTs) {
+				if t.MaxVersion() < opt.SinceTs {
 					continue
 				}
 				tmp = append(tmp, t)
@@ -426,7 +426,7 @@ var DefaultIteratorOptions = IteratorOptions{
 type Iterator struct {
 	iitr   y.Iterator
 	txn    *Txn
-	readTs types.CustomTs
+	readTs uint64
 
 	opt   IteratorOptions
 	item  *Item
@@ -626,7 +626,7 @@ func (it *Iterator) parseItem() bool {
 	// Skip any versions which are beyond the readTs.
 	version := y.ParseTs(key)
 	// Ignore everything that is above the readTs and below or at the sinceTs.
-	if version.Greater(it.readTs) || (it.opt.SinceTs.Greater(types.CustomTs{}) && !version.Greater(it.opt.SinceTs)) {
+	if version > it.readTs || (it.opt.SinceTs > 0 && version <= it.opt.SinceTs) {
 		mi.Next()
 		return false
 	}
@@ -684,7 +684,7 @@ FILL:
 	// Reverse direction.
 	nextTs := y.ParseTs(mi.Key())
 	mik := y.ParseKey(mi.Key())
-	if !nextTs.Greater(it.readTs) && bytes.Equal(mik, item.key) {
+	if nextTs <= it.readTs && bytes.Equal(mik, item.key) {
 		// This is a valid potential candidate.
 		goto FILL
 	}
@@ -771,7 +771,7 @@ func (it *Iterator) Seek(key []byte) {
 	if !it.opt.Reverse {
 		key = y.KeyWithTs(key, it.txn.readTs)
 	} else {
-		key = y.KeyWithTs(key, types.CustomTs{})
+		key = y.KeyWithTs(key, 0)
 	}
 	it.iitr.Seek(key)
 	it.prefetch()

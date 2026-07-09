@@ -13,7 +13,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -27,7 +26,7 @@ type WriteBatch struct {
 	err      atomic.Value
 
 	isManaged bool
-	commitTs  types.CustomTs
+	commitTs  uint64
 	finished  bool
 }
 
@@ -94,7 +93,7 @@ func (wb *WriteBatch) writeKV(kv *pb.KV) error {
 		e.UserMeta = kv.UserMeta[0]
 	}
 	y.AssertTrue(kv.Version != 0)
-	e.version = types.CustomTsFromUint64(kv.Version)
+	e.version = kv.Version
 	return wb.handleEntry(&e)
 }
 
@@ -125,7 +124,7 @@ func (wb *WriteBatch) WriteList(kvList *pb.KVList) error {
 
 // SetEntryAt is the equivalent of Txn.SetEntry but it also allows setting version for the entry.
 // SetEntryAt can be used only in managed mode.
-func (wb *WriteBatch) SetEntryAt(e *Entry, ts types.CustomTs) error {
+func (wb *WriteBatch) SetEntryAt(e *Entry, ts uint64) error {
 	if !wb.db.opt.managedTxns {
 		return errors.New("SetEntryAt can only be used in managed mode. Use SetEntry instead")
 	}
@@ -165,7 +164,7 @@ func (wb *WriteBatch) Set(k, v []byte) error {
 }
 
 // DeleteAt is equivalent of Txn.Delete but accepts a delete timestamp.
-func (wb *WriteBatch) DeleteAt(k []byte, ts types.CustomTs) error {
+func (wb *WriteBatch) DeleteAt(k []byte, ts uint64) error {
 	e := Entry{Key: k, meta: bitDelete, version: ts}
 	return wb.SetEntry(&e)
 }

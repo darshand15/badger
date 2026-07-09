@@ -10,7 +10,6 @@ import (
 	"crypto/aes"
 	"crypto/rand"
 	"encoding/binary"
-	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
@@ -295,7 +294,7 @@ func (kr *KeyRegistry) DataKey(id uint64) (*pb.DataKey, error) {
 	}
 	dk, ok := kr.dataKeys[id]
 	if !ok {
-		return nil, y.Wrap(ErrInvalidDataKeyID, "invalid data key ID")
+		return nil, y.Wrapf(ErrInvalidDataKeyID, "Error for the KEY ID %d", id)
 	}
 	return dk, nil
 }
@@ -396,11 +395,14 @@ func storeDataKey(buf *bytes.Buffer, storageKey []byte, k *pb.DataKey) error {
 	}
 	var data []byte
 	if data, err = proto.Marshal(k); err != nil {
-		// Attempt to revert encryption. If revert also fails, return a combined error message.
-		if err2 := xor(); err2 != nil {
-			return y.Wrap(err, fmt.Sprintf("Error while marshaling datakey in storeDataKey; failed to revert encryption: %v", err2))
+		err = y.Wrapf(err, "Error while marshaling datakey in storeDataKey")
+		var err2 error
+		// decrypting the datakey back.
+		if err2 = xor(); err2 != nil {
+			return y.Wrapf(err,
+				y.Wrapf(err2, "Error while decrypting datakey in storeDataKey").Error())
 		}
-		return y.Wrap(err, "Error while marshaling datakey in storeDataKey")
+		return err
 	}
 	var lenCrcBuf [8]byte
 	binary.BigEndian.PutUint32(lenCrcBuf[0:4], uint32(len(data)))

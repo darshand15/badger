@@ -770,50 +770,6 @@ func (vlog *valueLog) validateWrites(reqs []*request) error {
 	return nil
 }
 
-// vlogWritePool pools bytes.Buffer objects used during vlog writes to avoid
-// a heap allocation on every call to (valueLog).write.
-var vlogWritePool = sync.Pool{
-	New: func() interface{} { return new(bytes.Buffer) },
-}
-
-// writeEntryBuf copies the encoded entry in buf into curlf's mmap region.
-// Extracted from the write closure in (valueLog).write to avoid closure heap-escape.
-func (vlog *valueLog) writeEntryBuf(curlf *logFile, buf *bytes.Buffer) error {
-	if buf.Len() == 0 {
-		return nil
-	}
-	n := uint32(buf.Len())
-	endOffset := vlog.writableLogOffset.Add(n)
-	// Increase the file size if we cannot accommodate this entry.
-	if int(endOffset) >= len(curlf.Data) {
-		if err := curlf.Truncate(int64(endOffset)); err != nil {
-			return err
-		}
-	}
-	start := int(endOffset - n)
-	y.AssertTrue(copy(curlf.Data[start:], buf.Bytes()) == int(n))
-	curlf.size.Store(endOffset)
-	return nil
-}
-
-// maybeRotateVlog finalises the current log file if it is full and opens a new
-// one, returning the (possibly new) active log file.
-// Extracted from the toDisk closure in (valueLog).write to avoid closure heap-escape.
-func (vlog *valueLog) maybeRotateVlog(curlf *logFile) (*logFile, error) {
-	if vlog.woffset() > uint32(vlog.opt.ValueLogFileSize) ||
-		vlog.numEntriesWritten > vlog.opt.ValueLogMaxEntries {
-		if err := curlf.doneWriting(vlog.woffset()); err != nil {
-			return nil, err
-		}
-		newlf, err := vlog.createVlogFile()
-		if err != nil {
-			return nil, err
-		}
-		return newlf, nil
-	}
-	return curlf, nil
-}
-
 // estimateRequestSize returns the size that needed to be written for the given request.
 func estimateRequestSize(req *request) uint64 {
 	size := uint64(0)
@@ -839,30 +795,58 @@ func (vlog *valueLog) write(reqs []*request) error {
 	curlf := vlog.filesMap[maxFid]
 	vlog.filesLock.RUnlock()
 
-	// Only register the sync-on-exit defer when SyncWrites is enabled; this
-	// avoids allocating a closure object on every call in the common case.
-	if vlog.opt.SyncWrites {
-		defer func() {
+	defer func() {
+		if vlog.opt.SyncWrites {
 			if err := curlf.Sync(); err != nil {
 				vlog.opt.Errorf("Error while curlf sync: %v\n", err)
 			}
-		}()
+		}
+	}()
+
+	write := func(buf *bytes.Buffer) error {
+		if buf.Len() == 0 {
+			return nil
+		}
+
+		n := uint32(buf.Len())
+		endOffset := vlog.writableLogOffset.Add(n)
+		// Increase the file size if we cannot accommodate this entry.
+		// [Aman] Should this be >= or just >? Doesn't make sense to extend the file if it big enough already.
+		if int(endOffset) >= len(curlf.Data) {
+			if err := curlf.Truncate(int64(endOffset)); err != nil {
+				return err
+			}
+		}
+
+		start := int(endOffset - n)
+		y.AssertTrue(copy(curlf.Data[start:], buf.Bytes()) == int(n))
+
+		curlf.size.Store(endOffset)
+		return nil
 	}
 
-	// Pool the write buffer to avoid a heap allocation per call.
-	buf := vlogWritePool.Get().(*bytes.Buffer)
-	defer vlogWritePool.Put(buf)
+	toDisk := func() error {
+		if vlog.woffset() > uint32(vlog.opt.ValueLogFileSize) ||
+			vlog.numEntriesWritten > vlog.opt.ValueLogMaxEntries {
+			if err := curlf.doneWriting(vlog.woffset()); err != nil {
+				return err
+			}
 
-	// Reuse valueSizes slice across requests to avoid per-request allocation.
-	var valueSizes []int64
+			newlf, err := vlog.createVlogFile()
+			if err != nil {
+				return err
+			}
+			curlf = newlf
+		}
+		return nil
+	}
+
+	buf := new(bytes.Buffer)
 	for i := range reqs {
 		b := reqs[i]
 		b.Ptrs = b.Ptrs[:0]
 		var written, bytesWritten int
-		if cap(valueSizes) < len(b.Entries) {
-			valueSizes = make([]int64, 0, len(b.Entries))
-		}
-		valueSizes = valueSizes[:0]
+		valueSizes := make([]int64, 0, len(b.Entries))
 		for j := range b.Entries {
 			buf.Reset()
 
@@ -893,7 +877,7 @@ func (vlog *valueLog) write(reqs []*request) error {
 
 			p.Len = uint32(plen)
 			b.Ptrs = append(b.Ptrs, p)
-			if err := vlog.writeEntryBuf(curlf, buf); err != nil {
+			if err := write(buf); err != nil {
 				return err
 			}
 			written++
@@ -904,17 +888,14 @@ func (vlog *valueLog) write(reqs []*request) error {
 		y.NumBytesWrittenVlogAdd(vlog.opt.MetricsEnabled, int64(bytesWritten))
 
 		vlog.numEntriesWritten += uint32(written)
-		vlog.db.threshold.update(append([]int64(nil), valueSizes...))
+		vlog.db.threshold.update(valueSizes)
 		// We write to disk here so that all entries that are part of the same transaction are
 		// written to the same vlog file.
-		var err error
-		if curlf, err = vlog.maybeRotateVlog(curlf); err != nil {
+		if err := toDisk(); err != nil {
 			return err
 		}
 	}
-	var err error
-	curlf, err = vlog.maybeRotateVlog(curlf)
-	return err
+	return toDisk()
 }
 
 // Gets the logFile and acquires and RLock() for the mmap. You must call RUnlock on the file

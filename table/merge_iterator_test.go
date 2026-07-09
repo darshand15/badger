@@ -11,7 +11,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 )
 
@@ -45,7 +44,7 @@ func (s *SimpleIterator) Rewind() {
 }
 
 func (s *SimpleIterator) Seek(key []byte) {
-	key = y.KeyWithTs(key, types.CustomTs{})
+	key = y.KeyWithTs(key, 0)
 	if !s.reversed {
 		s.idx = sort.Search(len(s.keys), func(i int) bool {
 			return y.CompareKeys(s.keys[i], key) >= 0
@@ -77,7 +76,7 @@ func newSimpleIterator(keys []string, vals []string, reversed bool) *SimpleItera
 	v := make([][]byte, len(vals))
 	y.AssertTrue(len(keys) == len(vals))
 	for i := 0; i < len(keys); i++ {
-		k[i] = y.KeyWithTs([]byte(keys[i]), types.CustomTs{})
+		k[i] = y.KeyWithTs([]byte(keys[i]), 0)
 		v[i] = []byte(vals[i])
 	}
 	return &SimpleIterator{

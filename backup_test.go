@@ -19,7 +19,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/badger/v4/types"
 )
 
 func TestBackupRestore1(t *testing.T) {
@@ -34,10 +33,10 @@ func TestBackupRestore1(t *testing.T) {
 		key      []byte
 		val      []byte
 		userMeta byte
-		version  types.CustomTs
+		version  uint64
 	}{
-		{key: []byte("answer1"), val: []byte("42"), version: types.CustomTs{AssignedTs: 1}},
-		{key: []byte("answer2"), val: []byte("43"), userMeta: 1, version: types.CustomTs{AssignedTs: 2}},
+		{key: []byte("answer1"), val: []byte("42"), version: 1},
+		{key: []byte("answer2"), val: []byte("43"), userMeta: 1, version: 2},
 	}
 
 	err = db.Update(func(txn *Txn) error {
@@ -66,7 +65,7 @@ func TestBackupRestore1(t *testing.T) {
 	defer removeDir(dir)
 	bak, err := os.CreateTemp(dir, "badgerbak")
 	require.NoError(t, err)
-	_, err = db.Backup(bak, types.CustomTs{})
+	_, err = db.Backup(bak, 0)
 	require.NoError(t, err)
 	require.NoError(t, bak.Close())
 	require.NoError(t, db.Close())
@@ -103,7 +102,7 @@ func TestBackupRestore1(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	require.Equal(t, uint32(3), db.orc.nextTs().AssignedTs)
+	require.Equal(t, 3, int(db.orc.nextTs()))
 }
 
 func TestBackupRestore2(t *testing.T) {
@@ -143,7 +142,7 @@ func TestBackupRestore2(t *testing.T) {
 
 	}
 	var backup bytes.Buffer
-	_, err = db1.Backup(&backup, types.CustomTs{})
+	_, err = db1.Backup(&backup, 0)
 	require.NoError(t, err)
 
 	fmt.Println("backup1 length:", backup.Len())
@@ -193,7 +192,7 @@ func TestBackupRestore2(t *testing.T) {
 	}
 
 	backup.Reset()
-	_, err = db2.Backup(&backup, types.CustomTs{})
+	_, err = db2.Backup(&backup, 0)
 	require.NoError(t, err)
 
 	fmt.Println("backup2 length:", backup.Len())
@@ -255,7 +254,7 @@ func populateEntries(db *DB, entries []*pb.KV) error {
 			if err = txn.SetEntry(NewEntry(e.Key, e.Value)); err != nil {
 				return err
 			}
-			entries[i].Version = types.CustomTs{AssignedTs: 1}.ToUint64()
+			entries[i].Version = 1
 		}
 		return nil
 	})
@@ -268,7 +267,7 @@ func TestBackup(t *testing.T) {
 		entries := createEntries(N)
 		require.NoError(t, populateEntries(db, entries))
 
-		_, err := db.Backup(&bb, types.CustomTs{})
+		_, err := db.Backup(&bb, 0)
 		require.NoError(t, err)
 
 		err = db.View(func(txn *Txn) error {
@@ -323,7 +322,7 @@ func TestBackupRestore3(t *testing.T) {
 	N := 1000
 	entries := createEntries(N)
 
-	var db1NextTs types.CustomTs
+	var db1NextTs uint64
 	// backup
 	{
 		db1, err := Open(DefaultOptions(filepath.Join(tmpdir, "backup1")))
@@ -332,7 +331,7 @@ func TestBackupRestore3(t *testing.T) {
 		defer db1.Close()
 		require.NoError(t, populateEntries(db1, entries))
 
-		_, err = db1.Backup(&bb, types.CustomTs{})
+		_, err = db1.Backup(&bb, 0)
 		require.NoError(t, err)
 
 		db1NextTs = db1.orc.nextTs()
@@ -386,7 +385,7 @@ func TestBackupLoadIncremental(t *testing.T) {
 	updates := make(map[int]byte)
 	var bb bytes.Buffer
 
-	var db1NextTs types.CustomTs
+	var db1NextTs uint64
 	// backup
 	{
 		db1, err := Open(DefaultOptions(filepath.Join(tmpdir, "backup2")))
@@ -395,7 +394,7 @@ func TestBackupLoadIncremental(t *testing.T) {
 		defer db1.Close()
 
 		require.NoError(t, populateEntries(db1, entries))
-		since, err := db1.Backup(&bb, types.CustomTs{})
+		since, err := db1.Backup(&bb, 0)
 		require.NoError(t, err)
 
 		ints := rand.New(randSrc).Perm(N)
@@ -523,7 +522,7 @@ func TestBackupBitClear(t *testing.T) {
 
 	bak, err := os.CreateTemp(dir, "badgerbak")
 	require.NoError(t, err)
-	_, err = db.Backup(bak, types.CustomTs{})
+	_, err = db.Backup(bak, 0)
 	require.NoError(t, err)
 	require.NoError(t, bak.Close())
 
