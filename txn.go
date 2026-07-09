@@ -802,7 +802,7 @@ func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 
 	// useLockFree is true only for non-DuckDB databases that explicitly set
 	// NumCompactors=0 (e.g. BenchmarkLockFreeIngest). All other writes (including
-	// DuckDB) hold writeChLock for the full oracle→DirectFlush window.
+	// DuckDB) previously held writeChLock for the full oracle→DirectFlush window.
 	//
 	// For DuckDB the read barrier is duckDBTracker, NOT this lock:
 	// NewTransactionAt calls duckDBTracker.waitUntil(readTs) to block until all
@@ -811,9 +811,13 @@ func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 	// atomically with issuance (DB.RegisterPendingCommit via
 	// Oracle.GetCommitTimestamp); newCommitTs's begin() below is idempotent
 	// with respect to that pre-registration.
+	//
+	// Therefore, on the DuckDB direct path we avoid writeChLock entirely and
+	// allow concurrent DirectFlush calls; ordering/visibility is still governed
+	// by commitTs registration + doneCommit tracking.
 	useLockFree := !txn.db.opt.UseDuckDB && txn.db.opt.NumCompactors == 0
 	writeChLocked := false
-	if !useLockFree {
+	if !useLockFree && !useDuckDBDirect {
 		orc.writeChLock.Lock()
 		writeChLocked = true
 		defer func() {
@@ -889,7 +893,7 @@ func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 			if e.meta&bitFinTxn != 0 {
 				continue
 			}
-			logicalKey := append([]byte(nil), y.ParseKey(e.Key)...)
+			logicalKey := y.ParseKey(e.Key)
 			version := y.ParseTs(e.Key)
 			// Delete entries must be stored as nil (SQL NULL) so that Read()
 			// returns nil and txn.Get falls through to ErrKeyNotFound.
