@@ -11,6 +11,7 @@ package badger
 //	go test -v -tags duckdb -run TestSmallBankBadgerVsDuckDB -timeout 300s
 
 import (
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -515,5 +516,140 @@ func TestReadHeavyBalanceBadgerVsDuckDB(t *testing.T) {
 		} else {
 			t.Logf("  Badger is %.2fx faster for this read-heavy pattern", 1/ratio)
 		}
+	}
+}
+
+// seedSmallBankN seeds exactly n customers using the SmallBank key layout.
+func seedSmallBankN(tb testing.TB, db *DB, oracle *divytime.Oracle, n int64) {
+	tb.Helper()
+	for i := int64(0); i < n; i++ {
+		ts := sbTs(oracle)
+		txn := db.NewTransactionAt(ts, true)
+		_ = txn.Set(sbAccountKey(i), []byte(fmt.Sprintf("cust_%d", i)))
+		_ = txn.Set(sbSavingsKey(i), sbEncode(sbInitBal))
+		_ = txn.Set(sbCheckingKey(i), sbEncode(sbInitBal))
+		if err := txn.CommitAt(ts, nil); err != nil {
+			tb.Fatalf("seed commit i=%d: %v", i, err)
+		}
+	}
+}
+
+type readHeavyResult struct {
+	backend string
+	ops     float64
+	avg     time.Duration
+	p90     time.Duration
+}
+
+func runBalanceReadHeavy(
+	t *testing.T,
+	backend string,
+	db *DB,
+	oracle *divytime.Oracle,
+	numCustomers int64,
+	dur time.Duration,
+	workers int,
+) readHeavyResult {
+	t.Helper()
+	stats := newBankStats()
+	var totalOps atomic.Int64
+	var stop int32
+	var wg sync.WaitGroup
+
+	start := time.Now()
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
+			for atomic.LoadInt32(&stop) == 0 {
+				id := rng.Int63n(numCustomers)
+				ts := sbTs(oracle)
+				t0 := time.Now()
+
+				txn := db.NewTransactionAt(ts, false)
+				_ = txn.PrefetchKeys([][]byte{sbAccountKey(id), sbSavingsKey(id), sbCheckingKey(id)})
+				_, errA := txn.Get(sbAccountKey(id))
+				_, errS := txn.Get(sbSavingsKey(id))
+				_, errC := txn.Get(sbCheckingKey(id))
+				_ = txn.CommitAt(ts, nil)
+				txn.Discard()
+
+				if errA == nil && errS == nil && errC == nil {
+					d := time.Since(t0)
+					stats.record(txReadOnly, d)
+					totalOps.Add(1)
+				}
+			}
+		}(w)
+	}
+
+	time.Sleep(dur)
+	atomic.StoreInt32(&stop, 1)
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	s := stats.summarize(txReadOnly)
+	return readHeavyResult{
+		backend: backend,
+		ops:     float64(totalOps.Load()) / elapsed.Seconds(),
+		avg:     s.avg,
+		p90:     s.p90,
+	}
+}
+
+// TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB produces crossover-style
+// data by sweeping customer-cardinality for a read-heavy Balance workload.
+func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
+	const (
+		cmpDuration = 2 * time.Second
+		cmpWorkers  = 8
+	)
+
+	cardinalities := []int64{1_000, 5_000, 20_000, 100_000}
+
+	t.Logf("")
+	t.Logf("=== Read-Heavy Balance Cardinality Sweep (Badger vs DuckDB) ===")
+	t.Logf("  %-10s  %-14s  %-14s  %-18s", "Customers", "Badger Ops/s", "DuckDB Ops/s", "DuckDB/Badger")
+	t.Logf("  %s", "----------------------------------------------------------------")
+
+	firstDuckdbWin := int64(-1)
+
+	for _, n := range cardinalities {
+		var badger readHeavyResult
+		withDB(t, true, func(db *DB) {
+			oracle := divytime.NewOracle(1, 0)
+			seedSmallBankN(t, db, oracle, n)
+			badger = runBalanceReadHeavy(t, "Badger", db, oracle, n, cmpDuration, cmpWorkers)
+		})
+
+		var duckdb readHeavyResult
+		withDuckDB(t, true, func(db *DB) {
+			oracle := divytime.NewOracle(1, 0)
+			seedSmallBankN(t, db, oracle, n)
+			duckdb = runBalanceReadHeavy(t, "DuckDB", db, oracle, n, cmpDuration, cmpWorkers)
+		})
+
+		ratio := 0.0
+		if badger.ops > 0 {
+			ratio = duckdb.ops / badger.ops
+		}
+		if firstDuckdbWin < 0 && ratio >= 1.0 {
+			firstDuckdbWin = n
+		}
+
+		t.Logf("  %-10d  %-14.1f  %-14.1f  %-18.2fx", n, badger.ops, duckdb.ops, ratio)
+		t.Logf("    badger avg=%v p90=%v | duckdb avg=%v p90=%v",
+			badger.avg.Round(time.Microsecond),
+			badger.p90.Round(time.Microsecond),
+			duckdb.avg.Round(time.Microsecond),
+			duckdb.p90.Round(time.Microsecond),
+		)
+	}
+
+	if firstDuckdbWin > 0 {
+		t.Logf("  Crossover observed: DuckDB first wins at %d customers", firstDuckdbWin)
+	} else {
+		t.Logf("  No crossover in this sweep: Badger remains ahead at tested cardinalities")
 	}
 }

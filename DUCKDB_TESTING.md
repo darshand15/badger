@@ -45,6 +45,9 @@ make duckdb-smoke
 # side-by-side Badger vs DuckDB comparisons
 make duckdb-compare
 
+# read-heavy crossover sweep (Balance txn across customer cardinalities)
+go test -v -tags duckdb -run TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB -timeout 600s
+
 # epoch batching sweeps
 make duckdb-epoch
 
