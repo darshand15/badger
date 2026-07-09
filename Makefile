@@ -8,7 +8,7 @@ HAS_JEMALLOC = $(shell test -f /usr/local/lib/libjemalloc.a && echo "jemalloc")
 JEMALLOC_URL = "https://github.com/jemalloc/jemalloc/releases/download/5.2.1/jemalloc-5.2.1.tar.bz2"
 
 
-.PHONY: all badger test jemalloc dependency
+.PHONY: all badger test jemalloc dependency duckdb-smoke duckdb-compare duckdb-epoch duckdb-profile duckdb-lockfree-compare duckdb-ashley duckdb-ashley-readpool-sweep duckdb-full
 
 badger: jemalloc
 	@echo "Compiling Badger binary..."
@@ -46,3 +46,27 @@ dependency:
     	lsb-release \
     	build-essential \
     	protobuf-compiler \
+
+duckdb-smoke:
+	@bash ./scripts/duckdb_experiments.sh smoke
+
+duckdb-compare:
+	@bash ./scripts/duckdb_experiments.sh compare
+
+duckdb-epoch:
+	@bash ./scripts/duckdb_experiments.sh epoch
+
+duckdb-profile:
+	@bash ./scripts/duckdb_experiments.sh profile
+
+duckdb-lockfree-compare:
+	@bash ./scripts/duckdb_experiments.sh lockfree-compare
+
+duckdb-ashley:
+	@bash ./scripts/duckdb_experiments.sh ashley
+
+duckdb-ashley-readpool-sweep:
+	@bash ./scripts/duckdb_experiments.sh ashley-readpool-sweep
+
+duckdb-full:
+	@bash ./scripts/duckdb_experiments.sh full

@@ -9,6 +9,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -100,12 +102,33 @@ const defaultFlushBatchSize int64 = 1
 // flushed before the SQL query that needs them.
 const directFlushBatchSize int64 = 512
 
-// readPoolSize is the number of dedicated read connections kept per
+// defaultReadPoolSize is the default number of dedicated read connections kept per
 // partition (see partitionAppender.readConns). A single DuckDB connection
 // handles one statement at a time, so this bounds how many readers can be
 // concurrently active against one partition without serializing on either
 // a single shared connection or database/sql's global pool lock.
-const readPoolSize = 4
+const defaultReadPoolSize = 4
+
+// readPoolSizeFromEnv reads BADGER_DUCKDB_READ_POOL_SIZE and clamps invalid
+// values. Keeping this as an env var avoids changing public DB option structs
+// while allowing fast local tuning runs.
+func readPoolSizeFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("BADGER_DUCKDB_READ_POOL_SIZE"))
+	if raw == "" {
+		return defaultReadPoolSize
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return defaultReadPoolSize
+	}
+	if n < 1 {
+		return 1
+	}
+	if n > 64 {
+		return 64
+	}
+	return n
+}
 
 // partitionAppender owns a persistent DuckDB connection and Appender for a
 // single partition.  Keeping the Appender alive across memtable flushes
@@ -132,6 +155,11 @@ type partitionAppender struct {
 	sqlConn     *sql.Conn
 	appender    *duckdbdriver.Appender
 	pendingRows int64
+	// pendingKeyHash is a presence-only hash set for hot point lookups
+	// (Read/ReadBatch). It avoids []byte->string allocations on every read.
+	// Hash collisions are safe: false positives only cause an extra flush.
+	pendingKeyHash map[uint64]struct{}
+	// pendingKeys stores exact keys for prefix detection in ScanPrefix.
 	pendingKeys map[string]struct{} // keys with unflushed AppendRow'd rows
 
 	// readConns/readStmts are a small dedicated pool of connections used only
@@ -177,6 +205,7 @@ func (pa *partitionAppender) flush() error {
 		return err
 	}
 	pa.pendingRows = 0
+	pa.pendingKeyHash = make(map[uint64]struct{})
 	pa.pendingKeys = make(map[string]struct{})
 	return nil
 }
@@ -184,31 +213,35 @@ func (pa *partitionAppender) flush() error {
 // markPending records that a key has an unflushed row in the Appender buffer.
 // Must be called with mu held for writing, immediately after a successful AppendRow.
 func (pa *partitionAppender) markPending(key []byte) {
+	pa.pendingKeyHash[z.MemHash(key)] = struct{}{}
 	pa.pendingKeys[string(key)] = struct{}{}
 }
 
 // hasPending reports whether key has any unflushed rows in the Appender buffer.
 // Must be called with mu held (read or write).
 func (pa *partitionAppender) hasPending(key []byte) bool {
-	_, ok := pa.pendingKeys[string(key)]
+	_, ok := pa.pendingKeyHash[z.MemHash(key)]
 	return ok
 }
 
 // DuckDBStorage is the unified DuckDB storage implementation.
 type DuckDBStorage struct {
-	db             *sql.DB
-	ctx            context.Context
-	partCalc       *partitionCalculator
-	mu             sync.RWMutex
-	numParts       int
+	db       *sql.DB
+	ctx      context.Context
+	partCalc *partitionCalculator
+	mu       sync.RWMutex
+	numParts int
 	// partAppenders holds one persistent Appender per partition, along with
 	// each partition's dedicated read-connection pool (partitionAppender.
 	// readConns/readStmts). Indexed by partition ID; created in
 	// initPersistentAppenders.
-	partAppenders  []*partitionAppender
+	partAppenders []*partitionAppender
 	// flushBatchSize is the per-partition row count that triggers an automatic
 	// Appender flush.  Configurable; defaults to defaultFlushBatchSize.
 	flushBatchSize int64
+	// readPoolSize controls how many dedicated read connections are created per
+	// partition. Tunable via BADGER_DUCKDB_READ_POOL_SIZE.
+	readPoolSize int
 }
 
 // NewDuckDBStorage creates a new DuckDB storage instance.
@@ -216,14 +249,17 @@ func NewDuckDBStorage(dbPath string, numPartitions int) (*DuckDBStorage, error) 
 	if numPartitions <= 0 {
 		numPartitions = 8
 	}
+	readPoolSize := readPoolSizeFromEnv()
 
 	db, err := sql.Open("duckdb", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open DuckDB: %w", err)
 	}
 
-	db.SetMaxOpenConns(numPartitions * 10)
-	db.SetMaxIdleConns(numPartitions * 5)
+	// Keep enough room for one write conn + read pool per partition plus some
+	// slack for setup/compaction operations.
+	db.SetMaxOpenConns(numPartitions * (readPoolSize + 4))
+	db.SetMaxIdleConns(numPartitions * (readPoolSize + 1))
 
 	s := &DuckDBStorage{
 		db:             db,
@@ -231,6 +267,7 @@ func NewDuckDBStorage(dbPath string, numPartitions int) (*DuckDBStorage, error) 
 		partCalc:       newPartitionCalculator(numPartitions),
 		numParts:       numPartitions,
 		flushBatchSize: defaultFlushBatchSize,
+		readPoolSize:   readPoolSize,
 	}
 
 	if err := s.initializeTables(); err != nil {
@@ -283,9 +320,10 @@ func (s *DuckDBStorage) initPersistentAppenders() error {
 		}
 
 		s.partAppenders[i] = &partitionAppender{
-			sqlConn:     sqlConn,
-			appender:    appender,
-			pendingKeys: make(map[string]struct{}),
+			sqlConn:        sqlConn,
+			pendingKeyHash: make(map[uint64]struct{}),
+			appender:       appender,
+			pendingKeys:    make(map[string]struct{}),
 		}
 
 		// Open a small dedicated pool of read connections for this partition,
@@ -306,7 +344,7 @@ func (s *DuckDBStorage) initPersistentAppenders() error {
 		// concurrent QueryContext calls sharing one connection panic with
 		// "misuse of duckdb driver: ... with active Rows". A small
 		// per-partition pool avoids the global pool lock while still allowing
-		// readPoolSize concurrent readers per partition.
+		// s.readPoolSize concurrent readers per partition.
 		readSQL := fmt.Sprintf(`
 			SELECT key, epoch_id, broker_id, assigned_ts, value, deleted
 			FROM %s
@@ -318,10 +356,10 @@ func (s *DuckDBStorage) initPersistentAppenders() error {
 			LIMIT 1`, tableName)
 
 		pa := s.partAppenders[i]
-		pa.readConns = make([]*sql.Conn, readPoolSize)
-		pa.readStmts = make([]*sql.Stmt, readPoolSize)
-		pa.readFree = make(chan int, readPoolSize)
-		for j := 0; j < readPoolSize; j++ {
+		pa.readConns = make([]*sql.Conn, s.readPoolSize)
+		pa.readStmts = make([]*sql.Stmt, s.readPoolSize)
+		pa.readFree = make(chan int, s.readPoolSize)
+		for j := 0; j < s.readPoolSize; j++ {
 			rc, err := s.db.Conn(s.ctx)
 			if err != nil {
 				return fmt.Errorf("partition %d: get read conn %d: %w", i, j, err)
@@ -1028,6 +1066,7 @@ func (s *DuckDBStorage) Close() error {
 		pa.readStmts = nil
 		pa.readConns = nil
 		pa.pendingRows = 0
+		pa.pendingKeyHash = nil
 		pa.pendingKeys = nil
 		pa.mu.Unlock()
 	}

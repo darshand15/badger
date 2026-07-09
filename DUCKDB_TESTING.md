@@ -33,6 +33,58 @@ go test -tags duckdb ./...
 
 ---
 
+## Standard Experiment Harness
+
+Use the shared harness to run reproducible experiment tracks and collect
+timestamped logs/profiles under `artifacts/duckdb/<run-id>/`:
+
+```bash
+# smoke validation (correctness + concurrency)
+make duckdb-smoke
+
+# side-by-side Badger vs DuckDB comparisons
+make duckdb-compare
+
+# epoch batching sweeps
+make duckdb-epoch
+
+# CPU profile + TPS benchmark runs
+make duckdb-profile
+
+# lock-free ingest baseline comparison
+make duckdb-lockfree-compare
+
+# Ashley track only (overhead-focused)
+make duckdb-ashley
+
+# Ashley read-pool tuning sweep
+make duckdb-ashley-readpool-sweep
+
+# run all tracks in one pass
+make duckdb-full
+```
+
+Direct script usage is also available:
+
+```bash
+bash scripts/duckdb_experiments.sh <smoke|compare|epoch|profile|lockfree-compare|ashley|full>
+```
+
+Read-pool tuning controls:
+
+```bash
+# Per-process read-pool size per partition (default: 4, clamp: 1..64)
+export BADGER_DUCKDB_READ_POOL_SIZE=8
+
+# Sweep sizes used by make duckdb-ashley-readpool-sweep
+export READ_POOL_SWEEP_SIZES="1 2 4 8 12"
+```
+
+The harness automatically adds classic Darwin linker flags for profile runs to
+avoid noisy `LC_DYSYMTAB` warnings on macOS arm64.
+
+---
+
 ## Test Inventory
 
 ### 1. Correctness Tests (Darshan)
