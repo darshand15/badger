@@ -48,6 +48,9 @@ make duckdb-compare
 # read-heavy crossover sweep (Balance txn across customer cardinalities)
 go test -v -tags duckdb -run TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB -timeout 600s
 
+When run via `make duckdb-compare`, this sweep also exports
+`readheavy_crossover.csv` into the run artifact directory.
+
 # epoch batching sweeps
 make duckdb-epoch
 

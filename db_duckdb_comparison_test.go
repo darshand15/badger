@@ -13,6 +13,7 @@ package badger
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -607,6 +608,17 @@ func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
 	)
 
 	cardinalities := []int64{1_000, 5_000, 20_000, 100_000}
+	type csvRow struct {
+		customers int64
+		badgerOps float64
+		duckdbOps float64
+		ratio     float64
+		badgerAvg time.Duration
+		badgerP90 time.Duration
+		duckdbAvg time.Duration
+		duckdbP90 time.Duration
+	}
+	var csvRows []csvRow
 
 	t.Logf("")
 	t.Logf("=== Read-Heavy Balance Cardinality Sweep (Badger vs DuckDB) ===")
@@ -637,6 +649,16 @@ func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
 		if firstDuckdbWin < 0 && ratio >= 1.0 {
 			firstDuckdbWin = n
 		}
+		csvRows = append(csvRows, csvRow{
+			customers: n,
+			badgerOps: badger.ops,
+			duckdbOps: duckdb.ops,
+			ratio:     ratio,
+			badgerAvg: badger.avg,
+			badgerP90: badger.p90,
+			duckdbAvg: duckdb.avg,
+			duckdbP90: duckdb.p90,
+		})
 
 		t.Logf("  %-10d  %-14.1f  %-14.1f  %-18.2fx", n, badger.ops, duckdb.ops, ratio)
 		t.Logf("    badger avg=%v p90=%v | duckdb avg=%v p90=%v",
@@ -651,5 +673,25 @@ func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
 		t.Logf("  Crossover observed: DuckDB first wins at %d customers", firstDuckdbWin)
 	} else {
 		t.Logf("  No crossover in this sweep: Badger remains ahead at tested cardinalities")
+	}
+
+	if outPath := os.Getenv("BADGER_DUCKDB_SWEEP_CSV"); outPath != "" {
+		csv := "customers,badger_ops_per_sec,duckdb_ops_per_sec,duckdb_over_badger,badger_avg_ns,badger_p90_ns,duckdb_avg_ns,duckdb_p90_ns\n"
+		for _, r := range csvRows {
+			csv += fmt.Sprintf("%d,%.3f,%.3f,%.6f,%d,%d,%d,%d\n",
+				r.customers,
+				r.badgerOps,
+				r.duckdbOps,
+				r.ratio,
+				r.badgerAvg.Nanoseconds(),
+				r.badgerP90.Nanoseconds(),
+				r.duckdbAvg.Nanoseconds(),
+				r.duckdbP90.Nanoseconds(),
+			)
+		}
+		if err := os.WriteFile(outPath, []byte(csv), 0644); err != nil {
+			t.Fatalf("write sweep csv: %v", err)
+		}
+		t.Logf("  Wrote sweep CSV: %s", outPath)
 	}
 }

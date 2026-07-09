@@ -50,7 +50,8 @@ compare() {
   run_cmd compare_bank_no_delay go test -v -tags duckdb -run TestBankBadgerVsDuckDB$ -timeout 180s .
   run_cmd compare_bank_with_delay go test -v -tags duckdb -run TestBankBadgerVsDuckDBWithDelay -timeout 180s .
   run_cmd compare_smallbank_mixed go test -v -tags duckdb -run TestSmallBankBadgerVsDuckDB -timeout 300s .
-  run_cmd compare_readheavy_cardinality go test -v -tags duckdb -run TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB -timeout 600s .
+  run_cmd compare_readheavy_cardinality env BADGER_DUCKDB_SWEEP_CSV="${OUT_DIR}/readheavy_crossover.csv" \
+    go test -v -tags duckdb -run TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB -timeout 600s .
 }
 
 epoch() {
