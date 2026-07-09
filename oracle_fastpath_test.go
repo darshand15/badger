@@ -224,6 +224,39 @@ func TestOracleFastPath_NoConflictDetection(t *testing.T) {
 	require.Equal(t, "first", v)
 }
 
+// TestOracleFastPath_NewCommitTsRegistersTracker ensures managed fast path
+// registers commitTs with duckDBTracker even when conflict detection is off.
+// This protects NewTransactionAt(readTs) read barriers for callers that don't
+// pre-register via DB.RegisterPendingCommit.
+func TestOracleFastPath_NewCommitTsRegistersTracker(t *testing.T) {
+	db := openManaged(t)
+
+	ts := types.CustomTs{AssignedTs: 42}
+	txn := db.NewTransactionAt(ts, true)
+	defer txn.Discard()
+	txn.commitTs = ts
+
+	got, conflict := db.orc.newCommitTs(txn)
+	require.False(t, conflict)
+	require.Equal(t, ts, got)
+
+	hasPending := func(target types.CustomTs) bool {
+		db.orc.duckDBTracker.mu.Lock()
+		defer db.orc.duckDBTracker.mu.Unlock()
+		for _, v := range db.orc.duckDBTracker.pending {
+			if v == target {
+				return true
+			}
+		}
+		return false
+	}
+
+	require.True(t, hasPending(ts), "newCommitTs fast path must register tracker")
+
+	db.orc.doneCommit(ts)
+	require.False(t, hasPending(ts), "doneCommit must deregister tracker")
+}
+
 // TestOracleFastPath_Concurrent_NoRace: 8 goroutines each commit to their own
 // key concurrently under managed mode. No lock contention, no data races.
 // Run with: go test -tags duckdb -race -run TestOracleFastPath_Concurrent_NoRace

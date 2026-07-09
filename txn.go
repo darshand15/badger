@@ -236,8 +236,15 @@ func (o *oracle) newCommitTs(txn *Txn) (types.CustomTs, bool) {
 	// Fast path: managed mode with conflict detection disabled.
 	// The DAG executor pre-orders transactions so no conflicts can arrive
 	// concurrently, and txn.commitTs is already assigned by the caller.
-	// No shared oracle state needs updating, so skip the mutex entirely.
+	// Skip oracle mutex/committedTxns, but still register with duckDBTracker so
+	// NewTransactionAt(readTs) can wait on this in-flight commit.
+	//
+	// Note: callers that issue commitTs via an external oracle should still use
+	// DB.RegisterPendingCommit atomically with issuance to close the window
+	// between ts issuance and entering newCommitTs. begin() is idempotent, so
+	// this call is safe whether or not pre-registration already happened.
 	if o.isManaged && !o.detectConflicts {
+		o.duckDBTracker.begin(txn.commitTs)
 		return txn.commitTs, false
 	}
 
