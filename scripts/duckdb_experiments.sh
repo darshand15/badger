@@ -100,6 +100,16 @@ ashley_readpool_sweep() {
   done
 }
 
+ashley_flushbatch_sweep() {
+  local sizes="${FLUSH_BATCH_SWEEP_SIZES:-1 4 16 64 256}"
+  for sz in ${sizes}; do
+    run_cmd "ashley_flushbatch_lockfree_ingest_${sz}" env BADGER_DUCKDB_FLUSH_BATCH_SIZE="${sz}" \
+      go test -tags duckdb -run '^$' -bench '^BenchmarkLockFreeIngest_DuckDB$' -benchtime 10s "${LD_FLAGS[@]}" .
+    run_cmd "ashley_flushbatch_duckdb_bank_tps_${sz}" env BADGER_DUCKDB_FLUSH_BATCH_SIZE="${sz}" \
+      go test -tags duckdb -run '^$' -bench '^BenchmarkDuckDBBankTPS$' -benchtime 10s -count 3 "${LD_FLAGS[@]}" .
+  done
+}
+
 usage() {
   cat <<'EOF'
 Usage: scripts/duckdb_experiments.sh <target>
@@ -113,12 +123,16 @@ Targets:
   ashley            Run Ashley overhead track (compare + epoch + profile)
   ashley-readpool-sweep
                    Sweep BADGER_DUCKDB_READ_POOL_SIZE and benchmark
+  ashley-flushbatch-sweep
+                   Sweep BADGER_DUCKDB_FLUSH_BATCH_SIZE and benchmark
   full              Run all targets above
 
 Environment variables:
   ARTIFACT_ROOT     Override artifacts root directory
   READ_POOL_SWEEP_SIZES
                    Space-separated read pool sizes for sweep target
+  FLUSH_BATCH_SWEEP_SIZES
+                   Space-separated flush batch sizes for sweep target
 EOF
 }
 
@@ -152,6 +166,9 @@ main() {
       ;;
     ashley-readpool-sweep)
       ashley_readpool_sweep
+      ;;
+    ashley-flushbatch-sweep)
+      ashley_flushbatch_sweep
       ;;
     full)
       full

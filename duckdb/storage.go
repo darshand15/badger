@@ -110,6 +110,10 @@ const directFlushBatchSize int64 = 512
 // Tuned on Apple silicon using the Ashley sweep harness.
 const defaultReadPoolSize = 2
 
+// defaultEnvFlushBatchSize is the fallback flush threshold for the memtable
+// flush path when BADGER_DUCKDB_FLUSH_BATCH_SIZE is unset/invalid.
+const defaultEnvFlushBatchSize int64 = defaultFlushBatchSize
+
 // readPoolSizeFromEnv reads BADGER_DUCKDB_READ_POOL_SIZE and clamps invalid
 // values. Keeping this as an env var avoids changing public DB option structs
 // while allowing fast local tuning runs.
@@ -127,6 +131,27 @@ func readPoolSizeFromEnv() int {
 	}
 	if n > 64 {
 		return 64
+	}
+	return n
+}
+
+// flushBatchSizeFromEnv reads BADGER_DUCKDB_FLUSH_BATCH_SIZE and clamps
+// invalid values. This tunes memtable flush batching without changing public
+// option structs.
+func flushBatchSizeFromEnv() int64 {
+	raw := strings.TrimSpace(os.Getenv("BADGER_DUCKDB_FLUSH_BATCH_SIZE"))
+	if raw == "" {
+		return defaultEnvFlushBatchSize
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return defaultEnvFlushBatchSize
+	}
+	if n < 1 {
+		return 1
+	}
+	if n > 1_000_000 {
+		return 1_000_000
 	}
 	return n
 }
@@ -251,6 +276,7 @@ func NewDuckDBStorage(dbPath string, numPartitions int) (*DuckDBStorage, error) 
 		numPartitions = 8
 	}
 	readPoolSize := readPoolSizeFromEnv()
+	flushBatchSize := flushBatchSizeFromEnv()
 
 	db, err := sql.Open("duckdb", dbPath)
 	if err != nil {
@@ -267,7 +293,7 @@ func NewDuckDBStorage(dbPath string, numPartitions int) (*DuckDBStorage, error) 
 		ctx:            context.Background(),
 		partCalc:       newPartitionCalculator(numPartitions),
 		numParts:       numPartitions,
-		flushBatchSize: defaultFlushBatchSize,
+		flushBatchSize: flushBatchSize,
 		readPoolSize:   readPoolSize,
 	}
 

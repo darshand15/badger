@@ -66,6 +66,9 @@ make duckdb-ashley
 # Ashley read-pool tuning sweep
 make duckdb-ashley-readpool-sweep
 
+# Ashley flush-batch threshold sweep (write path)
+make duckdb-ashley-flushbatch-sweep
+
 # run all tracks in one pass
 make duckdb-full
 ```
@@ -79,7 +82,7 @@ When run via `make duckdb-compare`, the harness exports:
 Direct script usage is also available:
 
 ```bash
-bash scripts/duckdb_experiments.sh <smoke|compare|epoch|profile|lockfree-compare|ashley|ashley-readpool-sweep|full>
+bash scripts/duckdb_experiments.sh <smoke|compare|epoch|profile|lockfree-compare|ashley|ashley-readpool-sweep|ashley-flushbatch-sweep|full>
 ```
 
 Read-pool tuning controls:
@@ -90,6 +93,12 @@ export BADGER_DUCKDB_READ_POOL_SIZE=8
 
 # Sweep sizes used by make duckdb-ashley-readpool-sweep
 export READ_POOL_SWEEP_SIZES="1 2 4 8 12"
+
+# Per-process memtable flush-batch threshold (default: 1, clamp: 1..1000000)
+export BADGER_DUCKDB_FLUSH_BATCH_SIZE=64
+
+# Sweep sizes used by make duckdb-ashley-flushbatch-sweep
+export FLUSH_BATCH_SWEEP_SIZES="1 4 16 64 128 256"
 ```
 
 The harness automatically adds classic Darwin linker flags for profile runs to
