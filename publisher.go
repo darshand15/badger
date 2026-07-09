@@ -88,7 +88,7 @@ func (p *publisher) publishUpdates(reqs requests) {
 				Value:     y.SafeCopy(nil, e.Value),
 				Meta:      []byte{e.UserMeta},
 				ExpiresAt: e.ExpiresAt,
-				Version:   y.ParseTs(k),
+				Version:   y.ParseTs(k).ToUint64(),
 			}
 			for id := range ids {
 				if _, ok := batchedUpdates[id]; !ok {

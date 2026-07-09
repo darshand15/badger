@@ -16,6 +16,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/badger/v4/table"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -36,7 +37,7 @@ type StreamWriter struct {
 	db         *DB
 	done       func()
 	throttle   *y.Throttle
-	maxVersion uint64
+	maxVersion types.CustomTs
 	writers    map[uint32]*sortedWriter
 	prevLevel  int
 }
@@ -156,8 +157,8 @@ func (sw *StreamWriter) Write(buf *z.Buffer) error {
 		}
 
 		sw.writeLock.Lock()
-		if sw.maxVersion < kv.Version {
-			sw.maxVersion = kv.Version
+		if sw.maxVersion.Less(types.CustomTsFromUint64(kv.Version)) {
+			sw.maxVersion = types.CustomTsFromUint64(kv.Version)
 		}
 		if sw.prevLevel == 0 {
 			// If prevLevel is 0, that means that we have not written anything yet.
@@ -175,7 +176,7 @@ func (sw *StreamWriter) Write(buf *z.Buffer) error {
 			userMeta = kv.UserMeta[0]
 		}
 		e := &Entry{
-			Key:       y.KeyWithTs(kv.Key, kv.Version),
+			Key:       y.KeyWithTs(kv.Key, types.CustomTsFromUint64(kv.Version)),
 			Value:     y.Copy(kv.Value),
 			UserMeta:  userMeta,
 			ExpiresAt: kv.ExpiresAt,
@@ -276,7 +277,7 @@ func (sw *StreamWriter) Flush() error {
 			sw.db.orc.Stop()
 		}
 
-		if curMax := sw.db.orc.readTs(); curMax >= sw.maxVersion {
+		if curMax := sw.db.orc.readTs(); !(curMax.Less(sw.maxVersion)) {
 			sw.maxVersion = curMax
 		}
 

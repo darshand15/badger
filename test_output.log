@@ -1,0 +1,1027 @@
+Level 0 [ ]: NumTables: 01. Size: 1.1 MiB of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level Done
+--- PASS: TestWriteBatchManaged (0.15s)
+=== RUN   TestWriteBatchDuplicate
+=== RUN   TestWriteBatchDuplicate/writebatch
+badger 2026/06/25 03:15:58 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:15:58 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:15:58 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:15:58 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:15:58 INFO: 
+Level 0 [ ]: NumTables: 01. Size: 169 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level Done
+=== RUN   TestWriteBatchDuplicate/writebatch_at
+badger 2026/06/25 03:15:58 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:15:58 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:15:58 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:15:58 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:15:58 INFO: 
+Level 0 [ ]: NumTables: 01. Size: 169 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level Done
+=== RUN   TestWriteBatchDuplicate/managed_writebatch
+badger 2026/06/25 03:15:58 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:15:58 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:15:58 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:15:58 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:15:58 INFO: 
+Level 0 [ ]: NumTables: 01. Size: 249 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 32 KiB
+Level Done
+--- PASS: TestWriteBatchDuplicate (0.07s)
+    --- PASS: TestWriteBatchDuplicate/writebatch (0.02s)
+    --- PASS: TestWriteBatchDuplicate/writebatch_at (0.02s)
+    --- PASS: TestWriteBatchDuplicate/managed_writebatch (0.02s)
+=== RUN   TestZeroDiscardStats
+=== RUN   TestZeroDiscardStats/after_rewrite
+=== RUN   TestZeroDiscardStats/after_dropall
+--- PASS: TestZeroDiscardStats (0.42s)
+    --- PASS: TestZeroDiscardStats/after_rewrite (0.20s)
+    --- PASS: TestZeroDiscardStats/after_dropall (0.22s)
+=== RUN   TestManifestBasic
+Putting i=0
+--- PASS: TestManifestBasic (0.06s)
+=== RUN   TestManifestMagic
+--- PASS: TestManifestMagic (0.02s)
+=== RUN   TestManifestVersion
+--- PASS: TestManifestVersion (0.02s)
+=== RUN   TestManifestChecksum
+--- PASS: TestManifestChecksum (0.02s)
+=== RUN   TestOverlappingKeyRangeError
+    manifest_test.go:140: 
+--- SKIP: TestOverlappingKeyRangeError (0.00s)
+=== RUN   TestManifestRewrite
+--- PASS: TestManifestRewrite (0.08s)
+=== RUN   TestConcurrentManifestCompaction
+--- PASS: TestConcurrentManifestCompaction (2.03s)
+=== RUN   TestGetMergeOperator
+=== RUN   TestGetMergeOperator/Get_before_Add
+    db_test.go:140: nil options
+=== RUN   TestGetMergeOperator/Add_and_Get
+    db_test.go:140: nil options
+=== RUN   TestGetMergeOperator/Add_and_Get_slices
+    db_test.go:140: nil options
+=== RUN   TestGetMergeOperator/Get_Before_Compact
+    db_test.go:140: nil options
+=== RUN   TestGetMergeOperator/Get_after_Delete
+    db_test.go:140: nil options
+=== RUN   TestGetMergeOperator/Get_after_Stop
+    db_test.go:140: nil options
+=== RUN   TestGetMergeOperator/Old_keys_should_be_removed_after_compaction
+--- PASS: TestGetMergeOperator (0.25s)
+    --- PASS: TestGetMergeOperator/Get_before_Add (0.03s)
+    --- PASS: TestGetMergeOperator/Add_and_Get (0.03s)
+    --- PASS: TestGetMergeOperator/Add_and_Get_slices (0.02s)
+    --- PASS: TestGetMergeOperator/Get_Before_Compact (0.02s)
+    --- PASS: TestGetMergeOperator/Get_after_Delete (0.03s)
+    --- PASS: TestGetMergeOperator/Get_after_Stop (0.02s)
+    --- PASS: TestGetMergeOperator/Old_keys_should_be_removed_after_compaction (0.09s)
+=== RUN   TestWriteMetrics
+--- PASS: TestWriteMetrics (0.03s)
+=== RUN   TestVlogMetrics
+--- PASS: TestVlogMetrics (0.05s)
+=== RUN   TestReadMetrics
+--- PASS: TestReadMetrics (0.04s)
+=== RUN   TestOptions
+=== RUN   TestOptions/default_options
+=== RUN   TestOptions/special_flags
+--- PASS: TestOptions (0.00s)
+    --- PASS: TestOptions/default_options (0.00s)
+    --- PASS: TestOptions/special_flags (0.00s)
+=== RUN   TestOracleRegular_NoConflict
+--- PASS: TestOracleRegular_NoConflict (0.02s)
+=== RUN   TestOracleRegular_WriteWriteConflict
+--- PASS: TestOracleRegular_WriteWriteConflict (0.03s)
+=== RUN   TestOracleRegular_Determinism
+--- PASS: TestOracleRegular_Determinism (0.26s)
+=== RUN   TestOracleFastPath_Fires
+--- PASS: TestOracleFastPath_Fires (0.04s)
+=== RUN   TestOracleFastPath_TimestampPreserved
+--- PASS: TestOracleFastPath_TimestampPreserved (0.03s)
+=== RUN   TestOracleFastPath_NoConflictDetection
+--- PASS: TestOracleFastPath_NoConflictDetection (0.03s)
+=== RUN   TestOracleFastPath_Concurrent_NoRace
+--- PASS: TestOracleFastPath_Concurrent_NoRace (0.03s)
+=== RUN   TestOracleFastPath_Concurrent_SharedKey
+--- PASS: TestOracleFastPath_Concurrent_SharedKey (0.03s)
+=== RUN   TestOracleFastPath_Determinism
+--- PASS: TestOracleFastPath_Determinism (0.26s)
+=== RUN   TestOracleFastPath_Schedule_SameOrderSameResult
+--- PASS: TestOracleFastPath_Schedule_SameOrderSameResult (0.14s)
+=== RUN   TestOracleFastPath_ManagedVsUnmanaged
+=== RUN   TestOracleFastPath_ManagedVsUnmanaged/unmanaged
+=== RUN   TestOracleFastPath_ManagedVsUnmanaged/managed_fastpath
+--- PASS: TestOracleFastPath_ManagedVsUnmanaged (0.06s)
+    --- PASS: TestOracleFastPath_ManagedVsUnmanaged/unmanaged (0.03s)
+    --- PASS: TestOracleFastPath_ManagedVsUnmanaged/managed_fastpath (0.03s)
+=== RUN   TestPublisherDeadlock
+    db_test.go:140: nil options
+--- PASS: TestPublisherDeadlock (0.04s)
+=== RUN   TestPublisherOrdering
+    db_test.go:140: nil options
+--- PASS: TestPublisherOrdering (0.03s)
+=== RUN   TestMultiplePrefix
+    db_test.go:140: nil options
+--- PASS: TestMultiplePrefix (0.03s)
+=== RUN   TestStream
+badger 2026/06/25 03:16:02 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:02 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:02 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:02 INFO: Number of ranges found: 2
+badger 2026/06/25 03:16:02 INFO: Testing Streaming about 0 B of uncompressed data (0 B on disk)
+badger 2026/06/25 03:16:02 INFO: Sent range 0 for iteration: [, 70302d31fffffffffffffffffffffffa) of size: 0 B
+badger 2026/06/25 03:16:02 INFO: Sent range 1 for iteration: [70302d31fffffffffffffffffffffffa, ) of size: 0 B
+badger 2026/06/25 03:16:02 INFO: Testing Sent data of size 9.4 KiB
+badger 2026/06/25 03:16:02 INFO: Testing Streaming about 0 B of uncompressed data (0 B on disk)
+badger 2026/06/25 03:16:02 INFO: Number of ranges found: 1
+badger 2026/06/25 03:16:02 INFO: Sent range 0 for iteration: [, ) of size: 0 B
+badger 2026/06/25 03:16:02 INFO: Testing Sent data of size 3.1 KiB
+badger 2026/06/25 03:16:02 INFO: Testing Streaming about 0 B of uncompressed data (0 B on disk)
+badger 2026/06/25 03:16:02 INFO: Number of ranges found: 1
+badger 2026/06/25 03:16:02 INFO: Sent range 0 for iteration: [, ) of size: 0 B
+badger 2026/06/25 03:16:02 INFO: Testing Sent data of size 1.6 KiB
+badger 2026/06/25 03:16:02 INFO: Testing Streaming about 0 B of uncompressed data (0 B on disk)
+badger 2026/06/25 03:16:02 INFO: Number of ranges found: 2
+badger 2026/06/25 03:16:02 INFO: Sent range 0 for iteration: [, 70302d31fffffffffffffffffffffffa) of size: 0 B
+badger 2026/06/25 03:16:02 INFO: Sent range 1 for iteration: [70302d31fffffffffffffffffffffffa, ) of size: 0 B
+badger 2026/06/25 03:16:02 INFO: Testing Sent data of size 4.7 KiB
+badger 2026/06/25 03:16:02 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:02 INFO: 
+Level 0 [ ]: NumTables: 01. Size: 4.4 KiB of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+--- PASS: TestStream (0.11s)
+=== RUN   TestStreamMaxSize
+    stream_test.go:165: Skipping test meant to be run manually.
+--- SKIP: TestStreamMaxSize (0.00s)
+=== RUN   TestStreamWithThreadId
+badger 2026/06/25 03:16:02 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:02 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:02 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:02 INFO: Number of ranges found: 2
+badger 2026/06/25 03:16:02 INFO: Sent range 0 for iteration: [, 70302d31fffffffffffffffffffffffa) of size: 0 B
+badger 2026/06/25 03:16:02 INFO: Sent range 1 for iteration: [70302d31fffffffffffffffffffffffa, ) of size: 0 B
+badger 2026/06/25 03:16:02 INFO: Testing Streaming about 0 B of uncompressed data (0 B on disk)
+badger 2026/06/25 03:16:02 INFO: Testing Sent data of size 9.4 KiB
+badger 2026/06/25 03:16:02 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:02 INFO: 
+Level 0 [ ]: NumTables: 01. Size: 4.4 KiB of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+--- PASS: TestStreamWithThreadId (0.03s)
+=== RUN   TestBigStream
+    stream_test.go:272: Skipping test meant to be run manually.
+--- SKIP: TestBigStream (0.00s)
+=== RUN   TestStreamCustomKeyToList
+badger 2026/06/25 03:16:02 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:02 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:02 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:02 INFO: Testing Streaming about 0 B of uncompressed data (0 B on disk)
+badger 2026/06/25 03:16:02 INFO: Number of ranges found: 2
+badger 2026/06/25 03:16:02 INFO: Sent range 0 for iteration: [, 7030ffffffffffffffffffffff9b) of size: 0 B
+badger 2026/06/25 03:16:02 INFO: Sent range 1 for iteration: [7030ffffffffffffffffffffff9b, ) of size: 0 B
+badger 2026/06/25 03:16:02 INFO: Testing Sent data of size 72 B
+--- PASS: TestStreamCustomKeyToList (0.03s)
+=== RUN   TestStreamWriter1
+=== RUN   TestStreamWriter1/Normal_mode
+=== RUN   TestStreamWriter1/Managed_mode
+=== RUN   TestStreamWriter1/InMemory_mode
+    db_test.go:147: In Memory option set
+--- PASS: TestStreamWriter1 (0.07s)
+    --- PASS: TestStreamWriter1/Normal_mode (0.03s)
+    --- PASS: TestStreamWriter1/Managed_mode (0.03s)
+    --- PASS: TestStreamWriter1/InMemory_mode (0.01s)
+=== RUN   TestStreamWriter2
+=== RUN   TestStreamWriter2/Normal_mode
+=== RUN   TestStreamWriter2/Managed_mode
+=== RUN   TestStreamWriter2/InMemory_mode
+    db_test.go:147: In Memory option set
+--- PASS: TestStreamWriter2 (0.08s)
+    --- PASS: TestStreamWriter2/Normal_mode (0.04s)
+    --- PASS: TestStreamWriter2/Managed_mode (0.03s)
+    --- PASS: TestStreamWriter2/InMemory_mode (0.01s)
+=== RUN   TestStreamWriter3
+=== RUN   TestStreamWriter3/Normal_mode
+=== RUN   TestStreamWriter3/Managed_mode
+=== RUN   TestStreamWriter3/InMemory_mode
+    db_test.go:147: In Memory option set
+--- PASS: TestStreamWriter3 (0.08s)
+    --- PASS: TestStreamWriter3/Normal_mode (0.04s)
+    --- PASS: TestStreamWriter3/Managed_mode (0.03s)
+    --- PASS: TestStreamWriter3/InMemory_mode (0.01s)
+=== RUN   TestStreamWriter4
+    db_test.go:140: nil options
+--- PASS: TestStreamWriter4 (0.03s)
+=== RUN   TestStreamWriter5
+    db_test.go:140: nil options
+--- PASS: TestStreamWriter5 (0.03s)
+=== RUN   TestStreamWriter6
+--- PASS: TestStreamWriter6 (0.04s)
+=== RUN   TestStreamWriterCancel
+--- PASS: TestStreamWriterCancel (0.03s)
+=== RUN   TestStreamDone
+    db_test.go:140: nil options
+--- PASS: TestStreamDone (0.06s)
+=== RUN   TestSendOnClosedStream
+--- PASS: TestSendOnClosedStream (0.09s)
+=== RUN   TestSendOnClosedStream2
+--- PASS: TestSendOnClosedStream2 (0.02s)
+=== RUN   TestStreamWriterEncrypted
+badger 2026/06/25 03:16:02 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:02 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:02 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:02 INFO: DropAll called. Blocking writes...
+badger 2026/06/25 03:16:02 INFO: Writes flushed. Stopping compactions now...
+badger 2026/06/25 03:16:02 INFO: Deleted 0 SSTables. Now deleting value logs...
+badger 2026/06/25 03:16:02 INFO: Value logs deleted. Creating value log file: 1
+badger 2026/06/25 03:16:02 INFO: Deleted 1 value log files. DropAll done.
+badger 2026/06/25 03:16:02 INFO: Table created: 1 at level: 6 for stream: 0. Size: 211 B
+badger 2026/06/25 03:16:02 INFO: Resuming writes
+badger 2026/06/25 03:16:02 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:02 INFO: 
+Level 0 [ ]: NumTables: 00. Size: 0 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 01. Size: 211 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+badger 2026/06/25 03:16:02 INFO: All 1 tables opened in 0s
+badger 2026/06/25 03:16:02 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:02 INFO: Set nextTxnTs to 0-0-20
+badger 2026/06/25 03:16:02 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:02 INFO: 
+Level 0 [ ]: NumTables: 00. Size: 0 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 01. Size: 211 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+--- PASS: TestStreamWriterEncrypted (0.04s)
+=== RUN   TestStreamWriterWithLargeValue
+badger 2026/06/25 03:16:02 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:02 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:02 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:03 INFO: DropAll called. Blocking writes...
+badger 2026/06/25 03:16:03 INFO: Writes flushed. Stopping compactions now...
+badger 2026/06/25 03:16:03 INFO: Deleted 0 SSTables. Now deleting value logs...
+badger 2026/06/25 03:16:03 INFO: Value logs deleted. Creating value log file: 1
+badger 2026/06/25 03:16:03 INFO: Deleted 1 value log files. DropAll done.
+badger 2026/06/25 03:16:03 INFO: Table created: 1 at level: 6 for stream: 0. Size: 175 B
+badger 2026/06/25 03:16:03 INFO: Resuming writes
+badger 2026/06/25 03:16:03 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:03 INFO: 
+Level 0 [ ]: NumTables: 00. Size: 0 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 01. Size: 175 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+--- PASS: TestStreamWriterWithLargeValue (0.05s)
+=== RUN   TestStreamWriterIncremental
+=== RUN   TestStreamWriterIncremental/incremental_on_non-empty_DB
+    db_test.go:140: nil options
+=== RUN   TestStreamWriterIncremental/incremental_on_empty_DB
+    db_test.go:140: nil options
+=== RUN   TestStreamWriterIncremental/multiple_incremental
+    db_test.go:140: nil options
+=== RUN   TestStreamWriterIncremental/write_between_incremental_writes
+    db_test.go:140: nil options
+=== RUN   TestStreamWriterIncremental/incremental_writes_>_#levels
+    db_test.go:140: nil options
+badger 2026/06/25 03:16:03 WARNING: While running doCompact with {level:0 score:1.71 adjusted:0 dropPrefixes:[] t:{baseLevel:0 targetSz:[] fileSz:[]}}. Error: Unable to fill tables
+badger 2026/06/25 03:16:03 WARNING: While running doCompact with {level:0 score:1.71 adjusted:0 dropPrefixes:[] t:{baseLevel:0 targetSz:[] fileSz:[]}}. Error: Unable to fill tables
+badger 2026/06/25 03:16:03 WARNING: While running doCompact with {level:1 score:1.71 adjusted:0 dropPrefixes:[] t:{baseLevel:0 targetSz:[] fileSz:[]}}. Error: Unable to fill tables
+badger 2026/06/25 03:16:03 WARNING: While running doCompact with {level:1 score:1.71 adjusted:0 dropPrefixes:[] t:{baseLevel:0 targetSz:[] fileSz:[]}}. Error: Unable to fill tables
+badger 2026/06/25 03:16:03 WARNING: While running doCompact with {level:2 score:1.71 adjusted:0 dropPrefixes:[] t:{baseLevel:0 targetSz:[] fileSz:[]}}. Error: Unable to fill tables
+badger 2026/06/25 03:16:03 WARNING: While running doCompact with {level:2 score:1.71 adjusted:0 dropPrefixes:[] t:{baseLevel:0 targetSz:[] fileSz:[]}}. Error: Unable to fill tables
+badger 2026/06/25 03:16:03 WARNING: While running doCompact with {level:3 score:1.71 adjusted:0 dropPrefixes:[] t:{baseLevel:0 targetSz:[] fileSz:[]}}. Error: Unable to fill tables
+badger 2026/06/25 03:16:03 WARNING: While running doCompact with {level:3 score:1.71 adjusted:0 dropPrefixes:[] t:{baseLevel:0 targetSz:[] fileSz:[]}}. Error: Unable to fill tables
+badger 2026/06/25 03:16:03 WARNING: While running doCompact with {level:4 score:1.71 adjusted:0 dropPrefixes:[] t:{baseLevel:0 targetSz:[] fileSz:[]}}. Error: Unable to fill tables
+badger 2026/06/25 03:16:03 WARNING: While running doCompact with {level:4 score:1.71 adjusted:0 dropPrefixes:[] t:{baseLevel:0 targetSz:[] fileSz:[]}}. Error: Unable to fill tables
+badger 2026/06/25 03:16:03 WARNING: While running doCompact with {level:5 score:1.71 adjusted:0 dropPrefixes:[] t:{baseLevel:0 targetSz:[] fileSz:[]}}. Error: Unable to fill tables
+badger 2026/06/25 03:16:03 WARNING: While running doCompact with {level:5 score:1.71 adjusted:0 dropPrefixes:[] t:{baseLevel:0 targetSz:[] fileSz:[]}}. Error: Unable to fill tables
+=== RUN   TestStreamWriterIncremental/multiple_incremental_with_older_data_first
+    db_test.go:140: nil options
+--- PASS: TestStreamWriterIncremental (0.25s)
+    --- PASS: TestStreamWriterIncremental/incremental_on_non-empty_DB (0.03s)
+    --- PASS: TestStreamWriterIncremental/incremental_on_empty_DB (0.03s)
+    --- PASS: TestStreamWriterIncremental/multiple_incremental (0.03s)
+    --- PASS: TestStreamWriterIncremental/write_between_incremental_writes (0.03s)
+    --- PASS: TestStreamWriterIncremental/incremental_writes_>_#levels (0.10s)
+    --- PASS: TestStreamWriterIncremental/multiple_incremental_with_older_data_first (0.04s)
+=== RUN   TestLargeEncode
+--- PASS: TestLargeEncode (0.00s)
+=== RUN   TestNumFieldsHeader
+--- PASS: TestNumFieldsHeader (0.00s)
+=== RUN   TestTxnSimple
+    db_test.go:140: nil options
+--- PASS: TestTxnSimple (0.02s)
+=== RUN   TestTxnReadAfterWrite
+=== RUN   TestTxnReadAfterWrite/disk_mode
+    db_test.go:140: nil options
+=== RUN   TestTxnReadAfterWrite/InMemory_mode
+--- PASS: TestTxnReadAfterWrite (0.03s)
+    --- PASS: TestTxnReadAfterWrite/disk_mode (0.03s)
+    --- PASS: TestTxnReadAfterWrite/InMemory_mode (0.00s)
+=== RUN   TestTxnCommitAsync
+    db_test.go:140: nil options
+--- PASS: TestTxnCommitAsync (0.05s)
+=== RUN   TestTxnVersions
+    db_test.go:140: nil options
+--- PASS: TestTxnVersions (0.03s)
+=== RUN   TestTxnWriteSkew
+    db_test.go:140: nil options
+--- PASS: TestTxnWriteSkew (0.03s)
+=== RUN   TestTxnIterationEdgeCase
+    db_test.go:140: nil options
+--- PASS: TestTxnIterationEdgeCase (0.02s)
+=== RUN   TestTxnIterationEdgeCase2
+    db_test.go:140: nil options
+--- PASS: TestTxnIterationEdgeCase2 (0.02s)
+=== RUN   TestTxnIterationEdgeCase3
+    db_test.go:140: nil options
+--- PASS: TestTxnIterationEdgeCase3 (0.03s)
+=== RUN   TestIteratorAllVersionsWithDeleted
+=== RUN   TestIteratorAllVersionsWithDeleted/disk_mode
+    db_test.go:140: nil options
+=== RUN   TestIteratorAllVersionsWithDeleted/InMemory_mode
+--- PASS: TestIteratorAllVersionsWithDeleted (0.03s)
+    --- PASS: TestIteratorAllVersionsWithDeleted/disk_mode (0.02s)
+    --- PASS: TestIteratorAllVersionsWithDeleted/InMemory_mode (0.00s)
+=== RUN   TestIteratorAllVersionsWithDeleted2
+    db_test.go:140: nil options
+--- PASS: TestIteratorAllVersionsWithDeleted2 (0.02s)
+=== RUN   TestManagedDB
+=== RUN   TestManagedDB/disk_mode
+=== RUN   TestManagedDB/InMemory_mode
+--- PASS: TestManagedDB (0.03s)
+    --- PASS: TestManagedDB/disk_mode (0.03s)
+    --- PASS: TestManagedDB/InMemory_mode (0.00s)
+=== RUN   TestArmV7Issue311Fix
+badger 2026/06/25 03:16:03 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:03 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:03 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:03 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:03 INFO: 
+Level 0 [ ]: NumTables: 01. Size: 179 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 8.0 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 8.0 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 8.0 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 8.0 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 8.0 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 8.0 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+--- PASS: TestArmV7Issue311Fix (0.03s)
+=== RUN   TestConflict
+=== RUN   TestConflict/TxnGet
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+=== RUN   TestConflict/ItrSeek
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+    db_test.go:140: nil options
+--- PASS: TestConflict (0.55s)
+    --- PASS: TestConflict/TxnGet (0.29s)
+    --- PASS: TestConflict/ItrSeek (0.26s)
+=== RUN   TestDynamicValueThreshold
+    value_test.go:27: 
+--- SKIP: TestDynamicValueThreshold (0.00s)
+=== RUN   TestValueBasic
+    value_test.go:98: Pointer written: {Fid:1 Len:51 Offset:20} {Fid:1 Len:53 Offset:71}
+--- PASS: TestValueBasic (0.02s)
+=== RUN   TestValueGCManaged
+    value_test.go:190: File: 000001.sst. Size: 8.7 KiB
+    value_test.go:190: File: 000001.vlog. Size: 13 MiB
+    value_test.go:190: File: 000002.sst. Size: 8.8 KiB
+    value_test.go:190: File: 000002.vlog. Size: 13 MiB
+    value_test.go:190: File: 000003.sst. Size: 8.8 KiB
+    value_test.go:190: File: 000003.vlog. Size: 13 MiB
+    value_test.go:190: File: 000004.sst. Size: 8.5 KiB
+    value_test.go:190: File: 000004.vlog. Size: 13 MiB
+    value_test.go:190: File: 000005.sst. Size: 8.2 KiB
+    value_test.go:190: File: 000005.vlog. Size: 13 MiB
+    value_test.go:190: File: 000006.sst. Size: 6.9 KiB
+    value_test.go:190: File: 000006.vlog. Size: 13 MiB
+    value_test.go:190: File: 000007.vlog. Size: 13 MiB
+    value_test.go:190: File: 000008.vlog. Size: 13 MiB
+    value_test.go:190: File: 000009.vlog. Size: 13 MiB
+    value_test.go:190: File: 000010.vlog. Size: 2.0 GiB
+    value_test.go:190: File: 00007.mem. Size: 64 KiB
+    value_test.go:190: File: 00008.mem. Size: 64 KiB
+    value_test.go:190: File: 00009.mem. Size: 64 KiB
+    value_test.go:190: File: DISCARD. Size: 1.0 MiB
+    value_test.go:190: File: KEYREGISTRY. Size: 28 B
+    value_test.go:190: File: LOCK. Size: 5 B
+    value_test.go:190: File: MANIFEST. Size: 100 B
+badger 2026/06/25 03:16:04 WARNING: While running doCompact with {level:0 score:1.2 adjusted:120 dropPrefixes:[] t:{baseLevel:6 targetSz:[0 10485760 10485760 10485760 10485760 10485760 10485760] fileSz:[32768 32768 32768 32768 32768 32768 32768]}}. Error: Unable to fill tables
+badger 2026/06/25 03:16:04 WARNING: While running doCompact with {level:0 score:1.2 adjusted:120 dropPrefixes:[] t:{baseLevel:6 targetSz:[0 10485760 10485760 10485760 10485760 10485760 10485760] fileSz:[32768 32768 32768 32768 32768 32768 32768]}}. Error: Unable to fill tables
+badger 2026/06/25 03:16:04 WARNING: While running doCompact with {level:0 score:1.71 adjusted:0 dropPrefixes:[] t:{baseLevel:0 targetSz:[] fileSz:[]}}. Error: Unable to fill tables
+badger 2026/06/25 03:16:04 WARNING: While running doCompact with {level:0 score:1.71 adjusted:0 dropPrefixes:[] t:{baseLevel:0 targetSz:[] fileSz:[]}}. Error: Unable to fill tables
+--- PASS: TestValueGCManaged (0.20s)
+=== RUN   TestValueGC
+--- PASS: TestValueGC (0.03s)
+=== RUN   TestValueGC2
+--- PASS: TestValueGC2 (0.04s)
+=== RUN   TestValueGC3
+--- PASS: TestValueGC3 (0.03s)
+=== RUN   TestValueGC4
+--- PASS: TestValueGC4 (0.04s)
+=== RUN   TestPersistLFDiscardStats
+--- PASS: TestPersistLFDiscardStats (0.04s)
+=== RUN   TestValueChecksums
+--- PASS: TestValueChecksums (0.15s)
+=== RUN   TestPartialAppendToWAL
+--- PASS: TestPartialAppendToWAL (0.10s)
+=== RUN   TestReadOnlyOpenWithPartialAppendToWAL
+--- PASS: TestReadOnlyOpenWithPartialAppendToWAL (0.08s)
+=== RUN   TestValueLogTrigger
+    value_test.go:738: Difficult to trigger compaction, so skipping. Re-enable after fixing #226
+--- SKIP: TestValueLogTrigger (0.00s)
+=== RUN   TestPenultimateMemCorruption
+badger 2026/06/25 03:16:04 ERROR: error flushing memtable to disk: error while creating table err: while creating table: /var/folders/ml/ffmq7y_x1w3g79t81m4gr9b80000gp/T/badger-test2551062595/000001.sst error: open /var/folders/ml/ffmq7y_x1w3g79t81m4gr9b80000gp/T/badger-test2551062595/000001.sst: file exists
+unable to open: /var/folders/ml/ffmq7y_x1w3g79t81m4gr9b80000gp/T/badger-test2551062595/000001.sst
+github.com/dgraph-io/ristretto/v2/z.OpenMmapFile
+        /Users/AshleyLuo1/go/pkg/mod/github.com/dgraph-io/ristretto/v2@v2.1.0/z/file.go:82
+github.com/dgraph-io/badger/v4/table.CreateTable
+        /Users/AshleyLuo1/GolandProjects/darshan-badger/table/table.go:257
+github.com/dgraph-io/badger/v4.(*DB).handleMemTableFlushClassic
+        /Users/AshleyLuo1/GolandProjects/darshan-badger/db.go:1334
+github.com/dgraph-io/badger/v4.(*DB).handleMemTableFlush
+        /Users/AshleyLuo1/GolandProjects/darshan-badger/db.go:1424
+github.com/dgraph-io/badger/v4.(*DB).flushMemtable
+        /Users/AshleyLuo1/GolandProjects/darshan-badger/db.go:1438
+github.com/dgraph-io/badger/v4.Open.func5
+        /Users/AshleyLuo1/GolandProjects/darshan-badger/db.go:449
+runtime.goexit
+        /opt/homebrew/Cellar/go/1.25.5/libexec/src/runtime/asm_arm64.s:1268, retrying
+badger 2026/06/25 03:16:05 ERROR: error flushing memtable to disk: error while creating table err: while creating table: /var/folders/ml/ffmq7y_x1w3g79t81m4gr9b80000gp/T/badger-test2551062595/000002.sst error: open /var/folders/ml/ffmq7y_x1w3g79t81m4gr9b80000gp/T/badger-test2551062595/000002.sst: file exists
+unable to open: /var/folders/ml/ffmq7y_x1w3g79t81m4gr9b80000gp/T/badger-test2551062595/000002.sst
+github.com/dgraph-io/ristretto/v2/z.OpenMmapFile
+        /Users/AshleyLuo1/go/pkg/mod/github.com/dgraph-io/ristretto/v2@v2.1.0/z/file.go:82
+github.com/dgraph-io/badger/v4/table.CreateTable
+        /Users/AshleyLuo1/GolandProjects/darshan-badger/table/table.go:257
+github.com/dgraph-io/badger/v4.(*DB).handleMemTableFlushClassic
+        /Users/AshleyLuo1/GolandProjects/darshan-badger/db.go:1334
+github.com/dgraph-io/badger/v4.(*DB).handleMemTableFlush
+        /Users/AshleyLuo1/GolandProjects/darshan-badger/db.go:1424
+github.com/dgraph-io/badger/v4.(*DB).flushMemtable
+        /Users/AshleyLuo1/GolandProjects/darshan-badger/db.go:1438
+github.com/dgraph-io/badger/v4.Open.func5
+        /Users/AshleyLuo1/GolandProjects/darshan-badger/db.go:449
+runtime.goexit
+        /opt/homebrew/Cellar/go/1.25.5/libexec/src/runtime/asm_arm64.s:1268, retrying
+badger 2026/06/25 03:16:06 ERROR: while deleting file: /var/folders/ml/ffmq7y_x1w3g79t81m4gr9b80000gp/T/badger-test2551062595/00002.mem, err: remove /var/folders/ml/ffmq7y_x1w3g79t81m4gr9b80000gp/T/badger-test2551062595/00002.mem: no such file or directory
+--- PASS: TestPenultimateMemCorruption (2.06s)
+=== RUN   TestBug578
+badger 2026/06/25 03:16:06 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:06 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:06 INFO: Set nextTxnTs to 0-0-0
+    value_test.go:943: Cycle: 0
+    value_test.go:943: Cycle: 1
+    value_test.go:943: Cycle: 2
+    value_test.go:943: Cycle: 3
+    value_test.go:943: Cycle: 4
+    value_test.go:943: Cycle: 5
+    value_test.go:943: Cycle: 6
+    value_test.go:943: Cycle: 7
+    value_test.go:943: Cycle: 8
+    value_test.go:943: Cycle: 9
+badger 2026/06/25 03:16:07 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:07 INFO: 
+Level 0 [ ]: NumTables: 01. Size: 25 KiB of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 8.0 KiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 8.0 KiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 8.0 KiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 8.0 KiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 8.0 KiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 8.0 KiB
+Level Done
+--- PASS: TestBug578 (0.05s)
+=== RUN   TestValueLogTruncate
+badger 2026/06/25 03:16:07 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:07 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:07 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:07 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:07 INFO: 
+Level 0 [ ]: NumTables: 01. Size: 164 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+badger 2026/06/25 03:16:07 INFO: All 1 tables opened in 0s
+badger 2026/06/25 03:16:07 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:07 INFO: Set nextTxnTs to 0-0-1
+badger 2026/06/25 03:16:07 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:07 INFO: 
+Level 0 [ ]: NumTables: 01. Size: 164 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+--- PASS: TestValueLogTruncate (0.04s)
+=== RUN   TestSafeEntry
+--- PASS: TestSafeEntry (0.00s)
+=== RUN   TestValueEntryChecksum
+=== RUN   TestValueEntryChecksum/ok
+=== RUN   TestValueEntryChecksum/Corruption
+badger 2026/06/25 03:16:07 ERROR: Unable to read: Key: [75 69 89], Version : 0-0-1, meta: 66, userMeta: 0 Error: ErrEOF: End of file
+badger 2026/06/25 03:16:07 ERROR: Key: [75 69 89], Version : 0-0-1, meta: 66, userMeta: 0 valuePointer: {Fid:1 Len:127 Offset:20}
+--- PASS: TestValueEntryChecksum (0.07s)
+    --- PASS: TestValueEntryChecksum/ok (0.04s)
+    --- PASS: TestValueEntryChecksum/Corruption (0.04s)
+=== RUN   TestValidateWrite
+--- PASS: TestValidateWrite (0.00s)
+=== RUN   TestValueLogMeta
+--- PASS: TestValueLogMeta (0.03s)
+=== RUN   TestFirstVlogFile
+badger 2026/06/25 03:16:07 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:07 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:07 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:07 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:07 INFO: 
+Level 0 [ ]: NumTables: 00. Size: 0 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+--- PASS: TestFirstVlogFile (0.02s)
+=== RUN   TestWaterMarkEdgeCase
+    db_test.go:140: nil options
+--- PASS: TestWaterMarkEdgeCase (0.23s)
+=== RUN   ExampleOpen
+badger 2026/06/25 03:16:07 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:07 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:07 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:07 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:07 INFO: 
+Level 0 [ ]: NumTables: 01. Size: 169 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+--- PASS: ExampleOpen (0.03s)
+=== RUN   ExampleTxn_NewIterator
+badger 2026/06/25 03:16:07 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:07 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:07 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:07 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:07 INFO: 
+Level 0 [ ]: NumTables: 01. Size: 15 KiB of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+--- PASS: ExampleTxn_NewIterator (0.03s)
+PASS
+ok      github.com/dgraph-io/badger/v4  145.372s
+?       github.com/dgraph-io/badger/v4/badger   [no test files]
+# github.com/dgraph-io/badger/v4/badger/cmd.test
+ld: warning: -ld_classic is deprecated and will be removed in a future release
+=== RUN   TestRotate
+badger 2026/06/25 03:16:10 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:10 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:10 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:10 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:10 INFO: 
+Level 0 [ ]: NumTables: 00. Size: 0 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+badger 2026/06/25 03:16:10 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:10 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:10 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:10 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:10 INFO: 
+Level 0 [ ]: NumTables: 00. Size: 0 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+badger 2026/06/25 03:16:10 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:10 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:10 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:10 INFO: Deleting empty file: /var/folders/ml/ffmq7y_x1w3g79t81m4gr9b80000gp/T/badger-test3210415236/000001.vlog
+badger 2026/06/25 03:16:10 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:10 INFO: 
+Level 0 [ ]: NumTables: 00. Size: 0 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+badger 2026/06/25 03:16:10 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:10 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:10 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:10 INFO: Deleting empty file: /var/folders/ml/ffmq7y_x1w3g79t81m4gr9b80000gp/T/badger-test3210415236/000002.vlog
+badger 2026/06/25 03:16:10 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:10 INFO: 
+Level 0 [ ]: NumTables: 00. Size: 0 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+--- PASS: TestRotate (0.07s)
+=== RUN   TestRotatePlainTextToEncrypted
+badger 2026/06/25 03:16:10 INFO: All 0 tables opened in 0s
+badger 2026/06/25 03:16:10 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:10 INFO: Set nextTxnTs to 0-0-0
+badger 2026/06/25 03:16:10 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:10 INFO: 
+Level 0 [ ]: NumTables: 01. Size: 169 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+badger 2026/06/25 03:16:10 ERROR: Received err: Encryption key mismatch. Cleaning up...
+badger 2026/06/25 03:16:11 INFO: All 1 tables opened in 0s
+badger 2026/06/25 03:16:11 INFO: Discard stats nextEmptySlot: 0
+badger 2026/06/25 03:16:11 INFO: Set nextTxnTs to 0-0-1
+badger 2026/06/25 03:16:11 INFO: Lifetime L0 stalled for: 0s
+badger 2026/06/25 03:16:11 INFO: 
+Level 0 [ ]: NumTables: 01. Size: 169 B of 0 B. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 64 MiB
+Level 1 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 2 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 3 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 4 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 5 [ ]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level 6 [B]: NumTables: 00. Size: 0 B of 10 MiB. Score: 0.00->0.00 StaleData: 0 B Target FileSize: 2.0 MiB
+Level Done
+--- PASS: TestRotatePlainTextToEncrypted (0.03s)
+PASS
+ok      github.com/dgraph-io/badger/v4/badger/cmd       0.633s
+?       github.com/dgraph-io/badger/v4/divytime [no test files]
+?       github.com/dgraph-io/badger/v4/duckdb   [no test files]
+?       github.com/dgraph-io/badger/v4/fb       [no test files]
+?       github.com/dgraph-io/badger/v4/integration/testgc       [no test files]
+?       github.com/dgraph-io/badger/v4/options  [no test files]
+=== RUN   TestProtosRegenerate
+--- PASS: TestProtosRegenerate (2.47s)
+PASS
+ok      github.com/dgraph-io/badger/v4/pb       3.118s
+=== RUN   TestEmpty
+--- PASS: TestEmpty (0.00s)
+=== RUN   TestBasic
+--- PASS: TestBasic (0.00s)
+=== RUN   TestConcurrentBasic
+--- PASS: TestConcurrentBasic (0.00s)
+=== RUN   TestConcurrentBasicBigValues
+--- PASS: TestConcurrentBasicBigValues (0.04s)
+=== RUN   TestOneKey
+--- PASS: TestOneKey (0.00s)
+=== RUN   TestFindNear
+--- PASS: TestFindNear (0.00s)
+=== RUN   TestIteratorNext
+--- PASS: TestIteratorNext (0.00s)
+=== RUN   TestIteratorPrev
+--- PASS: TestIteratorPrev (0.00s)
+=== RUN   TestIteratorSeek
+--- PASS: TestIteratorSeek (0.00s)
+PASS
+ok      github.com/dgraph-io/badger/v4/skl      1.264s
+=== RUN   TestTableIndex
+=== RUN   TestTableIndex/No_encyption/compression
+=== RUN   TestTableIndex/Only_encryption
+=== RUN   TestTableIndex/Only_compression
+=== RUN   TestTableIndex/Compression_and_encryption
+--- PASS: TestTableIndex (0.11s)
+    --- PASS: TestTableIndex/No_encyption/compression (0.03s)
+    --- PASS: TestTableIndex/Only_encryption (0.03s)
+    --- PASS: TestTableIndex/Only_compression (0.02s)
+    --- PASS: TestTableIndex/Compression_and_encryption (0.03s)
+=== RUN   TestInvalidCompression
+=== RUN   TestInvalidCompression/with_correct_decompression_algo
+=== RUN   TestInvalidCompression/with_incorrect_decompression_algo
+--- PASS: TestInvalidCompression (0.00s)
+    --- PASS: TestInvalidCompression/with_correct_decompression_algo (0.00s)
+    --- PASS: TestInvalidCompression/with_incorrect_decompression_algo (0.00s)
+=== RUN   TestBloomfilter
+=== RUN   TestBloomfilter/build_with_bloom_filter
+=== RUN   TestBloomfilter/build_without_bloom_filter
+--- PASS: TestBloomfilter (0.00s)
+    --- PASS: TestBloomfilter/build_with_bloom_filter (0.00s)
+    --- PASS: TestBloomfilter/build_without_bloom_filter (0.00s)
+=== RUN   TestEmptyBuilder
+--- PASS: TestEmptyBuilder (0.00s)
+=== RUN   TestSimpleIterator
+--- PASS: TestSimpleIterator (0.00s)
+=== RUN   TestMergeSingle
+--- PASS: TestMergeSingle (0.00s)
+=== RUN   TestMergeSingleReversed
+--- PASS: TestMergeSingleReversed (0.00s)
+=== RUN   TestMergeMore
+=== RUN   TestMergeMore/forward
+=== RUN   TestMergeMore/forward/no_duplicates
+=== RUN   TestMergeMore/forward/duplicates
+=== RUN   TestMergeMore/reverse
+=== RUN   TestMergeMore/reverse/no_duplicates
+=== RUN   TestMergeMore/reverse/duplicates
+--- PASS: TestMergeMore (0.00s)
+    --- PASS: TestMergeMore/forward (0.00s)
+        --- PASS: TestMergeMore/forward/no_duplicates (0.00s)
+        --- PASS: TestMergeMore/forward/duplicates (0.00s)
+    --- PASS: TestMergeMore/reverse (0.00s)
+        --- PASS: TestMergeMore/reverse/no_duplicates (0.00s)
+        --- PASS: TestMergeMore/reverse/duplicates (0.00s)
+=== RUN   TestMergeIteratorNested
+--- PASS: TestMergeIteratorNested (0.00s)
+=== RUN   TestMergeIteratorSeek
+--- PASS: TestMergeIteratorSeek (0.00s)
+=== RUN   TestMergeIteratorSeekReversed
+--- PASS: TestMergeIteratorSeekReversed (0.00s)
+=== RUN   TestMergeIteratorSeekInvalid
+--- PASS: TestMergeIteratorSeekInvalid (0.00s)
+=== RUN   TestMergeIteratorSeekInvalidReversed
+--- PASS: TestMergeIteratorSeekInvalidReversed (0.00s)
+=== RUN   TestMergeIteratorDuplicate
+=== RUN   TestMergeIteratorDuplicate/forward
+=== RUN   TestMergeIteratorDuplicate/forward/only_duplicates
+=== RUN   TestMergeIteratorDuplicate/forward/one
+=== RUN   TestMergeIteratorDuplicate/forward/two
+=== RUN   TestMergeIteratorDuplicate/reverse
+--- PASS: TestMergeIteratorDuplicate (0.00s)
+    --- PASS: TestMergeIteratorDuplicate/forward (0.00s)
+        --- PASS: TestMergeIteratorDuplicate/forward/only_duplicates (0.00s)
+        --- PASS: TestMergeIteratorDuplicate/forward/one (0.00s)
+        --- PASS: TestMergeIteratorDuplicate/forward/two (0.00s)
+    --- PASS: TestMergeIteratorDuplicate/reverse (0.00s)
+=== RUN   TestMergeDuplicates
+=== RUN   TestMergeDuplicates/forward
+=== RUN   TestMergeDuplicates/reverse
+--- PASS: TestMergeDuplicates (0.00s)
+    --- PASS: TestMergeDuplicates/forward (0.00s)
+    --- PASS: TestMergeDuplicates/reverse (0.00s)
+=== RUN   TestTableIterator
+=== RUN   TestTableIterator/n=99
+=== RUN   TestTableIterator/n=100
+=== RUN   TestTableIterator/n=101
+--- PASS: TestTableIterator (0.00s)
+    --- PASS: TestTableIterator/n=99 (0.00s)
+    --- PASS: TestTableIterator/n=100 (0.00s)
+    --- PASS: TestTableIterator/n=101 (0.00s)
+=== RUN   TestSeekToFirst
+=== RUN   TestSeekToFirst/n=99
+=== RUN   TestSeekToFirst/n=100
+=== RUN   TestSeekToFirst/n=101
+=== RUN   TestSeekToFirst/n=199
+=== RUN   TestSeekToFirst/n=200
+=== RUN   TestSeekToFirst/n=250
+=== RUN   TestSeekToFirst/n=9999
+=== RUN   TestSeekToFirst/n=10000
+--- PASS: TestSeekToFirst (0.01s)
+    --- PASS: TestSeekToFirst/n=99 (0.00s)
+    --- PASS: TestSeekToFirst/n=100 (0.00s)
+    --- PASS: TestSeekToFirst/n=101 (0.00s)
+    --- PASS: TestSeekToFirst/n=199 (0.00s)
+    --- PASS: TestSeekToFirst/n=200 (0.00s)
+    --- PASS: TestSeekToFirst/n=250 (0.00s)
+    --- PASS: TestSeekToFirst/n=9999 (0.00s)
+    --- PASS: TestSeekToFirst/n=10000 (0.00s)
+=== RUN   TestSeekToLast
+=== RUN   TestSeekToLast/n=99
+=== RUN   TestSeekToLast/n=100
+=== RUN   TestSeekToLast/n=101
+=== RUN   TestSeekToLast/n=199
+=== RUN   TestSeekToLast/n=200
+=== RUN   TestSeekToLast/n=250
+=== RUN   TestSeekToLast/n=9999
+=== RUN   TestSeekToLast/n=10000
+--- PASS: TestSeekToLast (0.01s)
+    --- PASS: TestSeekToLast/n=99 (0.00s)
+    --- PASS: TestSeekToLast/n=100 (0.00s)
+    --- PASS: TestSeekToLast/n=101 (0.00s)
+    --- PASS: TestSeekToLast/n=199 (0.00s)
+    --- PASS: TestSeekToLast/n=200 (0.00s)
+    --- PASS: TestSeekToLast/n=250 (0.00s)
+    --- PASS: TestSeekToLast/n=9999 (0.00s)
+    --- PASS: TestSeekToLast/n=10000 (0.00s)
+=== RUN   TestSeek
+--- PASS: TestSeek (0.00s)
+=== RUN   TestSeekForPrev
+--- PASS: TestSeekForPrev (0.00s)
+=== RUN   TestIterateFromStart
+=== RUN   TestIterateFromStart/n=99
+=== RUN   TestIterateFromStart/n=100
+=== RUN   TestIterateFromStart/n=101
+=== RUN   TestIterateFromStart/n=199
+=== RUN   TestIterateFromStart/n=200
+=== RUN   TestIterateFromStart/n=250
+=== RUN   TestIterateFromStart/n=9999
+=== RUN   TestIterateFromStart/n=10000
+--- PASS: TestIterateFromStart (0.02s)
+    --- PASS: TestIterateFromStart/n=99 (0.00s)
+    --- PASS: TestIterateFromStart/n=100 (0.00s)
+    --- PASS: TestIterateFromStart/n=101 (0.00s)
+    --- PASS: TestIterateFromStart/n=199 (0.00s)
+    --- PASS: TestIterateFromStart/n=200 (0.00s)
+    --- PASS: TestIterateFromStart/n=250 (0.00s)
+    --- PASS: TestIterateFromStart/n=9999 (0.01s)
+    --- PASS: TestIterateFromStart/n=10000 (0.01s)
+=== RUN   TestIterateFromEnd
+=== RUN   TestIterateFromEnd/n=99
+=== RUN   TestIterateFromEnd/n=100
+=== RUN   TestIterateFromEnd/n=101
+=== RUN   TestIterateFromEnd/n=199
+=== RUN   TestIterateFromEnd/n=200
+=== RUN   TestIterateFromEnd/n=250
+=== RUN   TestIterateFromEnd/n=9999
+=== RUN   TestIterateFromEnd/n=10000
+--- PASS: TestIterateFromEnd (0.02s)
+    --- PASS: TestIterateFromEnd/n=99 (0.00s)
+    --- PASS: TestIterateFromEnd/n=100 (0.00s)
+    --- PASS: TestIterateFromEnd/n=101 (0.00s)
+    --- PASS: TestIterateFromEnd/n=199 (0.00s)
+    --- PASS: TestIterateFromEnd/n=200 (0.00s)
+    --- PASS: TestIterateFromEnd/n=250 (0.00s)
+    --- PASS: TestIterateFromEnd/n=9999 (0.01s)
+    --- PASS: TestIterateFromEnd/n=10000 (0.01s)
+=== RUN   TestTable
+--- PASS: TestTable (0.01s)
+=== RUN   TestIterateBackAndForth
+--- PASS: TestIterateBackAndForth (0.00s)
+=== RUN   TestUniIterator
+--- PASS: TestUniIterator (0.01s)
+=== RUN   TestConcatIteratorOneTable
+--- PASS: TestConcatIteratorOneTable (0.00s)
+=== RUN   TestConcatIterator
+--- PASS: TestConcatIterator (0.04s)
+=== RUN   TestMergingIterator
+--- PASS: TestMergingIterator (0.00s)
+=== RUN   TestMergingIteratorReversed
+--- PASS: TestMergingIteratorReversed (0.00s)
+=== RUN   TestMergingIteratorTakeOne
+--- PASS: TestMergingIteratorTakeOne (0.00s)
+=== RUN   TestMergingIteratorTakeTwo
+--- PASS: TestMergingIteratorTakeTwo (0.00s)
+=== RUN   TestTableBigValues
+--- PASS: TestTableBigValues (0.25s)
+=== RUN   TestTableChecksum
+--- PASS: TestTableChecksum (0.00s)
+=== RUN   TestDoesNotHaveRace
+--- PASS: TestDoesNotHaveRace (0.00s)
+=== RUN   TestMaxVersion
+--- PASS: TestMaxVersion (0.00s)
+PASS
+ok      github.com/dgraph-io/badger/v4/table    1.421s
+=== RUN   TestGet
+--- PASS: TestGet (0.00s)
+=== RUN   TestTrieDelete
+    trie_test.go:47: Num nodes: 1
+    trie_test.go:55: Num nodes: 6
+    trie_test.go:58: Num nodes: 6
+    trie_test.go:63: Num nodes: 6
+    trie_test.go:73: Num nodes: 1
+--- PASS: TestTrieDelete (0.00s)
+=== RUN   TestParseIgnoreBytes
+--- PASS: TestParseIgnoreBytes (0.00s)
+=== RUN   TestPrefixMatchWithHoles
+    trie_test.go:137: Num nodes: 18
+    trie_test.go:148: Num nodes: 18
+    trie_test.go:151: Num nodes: 9
+    trie_test.go:154: Num nodes: 5
+    trie_test.go:157: Num nodes: 1
+    trie_test.go:160: Num nodes: 1
+    trie_test.go:163: Num nodes: 1
+--- PASS: TestPrefixMatchWithHoles (0.00s)
+PASS
+ok      github.com/dgraph-io/badger/v4/trie     1.275s
+?       github.com/dgraph-io/badger/v4/types    [no test files]
+=== RUN   TestSmallBloomFilter
+--- PASS: TestSmallBloomFilter (0.00s)
+=== RUN   TestBloomFilter
+--- PASS: TestBloomFilter (0.01s)
+=== RUN   TestHash
+--- PASS: TestHash (0.00s)
+=== RUN   TestXORBlock
+    encrypt_test.go:26: Using 16 size IV
+--- PASS: TestXORBlock (0.00s)
+=== RUN   TestCombineWithBothErrorsPresent
+--- PASS: TestCombineWithBothErrorsPresent (0.00s)
+=== RUN   TestCombineErrorsWithOneErrorPresent
+--- PASS: TestCombineErrorsWithOneErrorPresent (0.00s)
+=== RUN   TestCombineErrorsWithOtherErrorPresent
+--- PASS: TestCombineErrorsWithOtherErrorPresent (0.00s)
+=== RUN   TestCombineErrorsWithBothErrorsAsNil
+--- PASS: TestCombineErrorsWithBothErrorsAsNil (0.00s)
+=== RUN   TestPageBuffer
+--- PASS: TestPageBuffer (0.00s)
+=== RUN   TestBufferWrite
+--- PASS: TestBufferWrite (0.00s)
+=== RUN   TestPagebufferTruncate
+--- PASS: TestPagebufferTruncate (0.00s)
+=== RUN   TestPagebufferReader
+--- PASS: TestPagebufferReader (0.00s)
+=== RUN   TestPagebufferReader2
+--- PASS: TestPagebufferReader2 (0.00s)
+=== RUN   TestPagebufferReader3
+--- PASS: TestPagebufferReader3 (0.00s)
+=== RUN   TestPagebufferReader4
+--- PASS: TestPagebufferReader4 (0.00s)
+=== RUN   TestPagebufferReader5
+--- PASS: TestPagebufferReader5 (0.00s)
+=== RUN   TestSizeVarintForZero
+--- PASS: TestSizeVarintForZero (0.00s)
+=== RUN   TestEncodedSize
+--- PASS: TestEncodedSize (0.00s)
+=== RUN   TestAllocatorReuse
+    y_test.go:329: Allocator: Allocator: 2f2e000000000001
+        idx: 0 len: 1024 cum: 1024
+        idx: 1 len: 2048 cum: 3072
+        idx: 2 len: 4096 cum: 7168
+        idx: 3 len: 8192 cum: 15360
+        idx: 4 len: 16384 cum: 31744
+        idx: 5 len: 32768 cum: 64512
+        idx: 6 len: 65536 cum: 130048
+        idx: 7 len: 131072 cum: 261120
+        idx: 8 len: 262144 cum: 523264
+        idx: 9 len: 524288 cum: 1047552
+        idx: 10 len: 1048576 cum: 2096128
+        idx: 11 len: 2097152 cum: 4193280
+        bi: 11 pi: 814384
+        Size: 2910512
+        
+--- PASS: TestAllocatorReuse (0.54s)
+PASS
+ok      github.com/dgraph-io/badger/v4/y        1.981s

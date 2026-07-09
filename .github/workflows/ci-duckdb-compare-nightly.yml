@@ -1,0 +1,52 @@
+name: ci-duckdb-compare-nightly
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  duckdb-compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.1"
+
+      - name: Run compare harness
+        run: make duckdb-compare
+
+      - name: Locate latest artifact directory
+        id: artifact_dir
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest="$(ls -1dt artifacts/duckdb/* | head -n 1)"
+          echo "latest=${latest}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish compare markdown in job summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          summary="${{ steps.artifact_dir.outputs.latest }}/compare_summary.md"
+          if [[ -f "${summary}" ]]; then
+            cat "${summary}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "compare_summary.md not found at ${summary}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload compare artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: duckdb-compare-${{ github.run_id }}
+          path: ${{ steps.artifact_dir.outputs.latest }}
+          if-no-files-found: error
+          retention-days: 14

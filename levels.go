@@ -6,6 +6,9 @@
 package badger
 
 import (
+	"github.com/dgraph-io/badger/v4/table"
+	"github.com/dgraph-io/badger/v4/types"
+
 	"bytes"
 	"context"
 	"encoding/hex"
@@ -25,7 +28,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/badger/v4/table"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -184,12 +186,12 @@ func newLevelsController(db *DB, mf *Manifest) (*levelsController, error) {
 
 // getPartitionID returns which partition [0..fanOut^(level+1)-1] a key belongs to.
 func getPartitionID(level int, key []byte, fanOut int) uint32 {
-    parts := 1
-    for i := 0; i < level+1; i++ {
-        parts *= fanOut
-    }
-    h := y.Hash(key)
-    return (h % uint32(parts))
+	parts := 1
+	for i := 0; i < level+1; i++ {
+		parts *= fanOut
+	}
+	h := y.Hash(key)
+	return (h % uint32(parts))
 }
 
 // Closes the tables, for cleanup in newLevelsController.  (We Close() instead of using DecrRef()
@@ -762,7 +764,7 @@ func (s *levelsController) subcompact(it y.Iterator, kr keyRange, cd compactDef,
 
 			// Do not discard entries inserted by merge operator. These entries will be
 			// discarded once they're merged
-			if version <= discardTs && vs.Meta&bitMergeEntry == 0 {
+			if !(version.Greater(discardTs)) && vs.Meta&bitMergeEntry == 0 {
 				// Keep track of the number of versions encountered for this key. Only consider the
 				// versions which are below the minReadTs, otherwise, we might end up discarding the
 				// only valid version for a running transaction.
@@ -1012,7 +1014,7 @@ func containsPrefix(table *table.Table, prefix []byte) bool {
 		defer ti.Close()
 		// In table iterator's Seek, we assume that key has version in last 8 bytes. We set
 		// version=0 (ts=math.MaxUint64), so that we don't skip the key prefixed with prefix.
-		ti.Seek(y.KeyWithTs(prefix, math.MaxUint64))
+		ti.Seek(y.KeyWithTs(prefix, types.MaxTs))
 		return bytes.HasPrefix(ti.Key(), prefix)
 	}
 
@@ -1092,7 +1094,7 @@ func (s *levelsController) addSplits(cd *compactDef) {
 			// Top table is [A1...C3(deleted)]
 			// bot table is [B1....C2]
 			// It will generate a split [A1 ... C0], including any records of Key C.
-			right := y.KeyWithTs(y.ParseKey(t.Biggest()), 0)
+			right := y.KeyWithTs(y.ParseKey(t.Biggest()), types.CustomTs{})
 			addRange(right)
 		}
 	}
@@ -1273,7 +1275,7 @@ func (s *levelsController) sortByHeuristic(tables []*table.Table, cd *compactDef
 
 	// Sort tables by max version. This is what RocksDB does.
 	sort.Slice(tables, func(i, j int) bool {
-		return tables[i].MaxVersion() < tables[j].MaxVersion()
+		return tables[i].MaxVersion().Less(tables[j].MaxVersion())
 	})
 }
 
@@ -1313,7 +1315,7 @@ func (s *levelsController) fillMaxLevelTables(tables []*table.Table, cd *compact
 	for _, t := range sortedTables {
 		// If the maxVersion is above the discardTs, we won't clean anything in
 		// the compaction. So skip this table.
-		if t.MaxVersion() > s.kv.orc.discardAtOrBelow() {
+		if t.MaxVersion().Greater(s.kv.orc.discardAtOrBelow()) {
 			continue
 		}
 		if now.Sub(t.CreatedAt) < time.Hour {
@@ -1587,6 +1589,9 @@ func (s *levelsController) addLevel0Table(t *table.Table) error {
 		// Before we unstall, we need to make sure that level 0 is healthy.
 		timeStart := time.Now()
 		for s.levels[0].numTables() >= s.kv.opt.NumLevelZeroTablesStall {
+			if s.kv.isClosed.Load() > 0 {
+				return ErrDBClosed
+			}
 			time.Sleep(10 * time.Millisecond)
 		}
 		dur := time.Since(timeStart)
@@ -1601,21 +1606,21 @@ func (s *levelsController) addLevel0Table(t *table.Table) error {
 
 // addLevel0PartitionedTable writes a new L0 table into partition pid.
 func (s *levelsController) addLevel0PartitionedTable(pid int, t *table.Table) error {
-    if !t.IsInmemory {
-        if err := s.kv.manifest.addChanges([]*pb.ManifestChange{
-            newCreateChange(t.ID(), 0, t.KeyID(), t.CompressionType()),
-        }); err != nil {
-            return err
-        }
-    }
-    // 2) insert into that partition’s list
-    l0 := s.levels[0]
-    l0.Lock()
-    l0.partitionedTables[pid] = append(l0.partitionedTables[pid], t)
-    l0.totalSize += int64(t.OnDiskSize())
-    l0.Unlock()
+	if !t.IsInmemory {
+		if err := s.kv.manifest.addChanges([]*pb.ManifestChange{
+			newCreateChange(t.ID(), 0, t.KeyID(), t.CompressionType()),
+		}); err != nil {
+			return err
+		}
+	}
+	// 2) insert into that partition’s list
+	l0 := s.levels[0]
+	l0.Lock()
+	l0.partitionedTables[pid] = append(l0.partitionedTables[pid], t)
+	l0.totalSize += int64(t.OnDiskSize())
+	l0.Unlock()
 	s.checkPartitionOverflow(0)
-    return nil
+	return nil
 }
 
 func (s *levelsController) close() error {
@@ -1623,14 +1628,22 @@ func (s *levelsController) close() error {
 	return y.Wrap(err, "levelsController.Close")
 }
 
-// get searches for a given key in all the levels of the LSM tree. It returns
-// key version <= the expected version (version in key). If not found,
-// it returns an empty y.ValueStruct.
+// get searches levels for the given key. For the standard (non-partitioned) path it delegates
+// to levelHandler.get which uses binary search for L1+ tables. The DuckDB partitioned path is
+// handled by getPartitioned which avoids holding open iterators across table iterations.
 func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) (
 	y.ValueStruct, error) {
+
 	if s.kv.IsClosed() {
 		return y.ValueStruct{}, ErrDBClosed
 	}
+
+	// DuckDB partitioned path: custom partition-aware table selection.
+	if s.kv.opt.UseDuckDB && s.kv.opt.PartitionFanOut > 1 {
+		return s.getPartitioned(key, maxVs, startLevel)
+	}
+
+	// Standard path: delegate to h.get which uses binary search for L1+ and correct ref-counting.
 	// It's important that we iterate the levels from 0 on upward. The reason is, if we iterated
 	// in opposite order, or in parallel (naively calling all the h.RLock() in some order) we could
 	// read level L's tables post-compaction and level L+1's tables pre-compaction. (If we do
@@ -1653,7 +1666,7 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 		if vs.Version == version {
 			return vs, nil
 		}
-		if maxVs.Version < vs.Version {
+		if vs.Version.Greater(maxVs.Version) {
 			maxVs = vs
 		}
 	}
@@ -1662,6 +1675,77 @@ func (s *levelsController) get(key []byte, maxVs y.ValueStruct, startLevel int) 
 	}
 	return maxVs, nil
 }
+
+// getPartitioned is the DuckDB-specific read path that selects tables by partition ID.
+// It explicitly closes each iterator after use (no defer inside the loop) to avoid
+// accumulating open iterators and excessive heap allocations.
+func (s *levelsController) getPartitioned(key []byte, maxVs y.ValueStruct, startLevel int) (
+	y.ValueStruct, error) {
+
+	readTs := y.ParseTs(key)
+	logicalKey := y.ParseKey(key)
+	hash := y.Hash(logicalKey)
+
+	for _, h := range s.levels {
+		if h.level < startLevel {
+			continue
+		}
+
+		h.RLock()
+		var tbls []*table.Table
+		if len(h.partitionedTables) > 0 {
+			pid := int(z.MemHash(logicalKey) % uint64(s.kv.opt.PartitionFanOut))
+			tbls = h.partitionedTables[pid]
+		} else {
+			tbls = h.tables
+		}
+
+		for _, tbl := range tbls {
+			if tbl.DoesNotHave(hash) {
+				y.NumLSMBloomHitsAdd(s.kv.opt.MetricsEnabled, h.strLevel, 1)
+				continue
+			}
+
+			y.NumLSMGetsAdd(s.kv.opt.MetricsEnabled, h.strLevel, 1)
+			itr := tbl.NewIterator(table.NOCACHE)
+			itr.Seek(key)
+			if itr.Valid() {
+				k := itr.Key()
+				if bytes.Equal(y.ParseKey(k), logicalKey) {
+					val := itr.ValueCopy()
+					valVersion := y.ParseTs(k)
+
+					// Only consider versions <= readTs
+					if !(valVersion.Greater(readTs)) {
+						if isDeletedOrExpired(val.Meta, val.ExpiresAt) {
+							itr.Close()
+							h.RUnlock()
+							return y.ValueStruct{}, ErrKeyNotFound
+						}
+						// Pick the newest visible version <= readTs
+						if valVersion.Greater(maxVs.Version) {
+							maxVs = y.ValueStruct{
+								Value:     val.Value,
+								Meta:      val.Meta,
+								UserMeta:  val.UserMeta,
+								ExpiresAt: val.ExpiresAt,
+								Version:   valVersion,
+							}
+						}
+					}
+				}
+			}
+			itr.Close() // Explicit close per-table; no defer to avoid accumulating open iterators.
+		}
+		h.RUnlock()
+	}
+
+	if len(maxVs.Value) > 0 {
+		y.NumGetsWithResultsAdd(s.kv.opt.MetricsEnabled, 1)
+	}
+	return maxVs, nil
+}
+
 
 func appendIteratorsReversed(out []y.Iterator, th []*table.Table, opt int) []y.Iterator {
 	for i := len(th) - 1; i >= 0; i-- {
@@ -1693,7 +1777,7 @@ type TableInfo struct {
 	OnDiskSize       uint32
 	StaleDataSize    uint32
 	UncompressedSize uint32
-	MaxVersion       uint64
+	MaxVersion       types.CustomTs
 	IndexSz          int
 	BloomFilterSize  int
 }
@@ -1792,6 +1876,94 @@ func (s *levelsController) verifyChecksum() error {
 	return nil
 }
 
+func (lc *levelsController) flushEntriesToPartitions(entries []*Entry) error {
+	fanout := lc.kv.opt.PartitionFanOut
+	if fanout <= 1 {
+		// Single partition: build one SSTable and insert at pid=0
+		t, err := lc.buildSSTable(entries)
+		if err != nil {
+			return err
+		}
+		if t == nil {
+			return nil
+		}
+		return lc.addLevel0PartitionedTable(0, t)
+	}
+
+	// Multi-partition: distribute entries by hash
+	parts := make([][]*Entry, fanout)
+	for _, e := range entries {
+		pid := int(z.MemHash(e.Key) % uint64(fanout))
+		parts[pid] = append(parts[pid], e)
+	}
+
+	for pid, ents := range parts {
+		if len(ents) == 0 {
+			continue
+		}
+
+		// Build SSTable for this partition
+		t, err := lc.buildSSTable(ents)
+		if err != nil {
+			return err
+		}
+		if t == nil {
+			continue
+		}
+
+		if err := lc.addLevel0PartitionedTable(pid, t); err != nil {
+			return err
+		}
+	}
+
+	// After inserting all partitions, check for overflow at Level 0
+	lc.checkPartitionOverflow(0)
+	return nil
+}
+
+func (lc *levelsController) buildSSTable(entries []*Entry) (*table.Table, error) {
+	// Construct table.Options from DB options
+	topt := table.Options{
+		BloomFalsePositive:   lc.kv.opt.BloomFalsePositive,
+		BlockSize:            lc.kv.opt.BlockSize,
+		Compression:          lc.kv.opt.Compression,
+		ZSTDCompressionLevel: lc.kv.opt.ZSTDCompressionLevel,
+	}
+
+	builder := table.NewTableBuilder(topt)
+	defer builder.Close()
+
+	for _, e := range entries {
+		vs := y.ValueStruct{
+			Value:     e.Value,
+			Meta:      e.meta,
+			UserMeta:  e.UserMeta,
+			ExpiresAt: e.ExpiresAt,
+			Version:   e.version,
+		}
+		builder.Add(e.Key, vs, 0)
+	}
+
+	data := builder.Finish()
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	// Reserve a new unique table ID
+	id := lc.reserveNextTableID()
+
+	// Create an in-memory SSTable with the new ID
+	tbl, err := table.OpenInMemoryTable(data, id, &topt)
+	if err != nil {
+		return nil, err
+	}
+	return tbl, nil
+}
+
+func (lc *levelsController) reserveNextTableID() uint64 {
+	return atomic.AddUint64(&lc.kv.nextTableID, 1)
+}
+
 // Returns the sorted list of splits for all the levels and tables based
 // on the block offsets.
 func (s *levelsController) keySplits(numPerTable int, prefix []byte) []string {
@@ -1810,147 +1982,147 @@ func (s *levelsController) keySplits(numPerTable int, prefix []byte) []string {
 
 // checkPartitionOverflow synchronously promotes any partition at `level` whose total size exceeds its quota.
 func (s *levelsController) checkPartitionOverflow(level int) {
-    fanOut := s.kv.opt.PartitionFanOut
-    if fanOut == 0 {
-        return // not in partitioned mode
-    }
-    // compute per-partition quota: targetSz[level] / fanOut^(level+1)
-    targs := s.levelTargets()
-    total := targs.targetSz[level]
-    parts := 1
-    for i := 0; i < level+1; i++ {
-        parts *= fanOut
-    }
-    quota := total / int64(parts)
+	fanOut := s.kv.opt.PartitionFanOut
+	if fanOut <= 1 {
+		return // not in partitioned mode
+	}
+	// compute per-partition quota: targetSz[level] / fanOut^(level+1)
+	targs := s.levelTargets()
+	total := targs.targetSz[level]
+	parts := 1
+	for i := 0; i < level+1; i++ {
+		parts *= fanOut
+	}
+	quota := total / int64(parts)
 
-    lh := s.levels[level]
-    lh.RLock()
-    defer lh.RUnlock()
+	lh := s.levels[level]
+	lh.RLock()
+	defer lh.RUnlock()
 
-    for pid, tbls := range lh.partitionedTables {
-        var sum int64
-        for _, t := range tbls {
-            sum += int64(t.OnDiskSize())
-        }
-        if sum > quota {
-            if err := s.promotePartition(level, pid); err != nil {
-                s.kv.opt.Warningf("partition compaction failed L%d pid=%d: %v", level, pid, err)
+	for pid, tbls := range lh.partitionedTables {
+		var sum int64
+		for _, t := range tbls {
+			sum += int64(t.OnDiskSize())
+		}
+		if sum > quota {
+			if err := s.promotePartition(level, pid); err != nil {
+				s.kv.opt.Warningf("partition compaction failed L%d pid=%d: %v", level, pid, err)
 			}
-        }
-    }
+		}
+	}
 }
 
 func (s *levelsController) promotePartition(level, pid int) error {
-    fanOut := s.kv.opt.PartitionFanOut
-    if fanOut == 0 {
-        return nil // not in partitioned mode
-    }
+	fanOut := s.kv.opt.PartitionFanOut
+	if fanOut <= 1 {
+		return nil // not in partitioned mode
+	}
 
-    lh := s.levels[level]
+	lh := s.levels[level]
 
-    // Detach old tables from this partition and adjust totalSize
-    lh.Lock()
-    old := lh.partitionedTables[pid]
-    lh.partitionedTables[pid] = nil
+	// Detach old tables from this partition and adjust totalSize
+	lh.Lock()
+	old := lh.partitionedTables[pid]
+	lh.partitionedTables[pid] = nil
 
-    var totalOldSize int64
-    for _, t := range old {
-        totalOldSize += int64(t.OnDiskSize())
-    }
-    lh.totalSize -= totalOldSize
-    lh.Unlock()
+	var totalOldSize int64
+	for _, t := range old {
+		totalOldSize += int64(t.OnDiskSize())
+	}
+	lh.totalSize -= totalOldSize
+	lh.Unlock()
 
-    // If there were no tables in this partition, nothing to do.
-    if len(old) == 0 {
-        return nil
-    }
+	// If there were no tables in this partition, nothing to do.
+	if len(old) == 0 {
+		return nil
+	}
 
-    // Compute min/max versions across all detached tables
-    var minV, maxV uint64 = old[0].MinTimestamp(), old[0].MaxTimestamp()
-	for _ , t := range old[1:] {
-		if t.MinTimestamp() < minV {
+	// Compute min/max versions across all detached tables
+	var minV, maxV types.CustomTs = old[0].MinTimestamp(), old[0].MaxTimestamp()
+	for _, t := range old[1:] {
+		if t.MinTimestamp().Less(minV) {
 			minV = t.MinTimestamp()
 		}
-		if t.MaxTimestamp() > maxV {
+		if t.MaxTimestamp().Greater(maxV) {
 			maxV = t.MaxTimestamp()
 		}
 	}
-	Tth := (minV + maxV) / 2
+	Tth := minV.Avg(maxV)
 
-    // Build a MergeIterator over all the old tables
-    iters := make([]y.Iterator, 0, len(old))
-    for _, t := range old {
-        iters = append(iters, t.NewIterator(table.NOCACHE))
-    }
-    mit := table.NewMergeIterator(iters, false)
-    defer mit.Close()
+	// Build a MergeIterator over all the old tables
+	iters := make([]y.Iterator, 0, len(old))
+	for _, t := range old {
+		iters = append(iters, t.NewIterator(table.NOCACHE))
+	}
+	mit := table.NewMergeIterator(iters, false)
+	defer mit.Close()
 
-    bopts := buildTableOptions(s.kv)
-    coldBuilders := make([]*table.Builder, fanOut)
-    for i := range coldBuilders {
-        coldBuilders[i] = table.NewTableBuilder(bopts)
-    }
-    hotBuilder := table.NewTableBuilder(bopts)
+	bopts := buildTableOptions(s.kv)
+	coldBuilders := make([]*table.Builder, fanOut)
+	for i := range coldBuilders {
+		coldBuilders[i] = table.NewTableBuilder(bopts)
+	}
+	hotBuilder := table.NewTableBuilder(bopts)
 
-    for mit.Rewind(); mit.Valid(); mit.Next() {
-        key := mit.Key()
-        vs := mit.Value()
+	for mit.Rewind(); mit.Valid(); mit.Next() {
+		key := mit.Key()
+		vs := mit.Value()
 
-        var vp valuePointer
-        if vs.Meta&bitValuePointer != 0 {
-            vp.Decode(vs.Value)
-        }
+		var vp valuePointer
+		if vs.Meta&bitValuePointer != 0 {
+			vp.Decode(vs.Value)
+		}
 
-        if vs.Version <= Tth {
-            child := getPartitionID(level+1, key, fanOut)
-            coldBuilders[child].Add(key, vs, vp.Len)
-        } else {
-            hotBuilder.Add(key, vs, vp.Len)
-        }
-    }
+		if !(vs.Version.Greater(Tth)) {
+			child := getPartitionID(level+1, key, fanOut)
+			coldBuilders[child].Add(key, vs, vp.Len)
+		} else {
+			hotBuilder.Add(key, vs, vp.Len)
+		}
+	}
 
-    for child, b := range coldBuilders {
-        if b.Empty() {
-            b.Close()
-            continue
-        }
-        fileID := s.kv.lc.reserveFileID()
-        var tbl *table.Table
-        var err error
+	for child, b := range coldBuilders {
+		if b.Empty() {
+			b.Close()
+			continue
+		}
+		fileID := s.kv.lc.reserveFileID()
+		var tbl *table.Table
+		var err error
 		fname := table.NewFilename(fileID, s.kv.opt.Dir)
 		tbl, err = table.CreateTable(fname, b)
-        b.Close()
-        if err != nil {
-            return y.Wrap(err, "writing cold partition table")
-        }
+		b.Close()
+		if err != nil {
+			return y.Wrap(err, "writing cold partition table")
+		}
 
-        // install into child partition
-        lhNext := s.levels[level+1]
-        lhNext.Lock()
-        lhNext.partitionedTables[child] = append(lhNext.partitionedTables[child], tbl)
-        lhNext.totalSize += int64(tbl.OnDiskSize())
-        lhNext.Unlock()
-		s.checkPartitionOverflow(level+1)
-    }
+		// install into child partition
+		lhNext := s.levels[level+1]
+		lhNext.Lock()
+		lhNext.partitionedTables[child] = append(lhNext.partitionedTables[child], tbl)
+		lhNext.totalSize += int64(tbl.OnDiskSize())
+		lhNext.Unlock()
+		s.checkPartitionOverflow(level + 1)
+	}
 
-    if !hotBuilder.Empty() {
-        fileID := s.kv.lc.reserveFileID()
-        var tbl *table.Table
-        var err error
+	if !hotBuilder.Empty() {
+		fileID := s.kv.lc.reserveFileID()
+		var tbl *table.Table
+		var err error
 		fname := table.NewFilename(fileID, s.kv.opt.Dir)
 		tbl, err = table.CreateTable(fname, hotBuilder)
-        hotBuilder.Close()
-        if err != nil {
-            return y.Wrap(err, "writing hot partition table")
-        }
+		hotBuilder.Close()
+		if err != nil {
+			return y.Wrap(err, "writing hot partition table")
+		}
 
-        lh.Lock()
-        lh.partitionedTables[pid] = append(lh.partitionedTables[pid], tbl)
-        lh.totalSize += int64(tbl.OnDiskSize())
-        lh.Unlock()
-    } else {
-        hotBuilder.Close()
-    }
+		lh.Lock()
+		lh.partitionedTables[pid] = append(lh.partitionedTables[pid], tbl)
+		lh.totalSize += int64(tbl.OnDiskSize())
+		lh.Unlock()
+	} else {
+		hotBuilder.Close()
+	}
 
-    return nil
+	return nil
 }

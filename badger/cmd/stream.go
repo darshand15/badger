@@ -16,6 +16,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 )
 
@@ -84,7 +85,7 @@ func stream(cmd *cobra.Command, args []string) error {
 	}
 	defer inDB.Close()
 
-	stream := inDB.NewStreamAt(math.MaxUint64)
+	stream := inDB.NewStreamAt(types.MaxTs)
 
 	if len(so.outDir) > 0 {
 		if _, err := os.Stat(so.outDir); err == nil {
@@ -115,7 +116,7 @@ func stream(cmd *cobra.Command, args []string) error {
 		stream.LogPrefix = "DB.Backup"
 		f, err := os.OpenFile(so.outFile, os.O_RDWR|os.O_CREATE, 0666)
 		y.Check(err)
-		_, err = stream.Backup(f, 0)
+		_, err = stream.Backup(f, types.CustomTs{})
 		y.Check(err)
 	}
 	fmt.Println("Done.")

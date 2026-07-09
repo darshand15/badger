@@ -9,47 +9,126 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"math"
+	"fmt"
 	"sort"
-	"strconv"
 	"sync"
 	"sync/atomic"
 
 	"github.com/pkg/errors"
 
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
+
+// duckDBCommitTracker tracks in-flight DuckDB commits for managed mode.
+// NewTransactionAt calls waitUntil(readTs) to block until every commit with
+// ts ≤ readTs has completed DirectFlush across all partitions, preventing
+// cross-partition snapshot inconsistencies (e.g. SUM_CHECK seeing a partial
+// transfer where the debit is written but the credit is not yet visible).
+//
+// Unlike WaterMark, this tracker has no ordering requirement: Begin/Done can
+// arrive in any order, which is necessary because managed-mode EpochIDs are
+// time.Now().UnixNano() values — faster commits at later wall-clock times can
+// complete before slower commits at earlier wall-clock times.
+type duckDBCommitTracker struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	pending []types.CustomTs // in-flight commit ts values (unsorted, small set)
+}
+
+func newDuckDBCommitTracker() *duckDBCommitTracker {
+	t := &duckDBCommitTracker{}
+	t.cond = sync.NewCond(&t.mu)
+	return t
+}
+
+// begin registers ts as an in-flight commit. It is idempotent: in managed
+// DuckDB mode the ts may already have been pre-registered at issuance time
+// (see Oracle.GetCommitTimestamp / DB.RegisterPendingCommit) before
+// newCommitTs calls begin again; a duplicate entry would leak after the
+// single doneCommit and deadlock every future reader.
+func (t *duckDBCommitTracker) begin(ts types.CustomTs) {
+	t.mu.Lock()
+	for _, v := range t.pending {
+		if v == ts {
+			t.mu.Unlock()
+			return
+		}
+	}
+	t.pending = append(t.pending, ts)
+	t.mu.Unlock()
+}
+
+func (t *duckDBCommitTracker) done(ts types.CustomTs) {
+	t.mu.Lock()
+	for i, v := range t.pending {
+		if v == ts {
+			last := len(t.pending) - 1
+			t.pending[i] = t.pending[last]
+			t.pending = t.pending[:last]
+			break
+		}
+	}
+	t.cond.Broadcast()
+	t.mu.Unlock()
+}
+
+// waitUntil blocks until no in-flight commit has commitTs ≤ readTs.
+// Returns immediately if the pending set is empty or all pending commits
+// have commitTs > readTs (they won't affect our snapshot).
+func (t *duckDBCommitTracker) waitUntil(readTs types.CustomTs) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for {
+		stale := false
+		for _, ts := range t.pending {
+			if !ts.Greater(readTs) { // ts ≤ readTs
+				stale = true
+				break
+			}
+		}
+		if !stale {
+			return
+		}
+		t.cond.Wait()
+	}
+}
 
 type oracle struct {
 	isManaged       bool // Does not change value, so no locking required.
 	detectConflicts bool // Determines if the txns should be checked for conflicts.
 
-	sync.Mutex // For nextTxnTs and commits.
 	// writeChLock lock is for ensuring that transactions go to the write
 	// channel in the same order as their commit timestamps.
+	sync.Mutex
 	writeChLock sync.Mutex
-	nextTxnTs   uint64
+	nextTxnTs   types.CustomTs
+	txnMarkLock sync.Mutex
 
 	// Used to block NewTransaction, so all previous commits are visible to a new read.
 	txnMark *y.WaterMark
 
+	// duckDBTracker is used in managed DuckDB mode to wait for all in-flight
+	// commits with ts ≤ readTs to complete DirectFlush before reads begin.
+	duckDBTracker *duckDBCommitTracker
+
 	// Either of these is used to determine which versions can be permanently
 	// discarded during compaction.
-	discardTs uint64       // Used by ManagedDB.
-	readMark  *y.WaterMark // Used by DB.
+	discardTs types.CustomTs // Used by ManagedDB.
+	readMark  *y.WaterMark   // Used by DB.
 
 	// committedTxns contains all committed writes (contains fingerprints
 	// of keys written and their latest commit counter).
 	committedTxns []committedTxn
-	lastCleanupTs uint64
+	lastCleanupTs types.CustomTs
 
 	// closer is used to stop watermarks.
 	closer *z.Closer
 }
 
 type committedTxn struct {
-	ts uint64
+	ts types.CustomTs
 	// ConflictKeys Keeps track of the entries written at timestamp ts.
 	conflictKeys map[uint64]struct{}
 }
@@ -62,9 +141,10 @@ func newOracle(opt Options) *oracle {
 		//
 		// WaterMarks must be 64-bit aligned for atomic package, hence we must use pointers here.
 		// See https://golang.org/pkg/sync/atomic/#pkg-note-BUG.
-		readMark: &y.WaterMark{Name: "badger.PendingReads"},
-		txnMark:  &y.WaterMark{Name: "badger.TxnTimestamp"},
-		closer:   z.NewCloser(2),
+		readMark:      &y.WaterMark{Name: "badger.PendingReads"},
+		txnMark:       &y.WaterMark{Name: "badger.TxnTimestamp"},
+		closer:        z.NewCloser(2),
+		duckDBTracker: newDuckDBCommitTracker(),
 	}
 	orc.readMark.Init(orc.closer)
 	orc.txnMark.Init(orc.closer)
@@ -75,14 +155,15 @@ func (o *oracle) Stop() {
 	o.closer.SignalAndWait()
 }
 
-func (o *oracle) readTs() uint64 {
+func (o *oracle) readTs() types.CustomTs {
 	if o.isManaged {
 		panic("ReadTs should not be retrieved for managed DB")
 	}
 
-	var readTs uint64
+	var readTs types.CustomTs
 	o.Lock()
-	readTs = o.nextTxnTs - 1
+	// readTs = o.nextTxnTs - 1
+	readTs = o.nextTxnTs.Decr()
 	o.readMark.Begin(readTs)
 	o.Unlock()
 
@@ -94,28 +175,29 @@ func (o *oracle) readTs() uint64 {
 	return readTs
 }
 
-func (o *oracle) nextTs() uint64 {
+func (o *oracle) nextTs() types.CustomTs {
 	o.Lock()
 	defer o.Unlock()
+	// o.nextTxnTs = o.nextTxnTs.Incr()
 	return o.nextTxnTs
 }
 
 func (o *oracle) incrementNextTs() {
 	o.Lock()
 	defer o.Unlock()
-	o.nextTxnTs++
+	o.nextTxnTs = o.nextTxnTs.Incr()
 }
 
 // Any deleted or invalid versions at or below ts would be discarded during
 // compaction to reclaim disk space in LSM tree and thence value log.
-func (o *oracle) setDiscardTs(ts uint64) {
+func (o *oracle) setDiscardTs(ts types.CustomTs) {
 	o.Lock()
 	defer o.Unlock()
 	o.discardTs = ts
 	o.cleanupCommittedTransactions()
 }
 
-func (o *oracle) discardAtOrBelow() uint64 {
+func (o *oracle) discardAtOrBelow() types.CustomTs {
 	if o.isManaged {
 		o.Lock()
 		defer o.Unlock()
@@ -136,7 +218,7 @@ func (o *oracle) hasConflict(txn *Txn) bool {
 		// This change assumes linearizability. Lack of linearizability could
 		// cause the read ts of a new txn to be lower than the commit ts of
 		// a txn before it (@mrjn).
-		if committedTxn.ts <= txn.readTs {
+		if !committedTxn.ts.Greater(txn.readTs) {
 			continue
 		}
 
@@ -150,34 +232,44 @@ func (o *oracle) hasConflict(txn *Txn) bool {
 	return false
 }
 
-func (o *oracle) newCommitTs(txn *Txn) (uint64, bool) {
+func (o *oracle) newCommitTs(txn *Txn) (types.CustomTs, bool) {
+	// Fast path: managed mode with conflict detection disabled.
+	// The DAG executor pre-orders transactions so no conflicts can arrive
+	// concurrently, and txn.commitTs is already assigned by the caller.
+	// No shared oracle state needs updating, so skip the mutex entirely.
+	if o.isManaged && !o.detectConflicts {
+		return txn.commitTs, false
+	}
+
 	o.Lock()
 	defer o.Unlock()
 
 	if o.hasConflict(txn) {
-		return 0, true
+		// return 0, true
+		return types.CustomTs{}, true
 	}
 
-	var ts uint64
+	var ts types.CustomTs
 	if !o.isManaged {
 		o.doneRead(txn)
 		o.cleanupCommittedTransactions()
 
-		// This is the general case, when user doesn't specify the read and commit ts.
 		ts = o.nextTxnTs
-		o.nextTxnTs++
+		// o.nextTxnTs++
+		o.nextTxnTs = o.nextTxnTs.Incr()
 		o.txnMark.Begin(ts)
-
 	} else {
-		// If commitTs is set, use it instead.
 		ts = txn.commitTs
+		// Register with duckDBTracker so NewTransactionAt can wait for all
+		// in-flight commits with ts ≤ readTs to complete DirectFlush.
+		// doneCommit (called after DirectFlush) removes the entry.
+		o.duckDBTracker.begin(ts)
 	}
 
-	y.AssertTrue(ts >= o.lastCleanupTs)
+	// y.AssertTrue(ts >= o.lastCleanupTs)
+	y.AssertTrue(!ts.Less(o.lastCleanupTs))
 
 	if o.detectConflicts {
-		// We should ensure that txns are not added to o.committedTxns slice when
-		// conflict detection is disabled otherwise this slice would keep growing.
 		o.committedTxns = append(o.committedTxns, committedTxn{
 			ts:           ts,
 			conflictKeys: txn.conflictKeys,
@@ -201,25 +293,27 @@ func (o *oracle) cleanupCommittedTransactions() { // Must be called under o.Lock
 		return
 	}
 	// Same logic as discardAtOrBelow but unlocked
-	var maxReadTs uint64
+	var maxReadTs types.CustomTs
 	if o.isManaged {
 		maxReadTs = o.discardTs
 	} else {
 		maxReadTs = o.readMark.DoneUntil()
 	}
 
-	y.AssertTrue(maxReadTs >= o.lastCleanupTs)
+	// y.AssertTrue(maxReadTs >= o.lastCleanupTs)
+	y.AssertTrue(!maxReadTs.Less(o.lastCleanupTs))
 
 	// do not run clean up if the maxReadTs (read timestamp of the
 	// oldest transaction that is still in flight) has not increased
-	if maxReadTs == o.lastCleanupTs {
+	if maxReadTs.Equal(o.lastCleanupTs) {
 		return
 	}
 	o.lastCleanupTs = maxReadTs
 
 	tmp := o.committedTxns[:0]
 	for _, txn := range o.committedTxns {
-		if txn.ts <= maxReadTs {
+		// if txn.ts <= maxReadTs {
+		if !txn.ts.Greater(maxReadTs) {
 			continue
 		}
 		tmp = append(tmp, txn)
@@ -227,18 +321,20 @@ func (o *oracle) cleanupCommittedTransactions() { // Must be called under o.Lock
 	o.committedTxns = tmp
 }
 
-func (o *oracle) doneCommit(cts uint64) {
+func (o *oracle) doneCommit(cts types.CustomTs) {
 	if o.isManaged {
-		// No need to update anything.
-		return
+		// Signal duckDBTracker so waitUntil callers can re-check.
+		// begin(ts) was called in newCommitTs for the managed path.
+		o.duckDBTracker.done(cts)
+	} else {
+		o.txnMark.Done(cts)
 	}
-	o.txnMark.Done(cts)
 }
 
 // Txn represents a Badger transaction.
 type Txn struct {
-	readTs   uint64
-	commitTs uint64
+	readTs   types.CustomTs
+	commitTs types.CustomTs
 	size     int64
 	count    int64
 	db       *DB
@@ -251,6 +347,8 @@ type Txn struct {
 	pendingWrites   map[string]*Entry // cache stores any writes done by txn.
 	duplicateWrites []*Entry          // Used in managed mode to store duplicate entries.
 
+	batchCache map[string]*duckReadBatchResult // pre-fetched values from ReadBatch
+
 	numIterators atomic.Int32
 	discarded    bool
 	doneRead     bool
@@ -260,7 +358,7 @@ type Txn struct {
 type pendingWritesIterator struct {
 	entries  []*Entry
 	nextIdx  int
-	readTs   uint64
+	readTs   types.CustomTs
 	reversed bool
 }
 
@@ -385,13 +483,15 @@ func (txn *Txn) modify(e *Entry) error {
 		fp := z.MemHash(e.Key) // Avoid dealing with byte arrays.
 		txn.conflictKeys[fp] = struct{}{}
 	}
+	// Convert once to avoid two separate string([]byte) allocations.
+	keyStr := string(e.Key)
 	// If a duplicate entry was inserted in managed mode, move it to the duplicate writes slice.
 	// Add the entry to duplicateWrites only if both the entries have different versions. For
 	// same versions, we will overwrite the existing entry.
-	if oldEntry, ok := txn.pendingWrites[string(e.Key)]; ok && oldEntry.version != e.version {
+	if oldEntry, ok := txn.pendingWrites[keyStr]; ok && oldEntry.version != e.version {
 		txn.duplicateWrites = append(txn.duplicateWrites, oldEntry)
 	}
-	txn.pendingWrites[string(e.Key)] = e
+	txn.pendingWrites[keyStr] = e
 	return nil
 }
 
@@ -429,6 +529,50 @@ func (txn *Txn) Delete(key []byte) error {
 	return txn.modify(e)
 }
 
+// PrefetchKeys pre-fetches all the given keys from DuckDB in a single batched
+// SQL query and caches the results in the transaction. Subsequent calls to
+// Get() for these keys will be served from the cache without another SQL
+// round-trip.
+//
+// Call this at the start of a transaction when you know which keys will be read.
+// Order does not matter. Duplicate keys are de-duplicated automatically.
+//
+// This is a no-op when the DuckDB backend is not active.
+func (txn *Txn) PrefetchKeys(keys [][]byte) error {
+	if txn.db.duckDBStorage == nil || len(keys) == 0 {
+		return nil
+	}
+	if txn.batchCache == nil {
+		txn.batchCache = make(map[string]*duckReadBatchResult, len(keys))
+	}
+
+	// De-duplicate keys already in cache.
+	toFetch := keys[:0]
+	for _, k := range keys {
+		if _, already := txn.batchCache[string(k)]; !already {
+			toFetch = append(toFetch, k)
+		}
+	}
+	if len(toFetch) == 0 {
+		return nil
+	}
+
+	reqs := make([]duckReadBatchReq, len(toFetch))
+	for i, k := range toFetch {
+		reqs[i] = duckReadBatchReq{Key: k, ReadTs: txn.readTs}
+	}
+
+	results, err := txn.db.duckDBStorage.ReadBatch(reqs)
+	if err != nil {
+		return fmt.Errorf("PrefetchKeys: %w", err)
+	}
+	for i := range results {
+		r := results[i] // copy so we can take address
+		txn.batchCache[string(r.Key)] = &r
+	}
+	return nil
+}
+
 // Get looks for key and returns corresponding Item.
 // If key is not found, ErrKeyNotFound is returned.
 func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
@@ -464,9 +608,52 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 		txn.addReadKey(key)
 	}
 
+	// DuckDB first if available
+	if txn.db.duckDBStorage != nil {
+		// Check the prefetch cache first (zero CGo cost).
+		if txn.batchCache != nil {
+			if cached, ok := txn.batchCache[string(key)]; ok {
+				if !cached.Found || cached.Value == nil {
+					return nil, ErrKeyNotFound
+				}
+				return &Item{
+					key:       key,
+					version:   cached.Version,
+					val:       cached.Value,
+					meta:      0,
+					userMeta:  0,
+					txn:       txn,
+					expiresAt: 0,
+					status:    prefetched,
+				}, nil
+			}
+		}
+
+		// Cache miss — fall through to single SQL query (existing behaviour).
+		// key here is the raw user key passed to txn.Get — it never carries a
+		// Badger timestamp suffix, so use it directly as the logical key.
+		if val, ver, err := txn.db.duckDBStorage.Read(key, txn.readTs); err == nil && val != nil {
+			// Found in DuckDB - return a prefetched Badger Item.
+			return &Item{
+				key:       key,
+				version:   ver,
+				val:       val,
+				meta:      0,
+				userMeta:  0,
+				txn:       txn,
+				expiresAt: 0,
+				status:    prefetched,
+			}, nil
+		}
+		// Not found in DuckDB — fall back to LSM lookup
+	}
+
 	seek := y.KeyWithTs(key, txn.readTs)
 	vs, err := txn.db.get(seek)
 	if err != nil {
+		if err == ErrKeyNotFound {
+			return nil, ErrKeyNotFound
+		}
 		return nil, y.Wrapf(err, "DB::Get key: %q", key)
 	}
 	if vs.Value == nil && vs.Meta == 0 {
@@ -518,92 +705,270 @@ func (txn *Txn) Discard() {
 	}
 }
 
-func (txn *Txn) commitAndSend() (func() error, error) {
+// func (txn *Txn) commitAndSend() (func() error, error) {
+// 	orc := txn.db.orc
+// 	// Ensure that the order in which we get the commit timestamp is the same as
+// 	// the order in which we push these updates to the write channel. So, we
+// 	// acquire a writeChLock before getting a commit timestamp, and only release
+// 	// it after pushing the entries to it.
+// 	orc.writeChLock.Lock()
+// 	defer orc.writeChLock.Unlock()
+
+// 	commitTs, conflict := orc.newCommitTs(txn)
+// 	if conflict {
+// 		return nil, ErrConflict
+// 	}
+
+// 	keepTogether := true
+// 	setVersion := func(e *Entry) {
+// 		if e.version == 0 {
+// 			e.version = commitTs
+// 		} else {
+// 			keepTogether = false
+// 		}
+// 	}
+// 	for _, e := range txn.pendingWrites {
+// 		setVersion(e)
+// 	}
+// 	// The duplicateWrites slice will be non-empty only if there are duplicate
+// 	// entries with different versions.
+// 	for _, e := range txn.duplicateWrites {
+// 		setVersion(e)
+// 	}
+
+// 	entries := make([]*Entry, 0, len(txn.pendingWrites)+len(txn.duplicateWrites)+1)
+
+// 	processEntry := func(e *Entry) {
+// 		// Suffix the keys with commit ts, so the key versions are sorted in
+// 		// descending order of commit timestamp.
+// 		e.Key = y.KeyWithTs(e.Key, e.version)
+// 		// Add bitTxn only if these entries are part of a transaction. We
+// 		// support SetEntryAt(..) in managed mode which means a single
+// 		// transaction can have entries with different timestamps. If entries
+// 		// in a single transaction have different timestamps, we don't add the
+// 		// transaction markers.
+// 		if keepTogether {
+// 			e.meta |= bitTxn
+// 		}
+// 		entries = append(entries, e)
+// 	}
+
+// 	// The following debug information is what led to determining the cause of
+// 	// bank txn violation bug, and it took a whole bunch of effort to narrow it
+// 	// down to here. So, keep this around for at least a couple of months.
+// 	// var b strings.Builder
+// 	// fmt.Fprintf(&b, "Read: %d. Commit: %d. reads: %v. writes: %v. Keys: ",
+// 	// 	txn.readTs, commitTs, txn.reads, txn.conflictKeys)
+// 	for _, e := range txn.pendingWrites {
+// 		processEntry(e)
+// 	}
+// 	for _, e := range txn.duplicateWrites {
+// 		processEntry(e)
+// 	}
+
+// 	if keepTogether {
+// 		// CommitTs should not be zero if we're inserting transaction markers.
+// 		y.AssertTrue(commitTs != 0)
+// 		e := &Entry{
+// 			Key:   y.KeyWithTs(txnKey, commitTs),
+// 			Value: []byte(strconv.FormatUint(commitTs, 10)),
+// 			meta:  bitFinTxn,
+// 		}
+// 		entries = append(entries, e)
+// 	}
+
+// 	req, err := txn.db.sendToWriteCh(entries)
+// 	if err != nil {
+// 		orc.doneCommit(commitTs)
+// 		return nil, err
+// 	}
+// 	ret := func() error {
+// 		err := req.Wait()
+// 		// Wait before marking commitTs as done.
+// 		// We can't defer doneCommit above, because it is being called from a
+// 		// callback here.
+// 		orc.doneCommit(commitTs)
+// 		return err
+// 	}
+// 	return ret, nil
+// }
+
+func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 	orc := txn.db.orc
-	// Ensure that the order in which we get the commit timestamp is the same as
-	// the order in which we push these updates to the write channel. So, we
-	// acquire a writeChLock before getting a commit timestamp, and only release
-	// it after pushing the entries to it.
-	orc.writeChLock.Lock()
-	defer orc.writeChLock.Unlock()
+
+	// useDuckDBDirect: bypass WAL+memtable entirely; write straight into the
+	// persistent DuckDB Appender buffer.
+	useDuckDBDirect := txn.db.opt.UseDuckDB && txn.db.duckDBStorage != nil
+
+	// useLockFree is true only for non-DuckDB databases that explicitly set
+	// NumCompactors=0 (e.g. BenchmarkLockFreeIngest). All other writes (including
+	// DuckDB) previously held writeChLock for the full oracle→DirectFlush window.
+	//
+	// For DuckDB the read barrier is duckDBTracker, NOT this lock:
+	// NewTransactionAt calls duckDBTracker.waitUntil(readTs) to block until all
+	// in-flight commits with ts <= readTs have completed DirectFlush. For that
+	// barrier to be sound, the commitTs must be registered with the tracker
+	// atomically with issuance (DB.RegisterPendingCommit via
+	// Oracle.GetCommitTimestamp); newCommitTs's begin() below is idempotent
+	// with respect to that pre-registration.
+	//
+	// Therefore, on the DuckDB direct path we avoid writeChLock entirely and
+	// allow concurrent DirectFlush calls; ordering/visibility is still governed
+	// by commitTs registration + doneCommit tracking.
+	useLockFree := !txn.db.opt.UseDuckDB && txn.db.opt.NumCompactors == 0
+	writeChLocked := false
+	if !useLockFree && !useDuckDBDirect {
+		orc.writeChLock.Lock()
+		writeChLocked = true
+		defer func() {
+			if writeChLocked {
+				orc.writeChLock.Unlock()
+			}
+		}()
+	}
 
 	commitTs, conflict := orc.newCommitTs(txn)
 	if conflict {
-		return nil, ErrConflict
+		// The commitTs may have been pre-registered with duckDBTracker at
+		// issuance time (Oracle.GetCommitTimestamp). newCommitTs returned
+		// before begin(), so nothing else will remove it — do it here or
+		// readers at readTs >= commitTs block forever. No-op if absent.
+		txn.deregisterPendingCommit()
+		return nil, types.CustomTs{}, ErrConflict
 	}
 
 	keepTogether := true
-	setVersion := func(e *Entry) {
-		if e.version == 0 {
+	// Inline setVersion to avoid closure heap-escape (Go 1.25 escape analysis).
+	for _, e := range txn.pendingWrites {
+		if e.version.IsZero() {
 			e.version = commitTs
 		} else {
 			keepTogether = false
 		}
 	}
-	for _, e := range txn.pendingWrites {
-		setVersion(e)
-	}
-	// The duplicateWrites slice will be non-empty only if there are duplicate
-	// entries with different versions.
 	for _, e := range txn.duplicateWrites {
-		setVersion(e)
+		if e.version.IsZero() {
+			e.version = commitTs
+		} else {
+			keepTogether = false
+		}
 	}
 
 	entries := make([]*Entry, 0, len(txn.pendingWrites)+len(txn.duplicateWrites)+1)
 
-	processEntry := func(e *Entry) {
-		// Suffix the keys with commit ts, so the key versions are sorted in
-		// descending order of commit timestamp.
+	// Inline processEntry to avoid closure heap-escape (Go 1.25 escape analysis).
+	for _, e := range txn.pendingWrites {
 		e.Key = y.KeyWithTs(e.Key, e.version)
-		// Add bitTxn only if these entries are part of a transaction. We
-		// support SetEntryAt(..) in managed mode which means a single
-		// transaction can have entries with different timestamps. If entries
-		// in a single transaction have different timestamps, we don't add the
-		// transaction markers.
+		if keepTogether {
+			e.meta |= bitTxn
+		}
+		entries = append(entries, e)
+	}
+	for _, e := range txn.duplicateWrites {
+		e.Key = y.KeyWithTs(e.Key, e.version)
 		if keepTogether {
 			e.meta |= bitTxn
 		}
 		entries = append(entries, e)
 	}
 
-	// The following debug information is what led to determining the cause of
-	// bank txn violation bug, and it took a whole bunch of effort to narrow it
-	// down to here. So, keep this around for at least a couple of months.
-	// var b strings.Builder
-	// fmt.Fprintf(&b, "Read: %d. Commit: %d. reads: %v. writes: %v. Keys: ",
-	// 	txn.readTs, commitTs, txn.reads, txn.conflictKeys)
-	for _, e := range txn.pendingWrites {
-		processEntry(e)
-	}
-	for _, e := range txn.duplicateWrites {
-		processEntry(e)
-	}
-
 	if keepTogether {
-		// CommitTs should not be zero if we're inserting transaction markers.
-		y.AssertTrue(commitTs != 0)
-		e := &Entry{
+		y.AssertTrue(!commitTs.IsZero())
+		entries = append(entries, &Entry{
 			Key:   y.KeyWithTs(txnKey, commitTs),
-			Value: []byte(strconv.FormatUint(commitTs, 10)),
+			Value: []byte(commitTs.String()),
 			meta:  bitFinTxn,
-		}
-		entries = append(entries, e)
+		})
 	}
 
+	// ----------------------------------------------------------------
+	// DuckDB direct path: bypass WAL, memtable, and write channel.
+	// Entries are appended straight into the persistent Appender buffer.
+	// A CGo Flush() fires automatically every directFlushBatchSize rows.
+	// ----------------------------------------------------------------
+	if useDuckDBDirect {
+		ducks := make([]duckEntry, 0, len(entries))
+		for _, e := range entries {
+			// Skip the internal txn-marker entry — it has no value payload.
+			if e.meta&bitFinTxn != 0 {
+				continue
+			}
+			logicalKey := y.ParseKey(e.Key)
+			version := y.ParseTs(e.Key)
+			// Delete entries must be stored as nil (SQL NULL) so that Read()
+			// returns nil and txn.Get falls through to ErrKeyNotFound.
+			deleted := e.meta&bitDelete != 0
+			var value []byte
+			if !deleted {
+				value = e.Value
+			}
+			ducks = append(ducks, duckEntry{
+				Key:     logicalKey,
+				Value:   value,
+				Version: version,
+				Deleted: deleted,
+			})
+		}
+		if writeChLocked {
+			orc.writeChLock.Unlock()
+			writeChLocked = false
+		}
+		if err := txn.db.duckDBStorage.DirectFlush(ducks); err != nil {
+			orc.doneCommit(commitTs)
+			return nil, types.CustomTs{}, err
+		}
+		orc.doneCommit(commitTs)
+		return nil, commitTs, nil
+	}
+
+	// ----------------------------------------------------------------
+	// Lock-free CAS path: only when NumCompactors==0 and !UseDuckDB.
+	// Prepend a node into db.root, bypassing the write channel.
+	// A background drain goroutine periodically moves db.root entries
+	// to the write channel to bound memory and drive L0 flushes.
+	// ----------------------------------------------------------------
+	if useLockFree {
+		node := &upsertNode{kvs: entries}
+		var retries int64
+		for {
+			old := txn.db.root.Load()
+			node.next = old
+			if txn.db.root.CompareAndSwap(old, node) {
+				break
+			}
+			retries++
+		}
+		// Record CAS contention metrics — always enabled (cheap atomic adds).
+		y.NumCASSuccessesAdd(1)
+		if retries > 0 {
+			y.NumCASRetriesAdd(retries)
+		}
+		// doneCommit must be called before returning so the watermark advances.
+		orc.doneCommit(commitTs)
+		// Return req=nil to signal lock-free completion; callers must check.
+		return nil, commitTs, nil
+	}
+
+	// Standard write-channel path (DuckDB or NumCompactors>0).
 	req, err := txn.db.sendToWriteCh(entries)
 	if err != nil {
 		orc.doneCommit(commitTs)
-		return nil, err
+		return nil, types.CustomTs{}, err
 	}
-	ret := func() error {
-		err := req.Wait()
-		// Wait before marking commitTs as done.
-		// We can't defer doneCommit above, because it is being called from a
-		// callback here.
-		orc.doneCommit(commitTs)
-		return err
+	// Return req and commitTs directly so callers can inline the wait+doneCommit
+	// without creating a closure (eliminates 1 heap alloc per commit in Go 1.25).
+	return req, commitTs, nil
+}
+
+// deregisterPendingCommit removes txn.commitTs from the duckDBTracker pending
+// set. Called on every CommitAt path that aborts before doneCommit would run
+// (conflict, precheck failure, empty write set), so a commitTs that was
+// pre-registered at issuance time cannot leak and stall readers. Safe no-op if
+// the ts was never registered.
+func (txn *Txn) deregisterPendingCommit() {
+	if txn.db.opt.managedTxns && !txn.commitTs.IsZero() {
+		txn.db.orc.duckDBTracker.done(txn.commitTs)
 	}
-	return ret, nil
 }
 
 func (txn *Txn) commitPrecheck() error {
@@ -612,7 +977,7 @@ func (txn *Txn) commitPrecheck() error {
 	}
 	keepTogether := true
 	for _, e := range txn.pendingWrites {
-		if e.version != 0 {
+		if !e.version.IsZero() {
 			keepTogether = false
 		}
 	}
@@ -622,7 +987,7 @@ func (txn *Txn) commitPrecheck() error {
 	// someone uses txn.Commit instead of txn.CommitAt in managed mode.  This
 	// should happen only in managed mode. In normal mode, keepTogether will
 	// always be true.
-	if keepTogether && txn.db.opt.managedTxns && txn.commitTs == 0 {
+	if keepTogether && txn.db.opt.managedTxns && txn.commitTs.IsZero() {
 		return errors.New("CommitTs cannot be zero. Please use commitAt instead")
 	}
 	return nil
@@ -650,25 +1015,35 @@ func (txn *Txn) Commit() error {
 	// txn.conflictKeys can be zero if conflict detection is turned off. So we
 	// should check txn.pendingWrites.
 	if len(txn.pendingWrites) == 0 {
+		txn.deregisterPendingCommit()
 		// Discard the transaction so that the read is marked done.
 		txn.Discard()
 		return nil
 	}
 	// Precheck before discarding txn.
 	if err := txn.commitPrecheck(); err != nil {
+		txn.deregisterPendingCommit()
 		return err
 	}
 	defer txn.Discard()
 
-	txnCb, err := txn.commitAndSend()
+	// commitAndSend returns req+commitTs directly (no closure) to avoid 1 heap alloc.
+	// req is nil for the lock-free CAS path; doneCommit was already called there.
+	req, commitTs, err := txn.commitAndSend()
 	if err != nil {
 		return err
+	}
+	if req == nil {
+		// Lock-free CAS path: data is already in db.root and doneCommit was called.
+		return nil
 	}
 	// If batchSet failed, LSM would not have been updated. So, no need to rollback anything.
 
 	// TODO: What if some of the txns successfully make it to value log, but others fail.
 	// Nothing gets updated to LSM, until a restart happens.
-	return txnCb()
+	waitErr := req.Wait()
+	txn.db.orc.doneCommit(commitTs)
+	return waitErr
 }
 
 type txnCb struct {
@@ -703,6 +1078,7 @@ func (txn *Txn) CommitWith(cb func(error)) {
 	}
 
 	if len(txn.pendingWrites) == 0 {
+		txn.deregisterPendingCommit()
 		// Do not run these callbacks from here, because the CommitWith and the
 		// callback might be acquiring the same locks. Instead run the callback
 		// from another goroutine.
@@ -714,23 +1090,33 @@ func (txn *Txn) CommitWith(cb func(error)) {
 
 	// Precheck before discarding txn.
 	if err := txn.commitPrecheck(); err != nil {
+		txn.deregisterPendingCommit()
 		cb(err)
 		return
 	}
 
 	defer txn.Discard()
 
-	commitCb, err := txn.commitAndSend()
+	req, commitTs, err := txn.commitAndSend()
 	if err != nil {
 		go runTxnCallback(&txnCb{user: cb, err: err})
 		return
 	}
+	if req == nil {
+		// Lock-free CAS path: data is already in db.root and doneCommit was called.
+		go runTxnCallback(&txnCb{user: cb})
+		return
+	}
 
-	go runTxnCallback(&txnCb{user: cb, commit: commitCb})
+	go func() {
+		waitErr := req.Wait()
+		txn.db.orc.doneCommit(commitTs)
+		cb(waitErr)
+	}()
 }
 
 // ReadTs returns the read timestamp of the transaction.
-func (txn *Txn) ReadTs() uint64 {
+func (txn *Txn) ReadTs() types.CustomTs {
 	return txn.readTs
 }
 
@@ -791,7 +1177,7 @@ func (db *DB) View(fn func(txn *Txn) error) error {
 	}
 	var txn *Txn
 	if db.opt.managedTxns {
-		txn = db.NewTransactionAt(math.MaxUint64, false)
+		txn = db.NewTransactionAt(types.MaxTs, false)
 	} else {
 		txn = db.NewTransaction(false)
 	}

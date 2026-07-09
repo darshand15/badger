@@ -18,6 +18,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/table"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 )
 
@@ -100,9 +101,9 @@ func BenchmarkPickTables(b *testing.B) {
 
 // See badger.IteratorOptions (iterator.go)
 type iteratorOptions struct {
-	prefixIsKey bool   // If set, use the prefix for bloom filter lookup.
-	Prefix      []byte // Only iterate over this given prefix.
-	SinceTs     uint64 // Only read data that has version > SinceTs.
+	prefixIsKey bool           // If set, use the prefix for bloom filter lookup.
+	Prefix      []byte         // Only iterate over this given prefix.
+	SinceTs     types.CustomTs // Only read data that has version > SinceTs.
 }
 
 // See compareToPrefix in iterator.go
@@ -128,10 +129,10 @@ func (s *levelHandler) init(tables []*table.Table) {
 // This implementation is based on the implementation in master branch.
 func (s *levelHandler) pickTables(opt iteratorOptions) []*table.Table {
 	filterTables := func(tables []*table.Table) []*table.Table {
-		if opt.SinceTs > 0 {
+		if opt.SinceTs.Greater(types.CustomTs{}) {
 			tmp := tables[:0]
 			for _, t := range tables {
-				if t.MaxVersion() < opt.SinceTs {
+				if t.MaxVersion().Less(opt.SinceTs) {
 					continue
 				}
 				tmp = append(tmp, t)
@@ -192,8 +193,8 @@ func genTables(boundaries [][]byte) []*table.Table {
 		b := table.NewTableBuilder(opts)
 		defer b.Close()
 		// Add one key so that we can open this table.
-		b.Add(y.KeyWithTs(k1, 1), y.ValueStruct{}, 0)
-		b.Add(y.KeyWithTs(k2, 1), y.ValueStruct{}, 0)
+		b.Add(y.KeyWithTs(k1, types.CustomTs{AssignedTs: 1}), y.ValueStruct{}, 0)
+		b.Add(y.KeyWithTs(k2, types.CustomTs{AssignedTs: 1}), y.ValueStruct{}, 0)
 		tab, err := table.OpenInMemoryTable(b.Finish(), 0, &opts)
 		y.Check(err)
 		return tab

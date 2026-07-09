@@ -29,6 +29,7 @@ import (
 	"github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/badger/v4/skl"
 	"github.com/dgraph-io/badger/v4/table"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/dgraph-io/ristretto/v2/z"
@@ -55,6 +56,11 @@ type lockedKeys struct {
 	keys map[uint64]struct{}
 }
 
+type upsertNode struct {
+	next *upsertNode
+	kvs  []*Entry
+}
+
 func (lk *lockedKeys) add(key uint64) {
 	lk.Lock()
 	defer lk.Unlock()
@@ -78,6 +84,68 @@ func (lk *lockedKeys) all() []uint64 {
 	return keys
 }
 
+// duckDBIface is the interface for the optional DuckDB storage backend.
+// It deliberately avoids CGO types so files importing it stay pure-Go.
+type duckDBIface interface {
+	// Read looks up the latest value for key with timestamp <= readTs.
+	// Returns (nil, zero, nil) when the key is not found.
+	Read(key []byte, readTs types.CustomTs) (value []byte, version types.CustomTs, err error)
+
+	// FlushEntries writes a batch of entries to DuckDB synchronously.
+	// Used by the memtable-flush path (infrequent, large batches).
+	FlushEntries(entries []duckEntry) error
+
+	// DirectFlush appends entries directly into the DuckDB Appender buffer,
+	// bypassing the WAL and memtable entirely.  A CGo Appender.Flush() is
+	// triggered automatically once the per-partition buffer reaches the
+	// configured batch size (default 512 rows), amortising the fixed CGo cost
+	// across many commits.  Reads always flush pending rows before querying so
+	// read-after-write correctness is preserved.
+	DirectFlush(entries []duckEntry) error
+
+	// ReadBatch retrieves the latest value for multiple keys in a single SQL query
+	// per partition. More efficient than calling Read() N times when a transaction
+	// needs multiple keys, because it reduces CGo round-trips from N to 1.
+	// All entries in requests should share the same ReadTs.
+	ReadBatch(requests []duckReadBatchReq) ([]duckReadBatchResult, error)
+
+	// ScanPrefix returns the latest visible (version <= readTs, non-deleted)
+	// value for every key starting with prefix, using one SQL query per
+	// partition instead of one point read per key. Callers needing a
+	// consistent cross-partition snapshot must first create a transaction via
+	// NewTransactionAt with the same readTs (its read barrier waits for all
+	// in-flight commits <= readTs to flush).
+	ScanPrefix(prefix []byte, readTs types.CustomTs) ([]duckReadBatchResult, error)
+
+	// CompactPartitions removes superseded key versions to reclaim space.
+	CompactPartitions() error
+
+	// Close releases all DuckDB resources.
+	Close() error
+}
+
+// duckEntry is a single key/value entry used when flushing to DuckDB.
+type duckEntry struct {
+	Key     []byte
+	Value   []byte
+	Version types.CustomTs
+	Deleted bool // true when this entry is a delete tombstone
+}
+
+// duckReadBatchReq is one key lookup within a ReadBatch call.
+type duckReadBatchReq struct {
+	Key    []byte
+	ReadTs types.CustomTs
+}
+
+// duckReadBatchResult is the result for one key in a ReadBatch call.
+type duckReadBatchResult struct {
+	Key     []byte
+	Value   []byte
+	Version types.CustomTs
+	Found   bool
+}
+
 // DB provides the various functions required to interact with Badger.
 // DB is thread-safe.
 type DB struct {
@@ -89,10 +157,12 @@ type DB struct {
 	// nil if Dir and ValueDir are the same
 	valueDirGuard *directoryLockGuard
 
-	closers closers
+	closers     closers
+	nextTableID uint64
 
-	mt  *memTable   // Our latest (actively written) in-memory table
-	imm []*memTable // Add here only AFTER pushing to flushChan.
+	mt   *memTable   // Our latest (actively written) in-memory table
+	imm  []*memTable // Add here only AFTER pushing to flushChan.
+	root atomic.Pointer[upsertNode]
 
 	// Initialized via openMemTables.
 	nextMemFid int
@@ -117,6 +187,8 @@ type DB struct {
 	blockCache *ristretto.Cache[[]byte, *table.Block]
 	indexCache *ristretto.Cache[uint64, *fb.TableIndex]
 	allocPool  *z.AllocatorPool
+
+	duckDBStorage duckDBIface
 }
 
 const (
@@ -231,10 +303,33 @@ func Open(opt Options) (*DB, error) {
 		}
 	}()
 
+	// Initialize DuckDB storage only when explicitly enabled
+	var duckStore duckDBIface
+	if opt.UseDuckDB {
+		numDuckDBPartitions := opt.PartitionFanOut
+		if numDuckDBPartitions <= 0 {
+			numDuckDBPartitions = 1
+		}
+
+		var duckdbPath string
+		if opt.InMemory {
+			duckdbPath = ":memory:"
+		} else {
+			duckdbPath = filepath.Join(opt.Dir, "duckdb_data")
+		}
+
+		var duckErr error
+		duckStore, duckErr = newDuckDBBackend(duckdbPath, numDuckDBPartitions)
+		if duckErr != nil {
+			return nil, fmt.Errorf("failed to initialize DuckDB storage: %w", duckErr)
+		}
+	}
+
 	db := &DB{
 		imm:              make([]*memTable, 0, opt.NumMemtables),
 		flushChan:        make(chan *memTable, opt.NumMemtables),
 		writeCh:          make(chan *request, kvWriteChCapacity),
+		duckDBStorage:    duckStore,
 		opt:              opt,
 		manifest:         manifestFile,
 		dirLockGuard:     dirLockGuard,
@@ -245,8 +340,7 @@ func Open(opt Options) (*DB, error) {
 		bannedNamespaces: &lockedKeys{keys: make(map[uint64]struct{})},
 		threshold:        initVlogThreshold(&opt),
 	}
-
-	db.syncChan = opt.syncChan
+	db.root.Store(nil)
 
 	// Cleanup all the goroutines started by badger in case of an error.
 	defer func() {
@@ -256,6 +350,7 @@ func Open(opt Options) (*DB, error) {
 			db = nil
 		}
 	}()
+
 
 	if opt.BlockCacheSize > 0 {
 		numInCache := opt.BlockCacheSize / int64(opt.BlockSize)
@@ -341,10 +436,10 @@ func Open(opt Options) (*DB, error) {
 	// Initialize vlog struct.
 	db.vlog.init(db)
 
-	if !opt.ReadOnly{
-		// No background compactions
-		// Other way to do is set numCompactors to zero in options
-		if opt.PartitionFanOut != 0{
+	if !opt.ReadOnly {
+		// No background compactions when using partitioned or DuckDB mode;
+		// set NumCompactors=0 in options for the same effect.
+		if opt.PartitionFanOut != 0 && !opt.UseDuckDB {
 			db.closers.compactors = z.NewCloser(1)
 			db.lc.startCompact(db.closers.compactors)
 		}
@@ -360,7 +455,8 @@ func Open(opt Options) (*DB, error) {
 	}
 	// We do increment nextTxnTs below. So, no need to do it here.
 	db.orc.nextTxnTs = db.MaxVersion()
-	db.opt.Infof("Set nextTxnTs to %d", db.orc.nextTxnTs)
+
+	db.opt.Infof("Set nextTxnTs to %s", db.orc.nextTxnTs)
 
 	if err = db.vlog.open(db); err != nil {
 		return db, y.Wrapf(err, "During db.vlog.open")
@@ -417,10 +513,10 @@ func (db *DB) initBannedNamespaces() error {
 	})
 }
 
-func (db *DB) MaxVersion() uint64 {
-	var maxVersion uint64
-	update := func(a uint64) {
-		if a > maxVersion {
+func (db *DB) MaxVersion() types.CustomTs {
+	var maxVersion types.CustomTs
+	update := func(a types.CustomTs) {
+		if a.Greater(maxVersion) {
 			maxVersion = a
 		}
 	}
@@ -518,6 +614,14 @@ func (db *DB) IndexCacheMetrics() *ristretto.Metrics {
 	return nil
 }
 
+// FlushToStorage is a no-op on the duckdb-integration branch because the write
+// path is fully synchronous — data is already on disk by the time txn.Commit()
+// returns. It exists so that BenchmarkDbGrowth can call the same interface on
+// both branches (on dd_exp it drains the async lock-free write list to disk).
+func (db *DB) FlushToStorage() error {
+	return nil
+}
+
 // Close closes a DB. It's crucial to call it to ensure all the pending updates make their way to
 // disk. Calling DB.Close() multiple times would still only close the DB once.
 func (db *DB) Close() error {
@@ -554,6 +658,15 @@ func (db *DB) close() (err error) {
 	// Don't accept any more write.
 	close(db.writeCh)
 
+	// Drain any requests that were sent to writeCh in the race window between
+	// sendToWriteCh reading blockWrites==0 and doWrites finishing its drain.
+	// Without this, those requests' WaitGroups would never be decremented.
+	for req := range db.writeCh {
+		req.Err = ErrBlockedWrites
+		req.Wg.Done()
+		req.DecrRef()
+	}
+
 	db.closers.pub.SignalAndWait()
 	db.closers.cacheHealth.Signal()
 
@@ -563,8 +676,14 @@ func (db *DB) close() (err error) {
 	// trying to push stuff into the memtable. This will also resolve the value
 	// offset problem: as we push into memtable, we update value offsets there.
 	if db.mt != nil {
-		if db.mt.sl.Empty() {
-			// Remove the memtable if empty.
+		// For the lock-free (non-DuckDB) path, db.root may hold unflushed entries.
+		// handleMemTableFlushClassic already drains db.root before building the L0
+		// table, so we just need to ensure db.mt is pushed to flushChan even when its
+		// skiplist is empty, as long as db.root is non-nil. Do NOT drain into db.mt.sl
+		// here — the arena may be full.
+		hasRootEntries := !db.opt.UseDuckDB && db.opt.NumCompactors == 0 && db.root.Load() != nil
+		if db.mt.sl.Empty() && !hasRootEntries {
+			// Nothing to flush — safe to discard.
 			db.mt.DecrRef()
 		} else {
 			db.opt.Debugf("Flushing memtable")
@@ -609,6 +728,16 @@ func (db *DB) close() (err error) {
 			db.opt.Debugf("Force compaction on level 0 done")
 		default:
 			db.opt.Warningf("While forcing compaction on level 0: %v", err)
+		}
+	}
+
+	// Close DuckDB storage BEFORE closing value log
+	if db.duckDBStorage != nil {
+		if duckErr := db.duckDBStorage.Close(); duckErr != nil {
+			db.opt.Errorf("Error closing DuckDB storage: %v", duckErr)
+			if err == nil {
+				err = y.Wrap(duckErr, "DB.Close (DuckDB)")
+			}
 		}
 	}
 
@@ -741,9 +870,9 @@ func (db *DB) getMemTables() ([]*memTable, func()) {
 // Note that value will include meta byte.
 //
 // IMPORTANT: We should never write an entry with an older timestamp for the same key, We need to
-// maintain this invariant to search for the latest value of a key, or else we need to search in all
-// tables and find the max version among them.  To maintain this invariant, we also need to ensure
-// that all versions of a key are always present in the same table from level 1, because compaction
+// maintain this invariant to search for the latest value of a key, or else we need to
+// search in all tables and find the max version among them.  To maintain this invariant, we
+// also need to ensure that all versions of a key are always present in the same table from level 1, because compaction
 // can push any table down.
 //
 // Update(23/09/2020) - We have dropped the move key implementation. Earlier we
@@ -755,12 +884,54 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 	if db.IsClosed() {
 		return y.ValueStruct{}, ErrDBClosed
 	}
-	tables, decr := db.getMemTables() // Lock should be released.
+
+	// Extract snapshot timestamp + logical key from seek key.
+	readTs := y.ParseTs(key)
+	logicalKey := y.ParseKey(key)
+
+	// 1. 🚀 Check the lock-free CAS-prepend root list first (non-DuckDB writes
+	// with NumCompactors==0 land here before being drained to L0). When the
+	// standard write channel is used, db.root is always nil and this is a no-op.
+	var best y.ValueStruct
+	var rootListLen int64
+	for n := db.root.Load(); n != nil; n = n.next {
+		rootListLen++
+		for _, e := range n.kvs {
+			if !bytes.Equal(y.ParseKey(e.Key), logicalKey) {
+				continue
+			}
+			// Only consider versions <= readTs
+			if !(e.version.Greater(readTs)) {
+				if isDeletedOrExpired(e.meta, e.ExpiresAt) {
+					return y.ValueStruct{}, ErrKeyNotFound
+				}
+				// Pick the newest visible version <= readTs
+				if e.version.Greater(best.Version) {
+					best = y.ValueStruct{
+						Value:     e.Value,
+						Meta:      e.meta,
+						UserMeta:  e.UserMeta,
+						ExpiresAt: e.ExpiresAt,
+						Version:   e.version,
+					}
+				}
+			}
+		}
+	}
+	// Sample root list length for monitoring (best-effort, non-blocking).
+	if rootListLen > 0 {
+		y.NumRootListLengthSet(rootListLen)
+	}
+	if best.Value != nil || best.Meta != 0 {
+		y.NumGetsWithResultsAdd(db.opt.MetricsEnabled, 1)
+		return best, nil
+	}
+
+	// 2. Fallback: memtables (mt + imm)
+	tables, decr := db.getMemTables()
 	defer decr()
 
 	var maxVs y.ValueStruct
-	version := y.ParseTs(key)
-
 	y.NumGetsAdd(db.opt.MetricsEnabled, 1)
 	for i := 0; i < len(tables); i++ {
 		vs := tables[i].sl.Get(key)
@@ -768,15 +939,21 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 		if vs.Meta == 0 && vs.Value == nil {
 			continue
 		}
-		// Found the required version of the key, return immediately.
-		if vs.Version == version {
+		// Found exact version match
+		if vs.Version == readTs {
 			y.NumGetsWithResultsAdd(db.opt.MetricsEnabled, 1)
 			return vs, nil
 		}
-		if maxVs.Version < vs.Version {
+		if !(vs.Version.Greater(readTs)) && maxVs.Version.Less(vs.Version) {
 			maxVs = vs
 		}
 	}
+	if maxVs.Value != nil || maxVs.Meta != 0 {
+		y.NumGetsWithResultsAdd(db.opt.MetricsEnabled, 1)
+		return maxVs, nil
+	}
+
+	// 3. Final fallback: LSM levels
 	return db.lc.get(key, maxVs, 0)
 }
 
@@ -787,7 +964,7 @@ var requestPool = sync.Pool{
 }
 
 func (db *DB) writeToLSM(b *request) error {
-	// We should check the length of b.Prts and b.Entries only when badger is not
+	// We should check the length of b.Ptrs and b.Entries only when badger is not
 	// running in InMemory mode. In InMemory mode, we don't write anything to the
 	// value log and that's why the length of b.Ptrs will always be zero.
 	if !db.opt.InMemory && len(b.Ptrs) != len(b.Entries) {
@@ -830,21 +1007,25 @@ func (db *DB) writeToLSM(b *request) error {
 }
 
 // writeRequests is called serially by only one goroutine.
+// completeRequests marks every request in reqs as finished with the given
+// error and signals their WaitGroup. Extracted from the former inline done
+// closure to avoid a closure heap allocation on every writeRequests call.
+func completeRequests(reqs []*request, err error) {
+	for _, r := range reqs {
+		r.Err = err
+		r.Wg.Done()
+	}
+}
+
 func (db *DB) writeRequests(reqs []*request) error {
 	if len(reqs) == 0 {
 		return nil
 	}
 
-	done := func(err error) {
-		for _, r := range reqs {
-			r.Err = err
-			r.Wg.Done()
-		}
-	}
 	db.opt.Debugf("writeRequests called. Writing to value log")
 	err := db.vlog.write(reqs)
 	if err != nil {
-		done(err)
+		completeRequests(reqs, err)
 		return err
 	}
 
@@ -862,17 +1043,21 @@ func (db *DB) writeRequests(reqs []*request) error {
 			if i%100 == 0 {
 				db.opt.Debugf("Making room for writes")
 			}
+			if db.isClosed.Load() > 0 {
+				completeRequests(reqs, ErrDBClosed)
+				return ErrDBClosed
+			}
 			// We need to poll a bit because both hasRoomForWrite and the flusher need access to s.imm.
 			// When flushChan is full and you are blocked there, and the flusher is trying to update s.imm,
 			// you will get a deadlock.
 			time.Sleep(10 * time.Millisecond)
 		}
 		if err != nil {
-			done(err)
+			completeRequests(reqs, err)
 			return y.Wrap(err, "writeRequests")
 		}
 		if err := db.writeToLSM(b); err != nil {
-			done(err)
+			completeRequests(reqs, err)
 			return y.Wrap(err, "writeRequests")
 		}
 	}
@@ -880,7 +1065,7 @@ func (db *DB) writeRequests(reqs []*request) error {
 	db.opt.Debugf("Sending updates to subscribers")
 	db.pub.sendUpdates(reqs)
 
-	done(nil)
+	completeRequests(reqs, nil)
 	db.opt.Debugf("%d entries written", count)
 	return nil
 }
@@ -1013,14 +1198,33 @@ var errNoRoom = stderrors.New("No room for write")
 
 // ensureRoomForWrite is always called serially.
 func (db *DB) ensureRoomForWrite() error {
-	var err error
+	// ensureRoomForWrite is always called serially (single doWrites goroutine).
+
+	// Fast pre-check without acquiring any lock.  db.mt is only written inside
+	// the write lock by this goroutine, so reading it here is safe.
+	if !db.mt.isFull() {
+		return nil
+	}
+
+	// If flushChan is already at capacity we will hit the default branch below
+	// anyway — skip the expensive pre-allocation entirely.
+	if len(db.flushChan) == cap(db.flushChan) {
+		return errNoRoom
+	}
+
+	// Pre-allocate the replacement memtable BEFORE acquiring the write lock.
+	// Holding db.lock while newMemTable runs (skiplist arena alloc + WAL mmap)
+	// stalls every concurrent reader goroutine for the full allocation time.
+	// Moving the allocation outside the lock eliminates that stall.
+	newMT, allocErr := db.newMemTable()
+	if allocErr != nil {
+		return y.Wrapf(allocErr, "ensureRoomForWrite: pre-alloc")
+	}
+
 	db.lock.Lock()
 	defer db.lock.Unlock()
 
 	y.AssertTrue(db.mt != nil) // A nil mt indicates that DB is being closed.
-	if !db.mt.isFull() {
-		return nil
-	}
 
 	select {
 	case db.flushChan <- db.mt:
@@ -1028,14 +1232,14 @@ func (db *DB) ensureRoomForWrite() error {
 			db.mt.sl.MemSize(), len(db.flushChan))
 		// We manage to push this task. Let's modify imm.
 		db.imm = append(db.imm, db.mt)
-		db.mt, err = db.newMemTable()
-		if err != nil {
-			return y.Wrapf(err, "cannot create new mem table")
-		}
+		db.mt = newMT
 		// New memtable is empty. We certainly have room.
 		return nil
 	default:
-		// We need to do this to unlock and allow the flusher to modify imm.
+		// flushChan filled up between our check and the lock acquisition.
+		// Release the pre-allocated memtable (its OnClose will delete the WAL
+		// file) and tell the caller to retry after sleeping.
+		newMT.sl.DecrRef()
 		return errNoRoom
 	}
 }
@@ -1067,7 +1271,48 @@ func buildL0Table(iter y.Iterator, dropPrefixes [][]byte, bopts table.Options) *
 // handleMemTableFlush must be run serially.
 func (db *DB) handleMemTableFlushClassic(mt *memTable, dropPrefixes [][]byte) error {
 	bopts := buildTableOptions(db)
-	itr := mt.sl.NewUniIterator(false)
+
+	// For the lock-free (non-DuckDB) path, db.root may hold entries that
+	// bypassed the write channel.  mt.sl is already full (that's why the flush
+	// was triggered), so we CANNOT put more entries into its arena.  Instead,
+	// collect the root entries into a fresh temporary skiplist sized exactly for
+	// them, then merge the two sorted streams when building the L0 table.
+	var itr y.Iterator
+	if !db.opt.UseDuckDB && db.opt.NumCompactors == 0 {
+		if head := db.root.Swap(nil); head != nil {
+			// First pass: compute total byte budget for the temp arena.
+			var arenaBytes int64
+			for n := head; n != nil; n = n.next {
+				for _, e := range n.kvs {
+					arenaBytes += int64(len(e.Key)) + int64(len(e.Value)) + int64(skl.MaxNodeSize)
+				}
+			}
+			const minArena = 4 << 10 // 4 KiB floor
+			if arenaBytes < minArena {
+				arenaBytes = minArena
+			}
+			tmpSl := skl.NewSkiplist(arenaBytes * 2) // 2× headroom for skl overhead
+			defer tmpSl.DecrRef()
+			for n := head; n != nil; n = n.next {
+				for _, e := range n.kvs {
+					tmpSl.Put(e.Key, y.ValueStruct{
+						Value:     e.Value,
+						Meta:      e.meta,
+						UserMeta:  e.UserMeta,
+						ExpiresAt: e.ExpiresAt,
+					})
+				}
+			}
+			itr = table.NewMergeIterator([]y.Iterator{
+				mt.sl.NewUniIterator(false),
+				tmpSl.NewUniIterator(false),
+			}, false)
+		}
+	}
+	if itr == nil {
+		itr = mt.sl.NewUniIterator(false)
+	}
+
 	builder := buildL0Table(itr, nil, bopts)
 	defer builder.Close()
 
@@ -1097,67 +1342,86 @@ func (db *DB) handleMemTableFlushClassic(mt *memTable, dropPrefixes [][]byte) er
 	return err
 }
 
-func (db *DB) handleMemTableFlushPartitioned(mt *memTable) error {
-    fanOut := db.opt.PartitionFanOut
 
-    type kv struct {
-        key []byte
-        vs  y.ValueStruct
-    }
+// getPartitionForKey calculates partition ID for a key at given level
+func (db *DB) getPartitionForKey(key []byte, level int) int {
+	if db.opt.PartitionFanOut <= 0 {
+		return 0
+	}
 
-    // 1) Group all entries by partition ID
-    parts := make(map[uint32][]kv, fanOut)
-    itr := mt.sl.NewUniIterator(false)
-    for itr.Rewind(); itr.Valid(); itr.Next() {
-        key := append([]byte(nil), itr.Key()...)
-        vs := itr.Value()
-        pid := getPartitionID(0, key, fanOut)
-        parts[pid] = append(parts[pid], kv{key, vs})
-    }
-    itr.Close()
+	keyNoTs := y.ParseKey(key)
+	hash := y.Hash(keyNoTs)
 
-    // 2) Build and write one SSTable per partition
-    bopts := buildTableOptions(db)
-    for pid, group := range parts {
-        if len(group) == 0 {
-            continue
-        }
-        builder := table.NewTableBuilder(bopts)
-        for _, e := range group {
-            // Decode any value-log pointer so we know how many bytes to reserve
-            var vp valuePointer
-            if e.vs.Meta&bitValuePointer != 0 {
-                vp.Decode(e.vs.Value)
-            }
-            builder.Add(e.key, e.vs, vp.Len)
-        }
+	// Calculate partitions at this level
+	numParts := 1
+	for i := 0; i <= level; i++ {
+		numParts *= db.opt.PartitionFanOut
+	}
 
-        // Finish building and commit
-        fileID := db.lc.reserveFileID()
-        var tbl *table.Table
-        var err error
-		fname := table.NewFilename(fileID, db.opt.Dir)
-		tbl, err = table.CreateTable(fname, builder)
-        builder.Close()
-        if err != nil {
-            return y.Wrap(err, "creating partitioned L0 table")
-        }
-
-        // Register it in the correct partition
-        if err := db.lc.addLevel0PartitionedTable(int(pid), tbl); err != nil {
-            return err
-        }
-        _ = tbl.DecrRef()
-    }
-    return nil
+	return int(uint64(hash) % uint64(numParts))
 }
+
+// func (db *DB) handleMemTableFlushPartitioned(mt *memTable) error {
+//     fanOut := db.opt.PartitionFanOut
+
+//     type kv struct {
+//         key []byte
+//         vs  y.ValueStruct
+//     }
+
+//     // 1) Group all entries by partition ID
+//     parts := make(map[uint32][]kv, fanOut)
+//     itr := mt.sl.NewUniIterator(false)
+//     for itr.Rewind(); itr.Valid(); itr.Next() {
+//         key := append([]byte(nil), itr.Key()...)
+//         vs := itr.Value()
+//         pid := getPartitionID(0, key, fanOut)
+//         parts[pid] = append(parts[pid], kv{key, vs})
+//     }
+//     itr.Close()
+
+//     // 2) Build and write one SSTable per partition
+//     bopts := buildTableOptions(db)
+//     for pid, group := range parts {
+//         if len(group) == 0 {
+//             continue
+//         }
+//         builder := table.NewTableBuilder(bopts)
+//         for _, e := range group {
+//             // Decode any value-log pointer so we know how many bytes to reserve
+//             var vp valuePointer
+//             if e.vs.Meta&bitValuePointer != 0 {
+//                 vp.Decode(e.vs.Value)
+//             }
+//             builder.Add(e.key, e.vs, vp.Len)
+//         }
+
+//         // Finish building and commit
+//         fileID := db.lc.reserveFileID()
+//         var tbl *table.Table
+//         var err error
+// 		fname := table.NewFilename(fileID, db.opt.Dir)
+// 		tbl, err = table.CreateTable(fname, builder)
+//         builder.Close()
+//         if err != nil {
+//             return y.Wrap(err, "creating partitioned L0 table")
+//         }
+
+//         // Register it in the correct partition
+//         if err := db.lc.addLevel0PartitionedTable(int(pid), tbl); err != nil {
+//             return err
+//         }
+//         _ = tbl.DecrRef()
+//     }
+//     return nil
+// }
 
 // handleMemTableFlush must be run serially.
 func (db *DB) handleMemTableFlush(mt *memTable, dropPrefixes [][]byte) error {
-    if db.opt.PartitionFanOut > 0 {
-        return db.handleMemTableFlushPartitioned(mt)
-    }
-    return db.handleMemTableFlushClassic(mt, dropPrefixes)
+	if db.opt.UseDuckDB {
+		return db.handleMemTableFlushPartitioned(mt, dropPrefixes)
+	}
+	return db.handleMemTableFlushClassic(mt, dropPrefixes)
 }
 
 // flushMemtable must keep running until we send it an empty memtable. If there
@@ -1172,13 +1436,16 @@ func (db *DB) flushMemtable(lc *z.Closer) {
 
 		for {
 			if err := db.handleMemTableFlush(mt, nil); err != nil {
+				if err == ErrDBClosed {
+					return
+				}
 				// Encountered error. Retry indefinitely.
 				db.opt.Errorf("error flushing memtable to disk: %v, retrying", err)
 				time.Sleep(time.Second)
 				continue
 			}
-			
-			if db.opt.PartitionFanOut > 0 {
+
+			if db.opt.UseDuckDB && db.opt.PartitionFanOut > 1 {
 				db.lc.checkPartitionOverflow(0)
 			}
 
@@ -1304,6 +1571,11 @@ func (db *DB) RunValueLogGC(discardRatio float64) error {
 	}
 	if discardRatio >= 1.0 || discardRatio <= 0.0 {
 		return ErrInvalidRequest
+	}
+
+	// When DuckDB is the backing store, compact it to remove superseded versions.
+	if db.opt.UseDuckDB && db.duckDBStorage != nil {
+		_ = db.duckDBStorage.CompactPartitions() // best-effort; ignore errors
 	}
 
 	// Pick a log file and run GC
@@ -1899,7 +2171,7 @@ func (db *DB) filterPrefixesToDrop(prefixes [][]byte) ([][]byte, error) {
 }
 
 // Checks if the key is banned. Returns the respective error if the key belongs to any of the banned
-// namepspaces. Else it returns nil.
+// namepsaces. Else it returns nil.
 func (db *DB) isBanned(key []byte) error {
 	if db.opt.NamespaceOffset < 0 {
 		return nil
@@ -1919,8 +2191,11 @@ func (db *DB) BanNamespace(ns uint64) error {
 		return ErrNamespaceMode
 	}
 	db.opt.Infof("Banning namespace: %d", ns)
+
+	systemTs := types.CustomTs{EpochID: 1, BrokerID: 1, AssignedTs: 1}
+
 	// First set the banned namespaces in DB and then update the in-memory structure.
-	key := y.KeyWithTs(append(bannedNsKey, y.U64ToBytes(ns)...), 1)
+	key := y.KeyWithTs(append(bannedNsKey, y.U64ToBytes(ns)...), systemTs)
 	entry := []*Entry{{
 		Key:   key,
 		Value: nil,
@@ -1970,6 +2245,7 @@ func (db *DB) Subscribe(ctx context.Context, cb func(kv *KVList) error, matches 
 			default:
 				if len(batch.GetKv()) > 0 {
 					return cb(batch)
+
 				}
 				return nil
 			}
@@ -2063,7 +2339,7 @@ func (db *DB) StreamDB(outOptions Options) error {
 	}
 
 	// Stream contents of DB to the output DB.
-	stream := db.NewStreamAt(math.MaxUint64)
+	stream := db.NewStreamAt(types.MaxTs)
 	stream.LogPrefix = fmt.Sprintf("Streaming DB to new DB at %s", outDir)
 
 	stream.Send = func(buf *z.Buffer) error {

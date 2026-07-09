@@ -20,6 +20,7 @@ import (
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/badger/v4/table"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 )
 
@@ -121,7 +122,7 @@ func buildTable(t *testing.T, keyValues [][]string, bopts table.Options) *table.
 	})
 	for _, kv := range keyValues {
 		y.AssertTrue(len(kv) == 2)
-		b.Add(y.KeyWithTs([]byte(kv[0]), 10), y.ValueStruct{
+		b.Add(y.KeyWithTs([]byte(kv[0]), types.CustomTs{AssignedTs: 10}), y.ValueStruct{
 			Value:    []byte(kv[1]),
 			Meta:     'A',
 			UserMeta: 0,
@@ -237,11 +238,13 @@ func TestConcurrentManifestCompaction(t *testing.T) {
 	defer removeDir(dir)
 
 	// overwrite the sync function to make this race condition easily reproducible
+	origSyncFunc := syncFunc
 	syncFunc = func(f *os.File) error {
 		// effectively making the Sync() take around 1s makes this reproduce every time
 		time.Sleep(1 * time.Second)
 		return f.Sync()
 	}
+	defer func() { syncFunc = origSyncFunc }()
 
 	mf, _, err := helpOpenOrCreateManifestFile(dir, false, 0, 0)
 	require.NoError(t, err)

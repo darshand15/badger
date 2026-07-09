@@ -7,7 +7,6 @@ package badger
 
 import (
 	"fmt"
-	"math"
 	"math/rand"
 	"os"
 	"runtime"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -48,7 +48,7 @@ func numKeys(db *DB) int {
 	return count
 }
 
-func numKeysManaged(db *DB, readTs uint64) int {
+func numKeysManaged(db *DB, readTs types.CustomTs) int {
 	txn := db.NewTransactionAt(readTs, false)
 	defer txn.Discard()
 
@@ -77,9 +77,9 @@ func TestDropAllManaged(t *testing.T) {
 		var wg sync.WaitGroup
 		for i := start; i < start+N; i++ {
 			wg.Add(1)
-			txn := db.NewTransactionAt(math.MaxUint64, true)
+			txn := db.NewTransactionAt(types.MaxTs, true)
 			require.NoError(t, txn.SetEntry(NewEntry([]byte(key("key", int(i))), val(true))))
-			require.NoError(t, txn.CommitAt(i, func(err error) {
+			require.NoError(t, txn.CommitAt(types.CustomTs{AssignedTs: uint32(i)}, func(err error) {
 				require.NoError(t, err)
 				wg.Done()
 			}))
@@ -88,22 +88,22 @@ func TestDropAllManaged(t *testing.T) {
 	}
 
 	populate(db, N)
-	require.Equal(t, int(N), numKeysManaged(db, math.MaxUint64))
+	require.Equal(t, int(N), numKeysManaged(db, types.MaxTs))
 
 	require.NoError(t, db.DropAll())
 	require.NoError(t, db.DropAll()) // Just call it twice, for fun.
-	require.Equal(t, 0, numKeysManaged(db, math.MaxUint64))
+	require.Equal(t, 0, numKeysManaged(db, types.MaxTs))
 
 	// Check that we can still write to db, and using lower timestamps.
 	populate(db, 1)
-	require.Equal(t, int(N), numKeysManaged(db, math.MaxUint64))
+	require.Equal(t, int(N), numKeysManaged(db, types.MaxTs))
 	require.NoError(t, db.Close())
 
 	// Ensure that value log is correctly replayed, that we are preserving badgerHead.
 	opts.managedTxns = true
 	db2, err := Open(opts)
 	require.NoError(t, err)
-	require.Equal(t, int(N), numKeysManaged(db2, math.MaxUint64))
+	require.Equal(t, int(N), numKeysManaged(db2, types.MaxTs))
 	require.NoError(t, db2.Close())
 }
 
@@ -339,9 +339,9 @@ func TestDropAllRace(t *testing.T) {
 			select {
 			case <-ticker.C:
 				i++
-				txn := db.NewTransactionAt(math.MaxUint64, true)
+				txn := db.NewTransactionAt(types.MaxTs, true)
 				require.NoError(t, txn.SetEntry(NewEntry([]byte(key("key", i)), val(false))))
-				if err := txn.CommitAt(uint64(i), func(err error) {
+				if err := txn.CommitAt(types.CustomTs{AssignedTs: uint32(i)}, func(err error) {
 					if err != nil {
 						errors.Add(1)
 					}
@@ -359,22 +359,22 @@ func TestDropAllRace(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 1; i <= N; i++ {
 		wg.Add(1)
-		txn := db.NewTransactionAt(math.MaxUint64, true)
+		txn := db.NewTransactionAt(types.MaxTs, true)
 		require.NoError(t, txn.SetEntry(NewEntry([]byte(key("key", i)), val(false))))
-		require.NoError(t, txn.CommitAt(uint64(i), func(err error) {
+		require.NoError(t, txn.CommitAt(types.CustomTs{AssignedTs: uint32(i)}, func(err error) {
 			require.NoError(t, err)
 			wg.Done()
 		}))
 	}
 	wg.Wait()
 
-	before := numKeysManaged(db, math.MaxUint64)
+	before := numKeysManaged(db, types.MaxTs)
 	require.True(t, before > N)
 
 	require.NoError(t, db.DropAll())
 	closer.SignalAndWait()
 
-	after := numKeysManaged(db, math.MaxUint64)
+	after := numKeysManaged(db, types.MaxTs)
 	t.Logf("Before: %d. After dropall: %d\n", before, after)
 	require.True(t, after < before)
 	db.Close()
@@ -560,9 +560,9 @@ func TestDropPrefixRace(t *testing.T) {
 			select {
 			case <-ticker.C:
 				i++
-				txn := db.NewTransactionAt(math.MaxUint64, true)
+				txn := db.NewTransactionAt(types.MaxTs, true)
 				require.NoError(t, txn.SetEntry(NewEntry([]byte(key("key", i)), val(false))))
-				if err := txn.CommitAt(uint64(i), func(err error) {
+				if err := txn.CommitAt(types.CustomTs{AssignedTs: uint32(i)}, func(err error) {
 					if err != nil {
 						errors.Add(1)
 					}
@@ -580,16 +580,16 @@ func TestDropPrefixRace(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 1; i <= N; i++ {
 		wg.Add(1)
-		txn := db.NewTransactionAt(math.MaxUint64, true)
+		txn := db.NewTransactionAt(types.MaxTs, true)
 		require.NoError(t, txn.SetEntry(NewEntry([]byte(key("key", i)), val(false))))
-		require.NoError(t, txn.CommitAt(uint64(i), func(err error) {
+		require.NoError(t, txn.CommitAt(types.CustomTs{AssignedTs: uint32(i)}, func(err error) {
 			require.NoError(t, err)
 			wg.Done()
 		}))
 	}
 	wg.Wait()
 
-	before := numKeysManaged(db, math.MaxUint64)
+	before := numKeysManaged(db, types.MaxTs)
 	require.True(t, before > N)
 
 	require.NoError(t, db.DropPrefix([]byte("key00")))
@@ -597,7 +597,7 @@ func TestDropPrefixRace(t *testing.T) {
 	require.NoError(t, db.DropPrefix([]byte("key")))
 	closer.SignalAndWait()
 
-	after := numKeysManaged(db, math.MaxUint64)
+	after := numKeysManaged(db, types.MaxTs)
 	t.Logf("Before: %d. After dropprefix: %d\n", before, after)
 	require.True(t, after < before)
 	require.NoError(t, db.Close())
@@ -614,7 +614,7 @@ func TestWriteBatchManagedMode(t *testing.T) {
 	opt.managedTxns = true
 	opt.BaseTableSize = 1 << 20 // This would create multiple transactions in write batch.
 	runBadgerTest(t, &opt, func(t *testing.T, db *DB) {
-		wb := db.NewWriteBatchAt(1)
+		wb := db.NewWriteBatchAt(types.CustomTs{AssignedTs: 1})
 		defer wb.Cancel()
 
 		N, M := 50000, 1000
@@ -637,7 +637,7 @@ func TestWriteBatchManagedMode(t *testing.T) {
 			for itr.Rewind(); itr.Valid(); itr.Next() {
 				item := itr.Item()
 				require.Equal(t, string(key(i)), string(item.Key()))
-				require.Equal(t, item.Version(), uint64(1))
+				require.Equal(t, item.Version().AssignedTs, uint32(1))
 				valcopy, err := item.ValueCopy(nil)
 				require.NoError(t, err)
 				require.Equal(t, val(i), valcopy)
@@ -667,10 +667,10 @@ func TestWriteBatchManaged(t *testing.T) {
 		start := time.Now()
 
 		for i := 0; i < N; i++ {
-			require.NoError(t, wb.SetEntryAt(&Entry{Key: key(i), Value: val(i)}, 1))
+			require.NoError(t, wb.SetEntryAt(&Entry{Key: key(i), Value: val(i)}, types.CustomTs{AssignedTs: 1}))
 		}
 		for i := 0; i < M; i++ {
-			require.NoError(t, wb.DeleteAt(key(i), 2))
+			require.NoError(t, wb.DeleteAt(key(i), types.CustomTs{AssignedTs: 2}))
 		}
 		require.NoError(t, wb.Flush())
 		t.Logf("Time taken for %d writes (w/ test options): %s\n", N+M, time.Since(start))
@@ -683,7 +683,7 @@ func TestWriteBatchManaged(t *testing.T) {
 			for itr.Rewind(); itr.Valid(); itr.Next() {
 				item := itr.Item()
 				require.Equal(t, string(key(i)), string(item.Key()))
-				require.Equal(t, item.Version(), uint64(1))
+				require.Equal(t, item.Version().AssignedTs, uint32(1))
 				valcopy, err := item.ValueCopy(nil)
 				require.NoError(t, err)
 				require.Equal(t, val(i), valcopy)
@@ -711,7 +711,7 @@ func TestWriteBatchDuplicate(t *testing.T) {
 			for itr.Rewind(); itr.Valid(); itr.Next() {
 				item := itr.Item()
 				require.Equal(t, k, item.Key())
-				require.Equal(t, uint64(versions[i]), item.Version())
+				require.Equal(t, uint32(versions[i]), item.Version().AssignedTs)
 				err := item.Value(func(val []byte) error {
 					require.Equal(t, v, val)
 					return nil
@@ -747,7 +747,7 @@ func TestWriteBatchDuplicate(t *testing.T) {
 		opt.managedTxns = true
 
 		runBadgerTest(t, &opt, func(t *testing.T, db *DB) {
-			wb := db.NewWriteBatchAt(10)
+			wb := db.NewWriteBatchAt(types.CustomTs{AssignedTs: 10})
 			defer wb.Cancel()
 
 			for i := uint64(0); i < uint64(N); i++ {
@@ -769,7 +769,7 @@ func TestWriteBatchDuplicate(t *testing.T) {
 
 			for i := uint64(1); i <= uint64(N); i++ {
 				// Multiple versions of the same key.
-				require.NoError(t, wb.SetEntryAt(&Entry{Key: k, Value: v}, i))
+				require.NoError(t, wb.SetEntryAt(&Entry{Key: k, Value: v}, types.CustomTs{AssignedTs: uint32(i)}))
 			}
 			require.NoError(t, wb.Flush())
 			readVerify(t, db, N, []int{10, 9, 8, 7, 6, 5, 4, 3, 2, 1})

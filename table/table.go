@@ -28,6 +28,7 @@ import (
 	"github.com/dgraph-io/badger/v4/fb"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/pb"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/dgraph-io/ristretto/v2/z"
@@ -80,7 +81,7 @@ type TableInterface interface {
 	Smallest() []byte
 	Biggest() []byte
 	DoesNotHave(hash uint32) bool
-	MaxVersion() uint64
+	MaxVersion() types.CustomTs
 }
 
 // Table represents a loaded table file with the info we have about it.
@@ -107,12 +108,12 @@ type Table struct {
 	IsInmemory bool // Set to true if the table is on level 0 and opened in memory.
 	opt        *Options
 
-	minTimestamp uint64
-    maxTimestamp uint64
+	minTimestamp types.CustomTs
+	maxTimestamp types.CustomTs
 }
 
 type cheapIndex struct {
-	MaxVersion        uint64
+	MaxVersion        types.CustomTs
 	KeyCount          uint32
 	UncompressedSize  uint32
 	OnDiskSize        uint32
@@ -126,7 +127,7 @@ func (t *Table) cheapIndex() *cheapIndex {
 func (t *Table) offsetsLength() int { return t.cheapIndex().OffsetsLength }
 
 // MaxVersion returns the maximum version across all keys stored in this table.
-func (t *Table) MaxVersion() uint64 { return t.cheapIndex().MaxVersion }
+func (t *Table) MaxVersion() types.CustomTs { return t.cheapIndex().MaxVersion }
 
 // BloomFilterSize returns the size of the bloom filter in bytes stored in memory.
 func (t *Table) BloomFilterSize() int { return t.cheapIndex().BloomFilterLength }
@@ -142,10 +143,10 @@ func (t *Table) KeyCount() uint32 { return t.cheapIndex().KeyCount }
 func (t *Table) OnDiskSize() uint32 { return t.cheapIndex().OnDiskSize }
 
 // MinTimestamp returns the smallest version (ts) present in this table.
-func (t *Table) MinTimestamp() uint64 { return t.minTimestamp }
+func (t *Table) MinTimestamp() types.CustomTs { return t.minTimestamp }
 
 // MaxTimestamp returns the largest version (ts) present in this table.
-func (t *Table) MaxTimestamp() uint64 { return t.maxTimestamp }
+func (t *Table) MaxTimestamp() types.CustomTs { return t.maxTimestamp }
 
 // CompressionType returns the compression algorithm used for block compression.
 func (t *Table) CompressionType() options.CompressionType {
@@ -267,10 +268,10 @@ func CreateTable(fname string, builder *Builder) (*Table, error) {
 	if err := z.Msync(mf.Data); err != nil {
 		return nil, y.Wrapf(err, "while calling msync on %s", fname)
 	}
-	t,err := OpenTable(mf, *builder.opts)
+	t, err := OpenTable(mf, *builder.opts)
 	t.maxTimestamp = builder.maxVersion
 	t.minTimestamp = builder.minVersion
-	return t,err
+	return t, err
 }
 
 // OpenTable assumes file has only one table and opens it. Takes ownership of fd upon function
@@ -469,8 +470,15 @@ func (t *Table) initIndex() (*fb.BlockOffset, error) {
 		// If there's no encryption, this points to the mmap'ed buffer.
 		t._index = index
 	}
+
+	maxVer := types.CustomTs{
+		EpochID:    index.MaxVersionEpoch(),
+		BrokerID:   index.MaxVersionBroker(),
+		AssignedTs: index.MaxVersionAssignedTs(),
+	}
+
 	t._cheap = &cheapIndex{
-		MaxVersion:        index.MaxVersion(),
+		MaxVersion:        maxVer,
 		KeyCount:          index.KeyCount(),
 		UncompressedSize:  index.UncompressedSize(),
 		OnDiskSize:        index.OnDiskSize(),

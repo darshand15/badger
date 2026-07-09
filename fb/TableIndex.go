@@ -17,6 +17,21 @@ func GetRootAsTableIndex(buf []byte, offset flatbuffers.UOffsetT) *TableIndex {
 	return x
 }
 
+func FinishTableIndexBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+	builder.Finish(offset)
+}
+
+func GetSizePrefixedRootAsTableIndex(buf []byte, offset flatbuffers.UOffsetT) *TableIndex {
+	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+	x := &TableIndex{}
+	x.Init(buf, n+offset+flatbuffers.SizeUint32)
+	return x
+}
+
+func FinishSizePrefixedTableIndexBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+	builder.FinishSizePrefixed(offset)
+}
+
 func (rcv *TableIndex) Init(buf []byte, i flatbuffers.UOffsetT) {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i
@@ -80,19 +95,19 @@ func (rcv *TableIndex) MutateBloomFilter(j int, n byte) bool {
 	return false
 }
 
-func (rcv *TableIndex) MaxVersion() uint64 {
+func (rcv *TableIndex) MaxVersionEpoch() uint32 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
 	if o != 0 {
-		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
 	}
 	return 0
 }
 
-func (rcv *TableIndex) MutateMaxVersion(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(8, n)
+func (rcv *TableIndex) MutateMaxVersionEpoch(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(8, n)
 }
 
-func (rcv *TableIndex) KeyCount() uint32 {
+func (rcv *TableIndex) MaxVersionBroker() uint32 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
 	if o != 0 {
 		return rcv._tab.GetUint32(o + rcv._tab.Pos)
@@ -100,11 +115,11 @@ func (rcv *TableIndex) KeyCount() uint32 {
 	return 0
 }
 
-func (rcv *TableIndex) MutateKeyCount(n uint32) bool {
+func (rcv *TableIndex) MutateMaxVersionBroker(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(10, n)
 }
 
-func (rcv *TableIndex) UncompressedSize() uint32 {
+func (rcv *TableIndex) MaxVersionAssignedTs() uint32 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
 	if o != 0 {
 		return rcv._tab.GetUint32(o + rcv._tab.Pos)
@@ -112,11 +127,11 @@ func (rcv *TableIndex) UncompressedSize() uint32 {
 	return 0
 }
 
-func (rcv *TableIndex) MutateUncompressedSize(n uint32) bool {
+func (rcv *TableIndex) MutateMaxVersionAssignedTs(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(12, n)
 }
 
-func (rcv *TableIndex) OnDiskSize() uint32 {
+func (rcv *TableIndex) KeyCount() uint32 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
 	if o != 0 {
 		return rcv._tab.GetUint32(o + rcv._tab.Pos)
@@ -124,11 +139,11 @@ func (rcv *TableIndex) OnDiskSize() uint32 {
 	return 0
 }
 
-func (rcv *TableIndex) MutateOnDiskSize(n uint32) bool {
+func (rcv *TableIndex) MutateKeyCount(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(14, n)
 }
 
-func (rcv *TableIndex) StaleDataSize() uint32 {
+func (rcv *TableIndex) UncompressedSize() uint32 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
 	if o != 0 {
 		return rcv._tab.GetUint32(o + rcv._tab.Pos)
@@ -136,12 +151,36 @@ func (rcv *TableIndex) StaleDataSize() uint32 {
 	return 0
 }
 
-func (rcv *TableIndex) MutateStaleDataSize(n uint32) bool {
+func (rcv *TableIndex) MutateUncompressedSize(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(16, n)
 }
 
+func (rcv *TableIndex) OnDiskSize() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *TableIndex) MutateOnDiskSize(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(18, n)
+}
+
+func (rcv *TableIndex) StaleDataSize() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *TableIndex) MutateStaleDataSize(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(20, n)
+}
+
 func TableIndexStart(builder *flatbuffers.Builder) {
-	builder.StartObject(7)
+	builder.StartObject(9)
 }
 func TableIndexAddOffsets(builder *flatbuffers.Builder, offsets flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(offsets), 0)
@@ -155,20 +194,26 @@ func TableIndexAddBloomFilter(builder *flatbuffers.Builder, bloomFilter flatbuff
 func TableIndexStartBloomFilterVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
 }
-func TableIndexAddMaxVersion(builder *flatbuffers.Builder, maxVersion uint64) {
-	builder.PrependUint64Slot(2, maxVersion, 0)
+func TableIndexAddMaxVersionEpoch(builder *flatbuffers.Builder, maxVersionEpoch uint32) {
+	builder.PrependUint32Slot(2, maxVersionEpoch, 0)
+}
+func TableIndexAddMaxVersionBroker(builder *flatbuffers.Builder, maxVersionBroker uint32) {
+	builder.PrependUint32Slot(3, maxVersionBroker, 0)
+}
+func TableIndexAddMaxVersionAssignedTs(builder *flatbuffers.Builder, maxVersionAssignedTs uint32) {
+	builder.PrependUint32Slot(4, maxVersionAssignedTs, 0)
 }
 func TableIndexAddKeyCount(builder *flatbuffers.Builder, keyCount uint32) {
-	builder.PrependUint32Slot(3, keyCount, 0)
+	builder.PrependUint32Slot(5, keyCount, 0)
 }
 func TableIndexAddUncompressedSize(builder *flatbuffers.Builder, uncompressedSize uint32) {
-	builder.PrependUint32Slot(4, uncompressedSize, 0)
+	builder.PrependUint32Slot(6, uncompressedSize, 0)
 }
 func TableIndexAddOnDiskSize(builder *flatbuffers.Builder, onDiskSize uint32) {
-	builder.PrependUint32Slot(5, onDiskSize, 0)
+	builder.PrependUint32Slot(7, onDiskSize, 0)
 }
 func TableIndexAddStaleDataSize(builder *flatbuffers.Builder, staleDataSize uint32) {
-	builder.PrependUint32Slot(6, staleDataSize, 0)
+	builder.PrependUint32Slot(8, staleDataSize, 0)
 }
 func TableIndexEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

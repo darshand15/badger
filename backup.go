@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4/pb"
+	"github.com/dgraph-io/badger/v4/types"
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
@@ -36,7 +37,7 @@ const flushThreshold = 100 << 20
 // incremental backups of the DB. For more control over how many goroutines are
 // used to generate the backup, or if you wish to backup only a certain range
 // of keys, use Stream.Backup directly.
-func (db *DB) Backup(w io.Writer, since uint64) (uint64, error) {
+func (db *DB) Backup(w io.Writer, since types.CustomTs) (types.CustomTs, error) {
 	stream := db.NewStream()
 	stream.LogPrefix = "DB.Backup"
 	stream.SinceTs = since
@@ -51,7 +52,7 @@ func (db *DB) Backup(w io.Writer, since uint64) (uint64, error) {
 // invocation of Stream.Backup().
 //
 // This can be used to backup the data in a database at a given point in time.
-func (stream *Stream) Backup(w io.Writer, since uint64) (uint64, error) {
+func (stream *Stream) Backup(w io.Writer, since types.CustomTs) (types.CustomTs, error) {
 	stream.KeyToList = func(key []byte, itr *Iterator) (*pb.KVList, error) {
 		list := &pb.KVList{}
 		a := itr.Alloc
@@ -60,7 +61,7 @@ func (stream *Stream) Backup(w io.Writer, since uint64) (uint64, error) {
 			if !bytes.Equal(item.Key(), key) {
 				return list, nil
 			}
-			if item.Version() < since {
+			if item.Version().Less(since) {
 				return nil, errors.Errorf("Backup: Item Version: %d less than sinceTs: %d",
 					item.Version(), since)
 			}
@@ -86,7 +87,7 @@ func (stream *Stream) Backup(w io.Writer, since uint64) (uint64, error) {
 				Key:       a.Copy(item.Key()),
 				Value:     valCopy,
 				UserMeta:  a.Copy([]byte{item.UserMeta()}),
-				Version:   item.Version(),
+				Version:   item.Version().ToUint64(),
 				ExpiresAt: item.ExpiresAt(),
 				Meta:      a.Copy([]byte{meta}),
 			}
@@ -98,7 +99,7 @@ func (stream *Stream) Backup(w io.Writer, since uint64) (uint64, error) {
 				// marker just below the current version.
 				list.Kv = append(list.Kv, &pb.KV{
 					Key:     item.KeyCopy(nil),
-					Version: item.Version() - 1,
+				Version: item.Version().Decr().ToUint64(),
 					Meta:    []byte{bitDelete},
 				})
 				return list, nil
@@ -110,7 +111,7 @@ func (stream *Stream) Backup(w io.Writer, since uint64) (uint64, error) {
 		return list, nil
 	}
 
-	var maxVersion uint64
+	var maxVersion types.CustomTs
 	stream.Send = func(buf *z.Buffer) error {
 		list, err := BufferToKVList(buf)
 		if err != nil {
@@ -118,8 +119,8 @@ func (stream *Stream) Backup(w io.Writer, since uint64) (uint64, error) {
 		}
 		out := list.Kv[:0]
 		for _, kv := range list.Kv {
-			if maxVersion < kv.Version {
-				maxVersion = kv.Version
+			if maxVersion.Less(types.CustomTsFromUint64(kv.Version)) {
+				maxVersion = types.CustomTsFromUint64(kv.Version)
 			}
 			if !kv.StreamDone {
 				// Don't pick stream done changes.
@@ -131,7 +132,7 @@ func (stream *Stream) Backup(w io.Writer, since uint64) (uint64, error) {
 	}
 
 	if err := stream.Orchestrate(context.Background()); err != nil {
-		return 0, err
+		return types.CustomTs{}, err
 	}
 	return maxVersion, nil
 }
@@ -176,7 +177,7 @@ func (l *KVLoader) Set(kv *pb.KV) error {
 		meta = kv.Meta[0]
 	}
 	e := &Entry{
-		Key:       y.KeyWithTs(kv.Key, kv.Version),
+		Key:       y.KeyWithTs(kv.Key, types.CustomTsFromUint64(kv.Version)),
 		Value:     kv.Value,
 		UserMeta:  userMeta,
 		ExpiresAt: kv.ExpiresAt,
@@ -264,8 +265,8 @@ func (db *DB) Load(r io.Reader, maxPendingWrites int) error {
 
 			// Update nextTxnTs, memtable stores this
 			// timestamp in badger head when flushed.
-			if kv.Version >= db.orc.nextTxnTs {
-				db.orc.nextTxnTs = kv.Version + 1
+			if !(types.CustomTsFromUint64(kv.Version).Less(db.orc.nextTxnTs)) {
+				db.orc.nextTxnTs = types.CustomTsFromUint64(kv.Version).Incr()
 			}
 		}
 	}
@@ -273,6 +274,6 @@ func (db *DB) Load(r io.Reader, maxPendingWrites int) error {
 	if err := ldr.Finish(); err != nil {
 		return err
 	}
-	db.orc.txnMark.Done(db.orc.nextTxnTs - 1)
+	db.orc.txnMark.Done(db.orc.nextTxnTs.Decr())
 	return nil
 }
