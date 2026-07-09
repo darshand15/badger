@@ -3,6 +3,19 @@
 Date: 2026-07-09  
 Branch: duckdb-integration
 
+## CI Status (Polled)
+
+- Workflow: ci-duckdb-compare-nightly
+- Run ID: 28994861315
+- URL: https://github.com/darshand15/badger/actions/runs/28994861315
+- Event: workflow_dispatch
+- Branch: duckdb-integration
+- Status: completed
+- Conclusion: success
+- Created: 2026-07-09T04:49:53Z
+- Completed: 2026-07-09T04:52:18Z
+- End-to-end runtime: 2m 25s
+
 ## What Was Completed
 
 - Reduced avoidable overhead in DuckDB read and write paths.
@@ -87,3 +100,28 @@ Branch: duckdb-integration
   - OLTP point-KV mode: Badger-favored.
   - Read-heavy/high-cardinality mode: DuckDB-favored.
 - Keep a conservative flush-batch default (1 to 4 range), and tune by workload profile.
+
+## Optimization Plan (Next Iteration)
+
+1. Point-KV path: reduce DuckDB bank overhead by another 10% to 15%
+- Why: current gap is still 2.47x to 2.88x vs Badger in transfer mode.
+- How:
+  - Keep BADGER_DUCKDB_FLUSH_BATCH_SIZE default at 4 for Ashley path.
+  - Add a microbenchmark around txn commit + direct append only (no oracle delay) to isolate write-path cost.
+  - Minimize per-transfer allocations in test workload key/value handling and timestamp object construction.
+- Success target: move DuckDB no-delay transfer TPS from 5598 to at least 6200.
+
+2. Read-heavy path: hold/expand high-cardinality advantage
+- Why: DuckDB already wins strongly at 100000 customers; this is the product win region.
+- How:
+  - Keep read pool default at the tuned setting used in Ashley runs.
+  - Add one more sweep at 150000 and 200000 customers to validate slope stability.
+  - Add a 64-worker datapoint in concurrency matrix for stress visibility.
+- Success target: keep DuckDB/Badger ratio >= 4.0 at 100000 customers and >= 5.0 near peak worker setting.
+
+3. Automation/reporting: keep nightly signal actionable
+- Why: reproducible artifacts are now in place; value comes from trend tracking.
+- How:
+  - Add ratio-threshold checks in compare_summary.md generation (warn if 100000-customer ratio drops below 3.5).
+  - Store last successful ratio values in artifact metadata for quick day-over-day diff.
+- Success target: one-click nightly health readout with pass/warn markers.
