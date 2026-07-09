@@ -112,7 +112,11 @@ const defaultReadPoolSize = 2
 
 // defaultEnvFlushBatchSize is the fallback flush threshold for the memtable
 // flush path when BADGER_DUCKDB_FLUSH_BATCH_SIZE is unset/invalid.
-const defaultEnvFlushBatchSize int64 = defaultFlushBatchSize
+//
+// Ashley track profiling showed 1..4 as the best range for mixed transfer and
+// ingest workloads; pin fallback to 4 so production-like profiles are stable
+// unless explicitly overridden by env.
+const defaultEnvFlushBatchSize int64 = 4
 
 // readPoolSizeFromEnv reads BADGER_DUCKDB_READ_POOL_SIZE and clamps invalid
 // values. Keeping this as an env var avoids changing public DB option structs

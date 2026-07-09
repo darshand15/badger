@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -523,16 +525,70 @@ func TestReadHeavyBalanceBadgerVsDuckDB(t *testing.T) {
 // seedSmallBankN seeds exactly n customers using the SmallBank key layout.
 func seedSmallBankN(tb testing.TB, db *DB, oracle *divytime.Oracle, n int64) {
 	tb.Helper()
+	const custPrefix = "cust_"
 	for i := int64(0); i < n; i++ {
 		ts := sbTs(oracle)
 		txn := db.NewTransactionAt(ts, true)
-		_ = txn.Set(sbAccountKey(i), []byte(fmt.Sprintf("cust_%d", i)))
+		name := make([]byte, len(custPrefix), len(custPrefix)+20)
+		copy(name, custPrefix)
+		name = strconv.AppendInt(name, i, 10)
+		_ = txn.Set(sbAccountKey(i), name)
 		_ = txn.Set(sbSavingsKey(i), sbEncode(sbInitBal))
 		_ = txn.Set(sbCheckingKey(i), sbEncode(sbInitBal))
 		if err := txn.CommitAt(ts, nil); err != nil {
 			tb.Fatalf("seed commit i=%d: %v", i, err)
 		}
 	}
+}
+
+func parseInt64ListEnv(name string, defaults []int64) []int64 {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return append([]int64(nil), defaults...)
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n'
+	})
+	if len(parts) == 0 {
+		return append([]int64(nil), defaults...)
+	}
+	out := make([]int64, 0, len(parts))
+	for _, p := range parts {
+		n, err := strconv.ParseInt(strings.TrimSpace(p), 10, 64)
+		if err != nil || n <= 0 {
+			continue
+		}
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return append([]int64(nil), defaults...)
+	}
+	return out
+}
+
+func parseIntListEnv(name string, defaults []int) []int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return append([]int(nil), defaults...)
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n'
+	})
+	if len(parts) == 0 {
+		return append([]int(nil), defaults...)
+	}
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		n, err := strconv.Atoi(strings.TrimSpace(p))
+		if err != nil || n <= 0 {
+			continue
+		}
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return append([]int(nil), defaults...)
+	}
+	return out
 }
 
 type readHeavyResult struct {
@@ -607,7 +663,7 @@ func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
 		cmpWorkers  = 8
 	)
 
-	cardinalities := []int64{1_000, 5_000, 20_000, 100_000}
+	cardinalities := parseInt64ListEnv("BADGER_DUCKDB_SWEEP_CARDINALITIES", []int64{1_000, 5_000, 20_000, 100_000})
 	type csvRow struct {
 		customers int64
 		badgerOps float64
@@ -702,8 +758,8 @@ func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
 func TestReadHeavyBalanceCardinalityConcurrencySweepBadgerVsDuckDB(t *testing.T) {
 	const cmpDuration = 1 * time.Second
 
-	cardinalities := []int64{5_000, 20_000, 100_000}
-	workers := []int{4, 8, 16, 32}
+	cardinalities := parseInt64ListEnv("BADGER_DUCKDB_SWEEP_CONC_CARDINALITIES", []int64{5_000, 20_000, 100_000})
+	workers := parseIntListEnv("BADGER_DUCKDB_SWEEP_WORKERS", []int{4, 8, 16, 32})
 
 	type matrixRow struct {
 		customers int64

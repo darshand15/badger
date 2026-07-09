@@ -30,6 +30,13 @@ run_cmd() {
   ) 2>&1 | tee "${logfile}"
 }
 
+ensure_duckdb_defaults() {
+  if [[ -z "${BADGER_DUCKDB_FLUSH_BATCH_SIZE:-}" ]]; then
+    export BADGER_DUCKDB_FLUSH_BATCH_SIZE=4
+    log "BADGER_DUCKDB_FLUSH_BATCH_SIZE not set; defaulting to 4"
+  fi
+}
+
 print_env() {
   {
     echo "run_id=${RUN_ID}"
@@ -37,6 +44,7 @@ print_env() {
     echo "out_dir=${OUT_DIR}"
     echo "go_version=$(go version)"
     echo "uname=$(uname -a)"
+    echo "BADGER_DUCKDB_FLUSH_BATCH_SIZE=${BADGER_DUCKDB_FLUSH_BATCH_SIZE:-}"
   } >"${OUT_DIR}/env.txt"
 }
 
@@ -57,6 +65,16 @@ compare() {
   run_cmd compare_summary bash "${ROOT_DIR}/scripts/duckdb_compare_report.sh" "${OUT_DIR}"
 }
 
+compare_extended() {
+  compare
+  run_cmd compare_ext_readheavy_cardinality env BADGER_DUCKDB_SWEEP_CSV="${OUT_DIR}/readheavy_crossover_extended.csv" \
+    BADGER_DUCKDB_SWEEP_CARDINALITIES="1000,5000,20000,100000,150000,200000" \
+    go test -v -tags duckdb -run TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB -timeout 1800s .
+  run_cmd compare_ext_readheavy_concurrency env BADGER_DUCKDB_SWEEP_CONC_CSV="${OUT_DIR}/readheavy_crossover_concurrency_extended.csv" \
+    BADGER_DUCKDB_SWEEP_CONC_CARDINALITIES="100000,150000,200000" BADGER_DUCKDB_SWEEP_WORKERS="4,8,16,32,64" \
+    go test -v -tags duckdb -run TestReadHeavyBalanceCardinalityConcurrencySweepBadgerVsDuckDB -timeout 1800s .
+}
+
 epoch() {
   run_cmd epoch_delay_sweep go test -v -tags duckdb -run TestDuckDBBankEpochStress -timeout 240s .
   run_cmd epoch_no_delay_sweep go test -v -tags duckdb -run TestDuckDBBankEpochStressNoDelay -timeout 240s .
@@ -65,6 +83,10 @@ epoch() {
 profile() {
   run_cmd profile_smallbank_balance go test -tags duckdb -run '^$' -bench '^BenchmarkSmallBankBalance$' -benchtime 30s -cpuprofile "${OUT_DIR}/cpu_duckdb.prof" "${LD_FLAGS[@]}" .
   run_cmd profile_duckdb_bank_tps go test -tags duckdb -run '^$' -bench '^BenchmarkDuckDBBankTPS$' -benchtime 10s -count 5 "${LD_FLAGS[@]}" .
+}
+
+microbench() {
+  run_cmd microbench_commit_pipeline go test -tags duckdb -run '^$' -bench '^BenchmarkDuckDBManagedCommitPipeline$|^BenchmarkDuckDBDirectAppendPipeline$' -benchtime 10s -count 3 "${LD_FLAGS[@]}" .
 }
 
 lockfree_compare() {
@@ -117,8 +139,10 @@ Usage: scripts/duckdb_experiments.sh <target>
 Targets:
   smoke             Run correctness + concurrency smoke checks
   compare           Run Badger vs DuckDB side-by-side comparisons
+  compare-extended  Run compare plus 150k/200k and 64-worker sweeps
   epoch             Run epoch batching sweeps
   profile           Generate CPU profile + TPS benchmark logs
+  microbench        Run targeted commit/direct-append microbenchmarks
   lockfree-compare  Run lockfree ingest benchmarks for Badger vs DuckDB
   ashley            Run Ashley overhead track (compare + epoch + profile)
   ashley-readpool-sweep
@@ -143,6 +167,7 @@ main() {
     exit 1
   fi
 
+  ensure_duckdb_defaults
   print_env
 
   case "${target}" in
@@ -152,11 +177,17 @@ main() {
     compare)
       compare
       ;;
+    compare-extended)
+      compare_extended
+      ;;
     epoch)
       epoch
       ;;
     profile)
       profile
+      ;;
+    microbench)
+      microbench
       ;;
     lockfree-compare)
       lockfree_compare

@@ -45,6 +45,9 @@ make duckdb-smoke
 # side-by-side Badger vs DuckDB comparisons
 make duckdb-compare
 
+# extended sweeps (adds 150k/200k customers + 64-worker profile)
+make duckdb-compare-extended
+
 # read-heavy crossover sweep (Balance txn across customer cardinalities)
 go test -v -tags duckdb -run TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB -timeout 600s
 
@@ -56,6 +59,9 @@ make duckdb-epoch
 
 # CPU profile + TPS benchmark runs
 make duckdb-profile
+
+# targeted commit/direct-append microbenchmarks
+make duckdb-microbench
 
 # lock-free ingest baseline comparison
 make duckdb-lockfree-compare
@@ -79,10 +85,15 @@ When run via `make duckdb-compare`, the harness exports:
 - `readheavy_crossover_concurrency.csv`
 - `compare_summary.md` (auto-generated mode summary + chart)
 
+Guardrails and history:
+
+- `scripts/duckdb_compare_report.sh` warns when 100000-customer ratio falls below `DUCKDB_RATIO_WARN_THRESHOLD` (default `3.5`).
+- Per-run metrics are appended to `artifacts/duckdb/performance_history.csv` for day-over-day tracking.
+
 Direct script usage is also available:
 
 ```bash
-bash scripts/duckdb_experiments.sh <smoke|compare|epoch|profile|lockfree-compare|ashley|ashley-readpool-sweep|ashley-flushbatch-sweep|full>
+bash scripts/duckdb_experiments.sh <smoke|compare|compare-extended|epoch|profile|microbench|lockfree-compare|ashley|ashley-readpool-sweep|ashley-flushbatch-sweep|full>
 ```
 
 Read-pool tuning controls:
@@ -94,11 +105,17 @@ export BADGER_DUCKDB_READ_POOL_SIZE=8
 # Sweep sizes used by make duckdb-ashley-readpool-sweep
 export READ_POOL_SWEEP_SIZES="1 2 4 8 12"
 
-# Per-process memtable flush-batch threshold (default: 1, clamp: 1..1000000)
+# Per-process memtable flush-batch threshold (default: 4, clamp: 1..1000000)
 export BADGER_DUCKDB_FLUSH_BATCH_SIZE=64
 
 # Sweep sizes used by make duckdb-ashley-flushbatch-sweep
 export FLUSH_BATCH_SWEEP_SIZES="1 4 16 64 128 256"
+
+# Override guardrail threshold for compare summary warning
+export DUCKDB_RATIO_WARN_THRESHOLD=3.5
+
+# Override custom history CSV path (optional)
+export ARTIFACT_HISTORY_FILE="artifacts/duckdb/perf_history_custom.csv"
 ```
 
 The harness automatically adds classic Darwin linker flags for profile runs to
