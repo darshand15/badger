@@ -107,7 +107,8 @@ const directFlushBatchSize int64 = 512
 // handles one statement at a time, so this bounds how many readers can be
 // concurrently active against one partition without serializing on either
 // a single shared connection or database/sql's global pool lock.
-const defaultReadPoolSize = 4
+// Tuned on Apple silicon using the Ashley sweep harness.
+const defaultReadPoolSize = 2
 
 // readPoolSizeFromEnv reads BADGER_DUCKDB_READ_POOL_SIZE and clamps invalid
 // values. Keeping this as an env var avoids changing public DB option structs

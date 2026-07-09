@@ -76,6 +76,10 @@ full() {
 }
 
 ashley() {
+  if [[ -z "${BADGER_DUCKDB_READ_POOL_SIZE:-}" ]]; then
+    export BADGER_DUCKDB_READ_POOL_SIZE=2
+    log "BADGER_DUCKDB_READ_POOL_SIZE not set; defaulting Ashley run to 2"
+  fi
   compare
   epoch
   profile

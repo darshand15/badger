@@ -67,13 +67,13 @@ make duckdb-full
 Direct script usage is also available:
 
 ```bash
-bash scripts/duckdb_experiments.sh <smoke|compare|epoch|profile|lockfree-compare|ashley|full>
+bash scripts/duckdb_experiments.sh <smoke|compare|epoch|profile|lockfree-compare|ashley|ashley-readpool-sweep|full>
 ```
 
 Read-pool tuning controls:
 
 ```bash
-# Per-process read-pool size per partition (default: 4, clamp: 1..64)
+# Per-process read-pool size per partition (default: 2, clamp: 1..64)
 export BADGER_DUCKDB_READ_POOL_SIZE=8
 
 # Sweep sizes used by make duckdb-ashley-readpool-sweep
