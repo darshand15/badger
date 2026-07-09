@@ -52,6 +52,9 @@ compare() {
   run_cmd compare_smallbank_mixed go test -v -tags duckdb -run TestSmallBankBadgerVsDuckDB -timeout 300s .
   run_cmd compare_readheavy_cardinality env BADGER_DUCKDB_SWEEP_CSV="${OUT_DIR}/readheavy_crossover.csv" \
     go test -v -tags duckdb -run TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB -timeout 600s .
+  run_cmd compare_readheavy_concurrency env BADGER_DUCKDB_SWEEP_CONC_CSV="${OUT_DIR}/readheavy_crossover_concurrency.csv" \
+    go test -v -tags duckdb -run TestReadHeavyBalanceCardinalityConcurrencySweepBadgerVsDuckDB -timeout 1200s .
+  run_cmd compare_summary bash "${ROOT_DIR}/scripts/duckdb_compare_report.sh" "${OUT_DIR}"
 }
 
 epoch() {

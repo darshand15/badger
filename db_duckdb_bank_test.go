@@ -105,8 +105,32 @@ func (t bankTxType) String() string {
 // the NewTransactionAt read barrier (duckDBTracker).
 const bankKeyPrefix = "acct-"
 
+var (
+	bankKeysOnce sync.Once
+	bankKeys     [][]byte
+)
+
+func initBankKeys() {
+	bankKeys = make([][]byte, numBankAccounts)
+	prefixLen := len(bankKeyPrefix)
+	for i := 0; i < numBankAccounts; i++ {
+		buf := make([]byte, prefixLen+8)
+		copy(buf, bankKeyPrefix)
+		n := i
+		for p := len(buf) - 1; p >= prefixLen; p-- {
+			buf[p] = byte('0' + (n % 10))
+			n /= 10
+		}
+		bankKeys[i] = buf
+	}
+}
+
 // bankKey returns the DuckDB key for account i.
 func bankKey(i int) []byte {
+	if i >= 0 && i < numBankAccounts {
+		bankKeysOnce.Do(initBankKeys)
+		return bankKeys[i]
+	}
 	return []byte(fmt.Sprintf(bankKeyPrefix+"%08d", i))
 }
 

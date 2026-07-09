@@ -8,7 +8,7 @@ HAS_JEMALLOC = $(shell test -f /usr/local/lib/libjemalloc.a && echo "jemalloc")
 JEMALLOC_URL = "https://github.com/jemalloc/jemalloc/releases/download/5.2.1/jemalloc-5.2.1.tar.bz2"
 
 
-.PHONY: all badger test jemalloc dependency duckdb-smoke duckdb-compare duckdb-epoch duckdb-profile duckdb-lockfree-compare duckdb-ashley duckdb-ashley-readpool-sweep duckdb-full
+.PHONY: all badger test jemalloc dependency duckdb-smoke duckdb-compare duckdb-epoch duckdb-profile duckdb-lockfree-compare duckdb-ashley duckdb-ashley-readpool-sweep duckdb-report-latest duckdb-full
 
 badger: jemalloc
 	@echo "Compiling Badger binary..."
@@ -67,6 +67,11 @@ duckdb-ashley:
 
 duckdb-ashley-readpool-sweep:
 	@bash ./scripts/duckdb_experiments.sh ashley-readpool-sweep
+
+duckdb-report-latest:
+	@latest=$$(ls -1dt artifacts/duckdb/* 2>/dev/null | head -n 1); \
+	if [ -z "$$latest" ]; then echo "No artifacts/duckdb runs found"; exit 1; fi; \
+	bash ./scripts/duckdb_compare_report.sh "$$latest"
 
 duckdb-full:
 	@bash ./scripts/duckdb_experiments.sh full

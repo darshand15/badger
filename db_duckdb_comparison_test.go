@@ -695,3 +695,68 @@ func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
 		t.Logf("  Wrote sweep CSV: %s", outPath)
 	}
 }
+
+// TestReadHeavyBalanceCardinalityConcurrencySweepBadgerVsDuckDB sweeps both
+// customer cardinality and worker concurrency for the Balance transaction.
+// It emits a matrix suitable for crossover plots and tuning decisions.
+func TestReadHeavyBalanceCardinalityConcurrencySweepBadgerVsDuckDB(t *testing.T) {
+	const cmpDuration = 1 * time.Second
+
+	cardinalities := []int64{5_000, 20_000, 100_000}
+	workers := []int{4, 8, 16, 32}
+
+	type matrixRow struct {
+		customers int64
+		workers   int
+		badgerOps float64
+		duckdbOps float64
+		ratio     float64
+	}
+	var rows []matrixRow
+
+	t.Logf("")
+	t.Logf("=== Read-Heavy Balance Cardinality x Concurrency Sweep ===")
+	t.Logf("  %-10s  %-8s  %-14s  %-14s  %-14s", "Customers", "Workers", "Badger Ops/s", "DuckDB Ops/s", "DuckDB/Badger")
+	t.Logf("  %s", "--------------------------------------------------------------------------")
+
+	for _, n := range cardinalities {
+		withDB(t, true, func(db *DB) {
+			oracle := divytime.NewOracle(1, 0)
+			seedSmallBankN(t, db, oracle, n)
+			for _, w := range workers {
+				badger := runBalanceReadHeavy(t, "Badger", db, oracle, n, cmpDuration, w)
+
+				withDuckDB(t, true, func(ddb *DB) {
+					doracle := divytime.NewOracle(1, 0)
+					seedSmallBankN(t, ddb, doracle, n)
+					duck := runBalanceReadHeavy(t, "DuckDB", ddb, doracle, n, cmpDuration, w)
+
+					ratio := 0.0
+					if badger.ops > 0 {
+						ratio = duck.ops / badger.ops
+					}
+					rows = append(rows, matrixRow{
+						customers: n,
+						workers:   w,
+						badgerOps: badger.ops,
+						duckdbOps: duck.ops,
+						ratio:     ratio,
+					})
+
+					t.Logf("  %-10d  %-8d  %-14.1f  %-14.1f  %-14.2fx", n, w, badger.ops, duck.ops, ratio)
+				})
+			}
+		})
+	}
+
+	if outPath := os.Getenv("BADGER_DUCKDB_SWEEP_CONC_CSV"); outPath != "" {
+		csv := "customers,workers,badger_ops_per_sec,duckdb_ops_per_sec,duckdb_over_badger\n"
+		for _, r := range rows {
+			csv += fmt.Sprintf("%d,%d,%.3f,%.3f,%.6f\n", r.customers, r.workers, r.badgerOps, r.duckdbOps, r.ratio)
+		}
+		if err := os.WriteFile(outPath, []byte(csv), 0644); err != nil {
+			t.Fatalf("write concurrency sweep csv: %v", err)
+		}
+		t.Logf("  Wrote concurrency sweep CSV: %s", outPath)
+	}
+}
