@@ -45,7 +45,7 @@ make duckdb-smoke
 # side-by-side Badger vs DuckDB comparisons
 make duckdb-compare
 
-# extended sweeps (adds 150k/200k customers + 64-worker profile)
+# extended sweeps (adds 150k/200k customers + 64/128-worker profile)
 make duckdb-compare-extended
 
 # read-heavy crossover sweep (Balance txn across customer cardinalities)
@@ -53,6 +53,11 @@ go test -v -tags duckdb -run TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB 
 
 # read-heavy crossover sweep with concurrency matrix
 go test -v -tags duckdb -run TestReadHeavyBalanceCardinalityConcurrencySweepBadgerVsDuckDB -timeout 1200s
+
+# focused saturation probe at 128 workers
+BADGER_DUCKDB_SWEEP_CONC_CARDINALITIES=100000 \
+BADGER_DUCKDB_SWEEP_WORKERS=128 \
+go test -v -tags duckdb -run TestReadHeavyBalanceCardinalityConcurrencySweepBadgerVsDuckDB -timeout 600s
 
 # epoch batching sweeps
 make duckdb-epoch
@@ -116,6 +121,12 @@ export DUCKDB_RATIO_WARN_THRESHOLD=3.5
 
 # Override custom history CSV path (optional)
 export ARTIFACT_HISTORY_FILE="artifacts/duckdb/perf_history_custom.csv"
+
+Concurrency sweep interpretation:
+
+- If DuckDB throughput gains flatten between 64 and 128 workers while latency rises, check scheduler saturation (CPU runnable pressure) before changing SQL paths.
+- If ratio drops sharply at high workers with stable CPU headroom, increase `BADGER_DUCKDB_READ_POOL_SIZE` and rerun the focused 128-worker probe to test pool depletion.
+- Compare both zero-delay and oracle-delay tracks to separate timestamp-service effects from storage-path contention.
 ```
 
 The harness automatically adds classic Darwin linker flags for profile runs to

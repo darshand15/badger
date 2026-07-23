@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -63,14 +64,23 @@ var sbWeights = []int{15, 15, 15, 25, 15, 15} // cumulative built below
 // Key format: "<id>:accounts_id" so all three keys for a given customer
 // share the same routing prefix and land in the same DuckDB partition.
 // This lets ReadBatch serve all reads for a transaction in one SQL query.
+func sbKey(id int64, suffix string) []byte {
+	// 20 bytes is enough for base-10 int64 (-9223372036854775808).
+	b := make([]byte, 0, 20+1+len(suffix))
+	b = strconv.AppendInt(b, id, 10)
+	b = append(b, ':')
+	b = append(b, suffix...)
+	return b
+}
+
 func sbAccountKey(id int64) []byte {
-	return []byte(fmt.Sprintf("%d:accounts_id", id))
+	return sbKey(id, "accounts_id")
 }
 func sbSavingsKey(id int64) []byte {
-	return []byte(fmt.Sprintf("%d:savings_bal", id))
+	return sbKey(id, "savings_bal")
 }
 func sbCheckingKey(id int64) []byte {
-	return []byte(fmt.Sprintf("%d:checking_bal", id))
+	return sbKey(id, "checking_bal")
 }
 
 // ---------------------------------------------------------------------------

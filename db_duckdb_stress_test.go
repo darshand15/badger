@@ -167,7 +167,7 @@ func runStressConfig(t *testing.T, workers int, delay time.Duration) stressResul
 // TestDuckDBBankStress sweeps worker counts for both no-delay and 50 µs oracle
 // delay scenarios, printing a summary table at the end.
 func TestDuckDBBankStress(t *testing.T) {
-	workerCounts := []int{4, 8, 16, 32, 64}
+	workerCounts := []int{4, 8, 16, 32, 64, 128}
 
 	type config struct {
 		delay time.Duration

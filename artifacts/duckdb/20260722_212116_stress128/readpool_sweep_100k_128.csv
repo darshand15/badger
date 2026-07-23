@@ -1,0 +1,5 @@
+read_pool_size,badger_ops_per_sec,duckdb_ops_per_sec,duckdb_over_badger
+2,533.5,3220.5,6.04
+4,407.0,3872.6,9.51
+8,539.3,3987.0,7.39
+12,541.2,4076.0,7.53

@@ -598,6 +598,14 @@ type readHeavyResult struct {
 	p90     time.Duration
 }
 
+func sbKeyInto(buf []byte, id int64, suffix string) []byte {
+	buf = buf[:0]
+	buf = strconv.AppendInt(buf, id, 10)
+	buf = append(buf, ':')
+	buf = append(buf, suffix...)
+	return buf
+}
+
 func runBalanceReadHeavy(
 	t *testing.T,
 	backend string,
@@ -619,16 +627,27 @@ func runBalanceReadHeavy(
 		go func(workerID int) {
 			defer wg.Done()
 			rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
+			acctKey := make([]byte, 0, 32)
+			savKey := make([]byte, 0, 32)
+			chkKey := make([]byte, 0, 32)
+			prefetch := make([][]byte, 3)
 			for atomic.LoadInt32(&stop) == 0 {
 				id := rng.Int63n(numCustomers)
+				acctKey = sbKeyInto(acctKey, id, "accounts_id")
+				savKey = sbKeyInto(savKey, id, "savings_bal")
+				chkKey = sbKeyInto(chkKey, id, "checking_bal")
+				prefetch[0] = acctKey
+				prefetch[1] = savKey
+				prefetch[2] = chkKey
+
 				ts := sbTs(oracle)
 				t0 := time.Now()
 
 				txn := db.NewTransactionAt(ts, false)
-				_ = txn.PrefetchKeys([][]byte{sbAccountKey(id), sbSavingsKey(id), sbCheckingKey(id)})
-				_, errA := txn.Get(sbAccountKey(id))
-				_, errS := txn.Get(sbSavingsKey(id))
-				_, errC := txn.Get(sbCheckingKey(id))
+				_ = txn.PrefetchKeys(prefetch)
+				_, errA := txn.Get(acctKey)
+				_, errS := txn.Get(savKey)
+				_, errC := txn.Get(chkKey)
 				_ = txn.CommitAt(ts, nil)
 				txn.Discard()
 
@@ -759,7 +778,7 @@ func TestReadHeavyBalanceCardinalityConcurrencySweepBadgerVsDuckDB(t *testing.T)
 	const cmpDuration = 1 * time.Second
 
 	cardinalities := parseInt64ListEnv("BADGER_DUCKDB_SWEEP_CONC_CARDINALITIES", []int64{5_000, 20_000, 100_000})
-	workers := parseIntListEnv("BADGER_DUCKDB_SWEEP_WORKERS", []int{4, 8, 16, 32})
+	workers := parseIntListEnv("BADGER_DUCKDB_SWEEP_WORKERS", []int{4, 8, 16, 32, 64, 128})
 
 	type matrixRow struct {
 		customers int64

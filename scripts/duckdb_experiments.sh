@@ -71,7 +71,7 @@ compare_extended() {
     BADGER_DUCKDB_SWEEP_CARDINALITIES="1000,5000,20000,100000,150000,200000" \
     go test -v -tags duckdb -run TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB -timeout 1800s .
   run_cmd compare_ext_readheavy_concurrency env BADGER_DUCKDB_SWEEP_CONC_CSV="${OUT_DIR}/readheavy_crossover_concurrency_extended.csv" \
-    BADGER_DUCKDB_SWEEP_CONC_CARDINALITIES="100000,150000,200000" BADGER_DUCKDB_SWEEP_WORKERS="4,8,16,32,64" \
+    BADGER_DUCKDB_SWEEP_CONC_CARDINALITIES="100000,150000,200000" BADGER_DUCKDB_SWEEP_WORKERS="4,8,16,32,64,128" \
     go test -v -tags duckdb -run TestReadHeavyBalanceCardinalityConcurrencySweepBadgerVsDuckDB -timeout 1800s .
 }
 
