@@ -178,8 +178,22 @@ func ParseCustomTsString(s string) (CustomTs, error) {
 // ToUint64 packs CustomTs into a single uint64 for protobuf varint serialization.
 // Encoding: EpochID[63:48] | BrokerID[47:32] | AssignedTs[31:0].
 // Supports EpochID/BrokerID 0-65535 and AssignedTs 0-4294967295.
+//
+// WARNING: if EpochID or BrokerID exceeds 65535, the high bits are silently
+// dropped by the shifts below. Callers on any path that can observe
+// EpochID/BrokerID > 65535 (i.e. anything reachable from production, not just
+// tests with small fixed values) MUST call CanRoundtripUint64() first and
+// handle the false case explicitly instead of calling ToUint64() blindly —
+// otherwise this corrupts MVCC version ordering without any visible error.
 func (t CustomTs) ToUint64() uint64 {
 	return uint64(t.EpochID)<<48 | uint64(t.BrokerID)<<32 | uint64(t.AssignedTs)
+}
+
+// CanRoundtripUint64 reports whether t can be packed via ToUint64 and
+// recovered exactly via CustomTsFromUint64, i.e. whether EpochID and BrokerID
+// both fit in 16 bits. AssignedTs always fits (full 32 bits are encoded).
+func (t CustomTs) CanRoundtripUint64() bool {
+	return t.EpochID <= math.MaxUint16 && t.BrokerID <= math.MaxUint16
 }
 
 // CustomTsFromUint64 is the inverse of ToUint64.

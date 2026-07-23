@@ -9,7 +9,7 @@ package badger
 
 // newDuckDBBackend is a no-op stub when not built with -tags duckdb.
 // Returns (nil, nil) so Open() silently skips DuckDB initialisation.
-func newDuckDBBackend(_ string, _ int) (duckDBIface, error) {
+func newDuckDBBackend(_ string, _ int, _ int) (duckDBIface, error) {
 	return nil, nil
 }
 

@@ -272,12 +272,38 @@ type DuckDBStorage struct {
 	// readPoolSize controls how many dedicated read connections are created per
 	// partition. Tunable via BADGER_DUCKDB_READ_POOL_SIZE.
 	readPoolSize int
+	// numVersionsToKeep mirrors badger's Options.NumVersionsToKeep: how many
+	// versions of a key CompactPartitions retains per partition. Defaults to 1
+	// (keep only the latest version) if not set to a positive value.
+	numVersionsToKeep int
 }
 
-// NewDuckDBStorage creates a new DuckDB storage instance.
+// NewDuckDBStorage creates a new DuckDB storage instance with the default
+// numVersionsToKeep of 1 (keep only the latest version per key on compaction).
+// Prefer NewDuckDBStorageWithOptions when the caller's NumVersionsToKeep
+// option is available.
 func NewDuckDBStorage(dbPath string, numPartitions int) (*DuckDBStorage, error) {
+	return NewDuckDBStorageWithOptions(dbPath, numPartitions, 1)
+}
+
+// NewDuckDBStorageWithOptions creates a new DuckDB storage instance.
+//
+// numVersionsToKeep controls how many versions per key CompactPartitions
+// retains (values <= 0 are treated as 1, matching badger's own default).
+//
+// It also records the partition fan-out (numPartitions) in a small metadata
+// table on first creation, and errors out on subsequent opens if the
+// requested fan-out doesn't match what's on disk. Without this check,
+// reopening an existing on-disk DuckDB DB with a different PartitionFanOut
+// would silently hash keys to different partitions than the ones they were
+// originally written to, making previously-written data unreadable without
+// any error -- this guard converts that into a loud failure at Open() time.
+func NewDuckDBStorageWithOptions(dbPath string, numPartitions int, numVersionsToKeep int) (*DuckDBStorage, error) {
 	if numPartitions <= 0 {
 		numPartitions = 8
+	}
+	if numVersionsToKeep <= 0 {
+		numVersionsToKeep = 1
 	}
 	readPoolSize := readPoolSizeFromEnv()
 	flushBatchSize := flushBatchSizeFromEnv()
@@ -293,12 +319,18 @@ func NewDuckDBStorage(dbPath string, numPartitions int) (*DuckDBStorage, error) 
 	db.SetMaxIdleConns(numPartitions * (readPoolSize + 1))
 
 	s := &DuckDBStorage{
-		db:             db,
-		ctx:            context.Background(),
-		partCalc:       newPartitionCalculator(numPartitions),
-		numParts:       numPartitions,
-		flushBatchSize: flushBatchSize,
-		readPoolSize:   readPoolSize,
+		db:                db,
+		ctx:               context.Background(),
+		partCalc:          newPartitionCalculator(numPartitions),
+		numParts:          numPartitions,
+		flushBatchSize:    flushBatchSize,
+		readPoolSize:      readPoolSize,
+		numVersionsToKeep: numVersionsToKeep,
+	}
+
+	if err := s.verifyOrRecordFanOut(numPartitions); err != nil {
+		db.Close()
+		return nil, err
 	}
 
 	if err := s.initializeTables(); err != nil {
@@ -312,6 +344,63 @@ func NewDuckDBStorage(dbPath string, numPartitions int) (*DuckDBStorage, error) 
 	}
 
 	return s, nil
+}
+
+// verifyOrRecordFanOut records numPartitions in a one-row metadata table the
+// first time a DuckDB DB is created at this path, and on every subsequent
+// open verifies the requested numPartitions still matches. Partition
+// assignment (see partitionCalculator) is a pure function of key and
+// numPartitions, so any mismatch means keys would hash to different
+// partition tables than the ones they were written under -- silently
+// corrupting reads rather than erroring. For ":memory:" databases this table
+// is simply recreated empty every process start (there is no persisted state
+// to disagree with), so the check is a harmless no-op in that case.
+func (s *DuckDBStorage) verifyOrRecordFanOut(numPartitions int) error {
+	if s.db == nil {
+		return nil
+	}
+
+	const createMetaSQL = `
+		CREATE TABLE IF NOT EXISTS _badger_duckdb_meta (
+			key   VARCHAR NOT NULL,
+			value VARCHAR NOT NULL,
+			PRIMARY KEY (key)
+		)`
+	if _, err := s.db.ExecContext(s.ctx, createMetaSQL); err != nil {
+		return fmt.Errorf("verifyOrRecordFanOut: create meta table: %w", err)
+	}
+
+	row := s.db.QueryRowContext(s.ctx,
+		`SELECT value FROM _badger_duckdb_meta WHERE key = 'partition_fan_out'`)
+	var stored string
+	switch err := row.Scan(&stored); err {
+	case sql.ErrNoRows:
+		// First time this DB path has been opened -- record the fan-out.
+		if _, err := s.db.ExecContext(s.ctx,
+			`INSERT INTO _badger_duckdb_meta (key, value) VALUES ('partition_fan_out', ?)`,
+			strconv.Itoa(numPartitions)); err != nil {
+			return fmt.Errorf("verifyOrRecordFanOut: record fan-out: %w", err)
+		}
+		return nil
+	case nil:
+		storedN, convErr := strconv.Atoi(stored)
+		if convErr != nil {
+			return fmt.Errorf("verifyOrRecordFanOut: corrupt stored fan-out value %q: %w",
+				stored, convErr)
+		}
+		if storedN != numPartitions {
+			return fmt.Errorf(
+				"partition fan-out mismatch: this DuckDB DB was created with "+
+					"PartitionFanOut=%d, but Open() was called with PartitionFanOut=%d. "+
+					"Reopening with a different fan-out would hash existing keys to the "+
+					"wrong partition tables. Use PartitionFanOut=%d to reopen this DB, "+
+					"or start a fresh DB directory to change fan-out",
+				storedN, numPartitions, storedN)
+		}
+		return nil
+	default:
+		return fmt.Errorf("verifyOrRecordFanOut: read stored fan-out: %w", err)
+	}
 }
 
 // initPersistentAppenders opens one SQL connection and one duckdb Appender per
@@ -510,6 +599,25 @@ func (s *DuckDBStorage) appendPartitionDirect(partition int, entries []*DarshanE
 	return nil
 }
 
+// initializeTables creates the per-partition tables.
+//
+// NOTE on PRIMARY KEY removal: earlier versions declared
+// `PRIMARY KEY (key, epoch_id, broker_id, assigned_ts)` on this table. No
+// write path in this file relies on that uniqueness constraint for upsert
+// semantics -- every write goes through the Appender API as a plain append,
+// never an INSERT ... ON CONFLICT. The constraint's only effect was forcing
+// DuckDB to run a full-table dedup scan on every appended row, which made
+// BenchmarkDbGrowth (repeated write/delete/compact cycles) quadratic in the
+// number of accumulated rows. Removing the constraint and replacing it with
+// a plain (non-unique) index on `key` keeps point-lookup performance
+// (Read/ReadBatch/ScanPrefix all filter or join on `key` first) while
+// dropping the per-insert uniqueness check. Duplicate (key, epoch_id,
+// broker_id, assigned_ts) rows can now accumulate between compactions; this
+// is safe because every read path (Read, ReadBatch, ScanPrefix) already
+// selects via `ORDER BY epoch_id DESC, broker_id DESC, assigned_ts DESC
+// LIMIT 1` / `ROW_NUMBER() ... WHERE rn = 1` rather than assuming at most one
+// row can match, and CompactPartitions' ROW_NUMBER()-based dedup already
+// tolerates duplicates by construction.
 func (s *DuckDBStorage) initializeTables() error {
 	for i := 0; i < s.numParts; i++ {
 		tableName := fmt.Sprintf("partition_%d", i)
@@ -519,10 +627,17 @@ func (s *DuckDBStorage) initializeTables() error {
 				epoch_id BIGINT NOT NULL,
 				broker_id BIGINT NOT NULL,
 				assigned_ts BIGINT NOT NULL,
-				value BLOB,				deleted BOOLEAN NOT NULL DEFAULT FALSE,				PRIMARY KEY (key, epoch_id, broker_id, assigned_ts)
+				value BLOB,
+				deleted BOOLEAN NOT NULL DEFAULT FALSE
 			)`, tableName)
 		if _, err := s.db.ExecContext(s.ctx, createSQL); err != nil {
 			return fmt.Errorf("failed to create table %s: %w", tableName, err)
+		}
+
+		indexSQL := fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS idx_%s_key ON %s (key)`, tableName, tableName)
+		if _, err := s.db.ExecContext(s.ctx, indexSQL); err != nil {
+			return fmt.Errorf("failed to create index on %s: %w", tableName, err)
 		}
 	}
 	return nil
@@ -1036,16 +1151,30 @@ func (s *DuckDBStorage) flushPartitionWithAppender(partition int, entries []*Dar
 	return nil
 }
 
-// CompactPartitions removes superseded versions and runs VACUUM.
+// CompactPartitions removes superseded versions beyond numVersionsToKeep and
+// runs VACUUM.
+//
+// Retention semantics mirror badger's own Options.NumVersionsToKeep: with the
+// default of 1, only the single latest version per key survives (as before);
+// with NumVersionsToKeep > 1, the N most recent versions per key are kept and
+// only versions beyond that window are deleted. Snapshot reads at older
+// timestamps within the retained window continue to work; reads older than
+// the retained window still return "not found" post-compaction, same as
+// before this change for the NumVersionsToKeep=1 case.
 func (s *DuckDBStorage) CompactPartitions() error {
 	// Ensure all buffered rows are visible to the DELETE queries below.
 	if err := s.FlushAllPending(); err != nil {
 		return fmt.Errorf("compact: flush pending: %w", err)
 	}
 
+	keep := s.numVersionsToKeep
+	if keep <= 0 {
+		keep = 1
+	}
+
 	for i := 0; i < s.numParts; i++ {
 		tableName := fmt.Sprintf("partition_%d", i)
-		// Delete all rows that are NOT the latest version per key.
+		// Delete all rows ranked beyond `keep` per key.
 		// Uses rowid to identify rows — avoids tuple-IN syntax that some
 		// DuckDB versions reject for multi-column subqueries.
 		deleteSQL := fmt.Sprintf(`
@@ -1058,8 +1187,8 @@ func (s *DuckDBStorage) CompactPartitions() error {
 							ORDER BY epoch_id DESC, broker_id DESC, assigned_ts DESC
 						) AS rn
 					FROM %s
-				) sub WHERE rn = 1
-			)`, tableName, tableName)
+				) sub WHERE rn <= %d
+			)`, tableName, tableName, keep)
 		if _, err := s.db.ExecContext(s.ctx, deleteSQL); err != nil {
 			return fmt.Errorf("compact %s: %w", tableName, err)
 		}

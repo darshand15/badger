@@ -8,6 +8,7 @@ package badger
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -124,6 +125,11 @@ func (st *Stream) ToList(key []byte, itr *Iterator) (*pb.KVList, error) {
 
 		}); err != nil {
 			return nil, err
+		}
+		if !item.Version().CanRoundtripUint64() {
+			return nil, fmt.Errorf("stream: version %s has EpochID/BrokerID > 65535 "+
+				"and cannot be safely packed into a uint64 for the KV proto (key=%x)",
+				item.Version(), key)
 		}
 		kv.Version = item.Version().ToUint64()
 		kv.ExpiresAt = item.ExpiresAt()

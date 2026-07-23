@@ -319,7 +319,7 @@ func Open(opt Options) (*DB, error) {
 		}
 
 		var duckErr error
-		duckStore, duckErr = newDuckDBBackend(duckdbPath, numDuckDBPartitions)
+		duckStore, duckErr = newDuckDBBackend(duckdbPath, numDuckDBPartitions, opt.NumVersionsToKeep)
 		if duckErr != nil {
 			return nil, fmt.Errorf("failed to initialize DuckDB storage: %w", duckErr)
 		}

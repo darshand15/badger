@@ -21,6 +21,28 @@ type Timestamp struct {
 	AssignedTs int64
 }
 
+// TimestampOracle is the interface every timestamp source (simulated or real)
+// must satisfy. Extracting this interface lets callers depend on "a source of
+// ordered timestamps" rather than on the concrete in-process Oracle type, so
+// a future real Divy broker client can be swapped in without touching call
+// sites.
+//
+// Both methods are satisfied by *Oracle (aliased below as *LocalOracle)
+// without modification, and are intended to be satisfied by a future
+// *RemoteOracle once it is wired up to a real broker connection.
+type TimestampOracle interface {
+	// GetTimestamp returns a unique Timestamp and the call's wall-clock
+	// latency. The epochIDHint parameter is accepted for interface
+	// compatibility with existing call sites but may be ignored by the
+	// implementation (LocalOracle ignores it; see GetTimestamp below).
+	GetTimestamp(epochIDHint int64) (Timestamp, time.Duration)
+
+	// GetCommitTimestamp is like GetTimestamp but additionally invokes
+	// register(ts) atomically with timestamp issuance -- see the
+	// GetCommitTimestamp doc comment on Oracle for why this matters.
+	GetCommitTimestamp(register func(Timestamp)) (Timestamp, time.Duration)
+}
+
 // Oracle issues monotonically-increasing Timestamp values.
 // A configurable SimulatedDelay adds artificial latency so benchmarks can
 // model the cost of a remote ordering service.
@@ -204,3 +226,53 @@ func (o *Oracle) Snapshot() Stats {
 		TotalNs: total,
 	}
 }
+
+// LocalOracle is an alias for Oracle, naming it explicitly as the in-process
+// ("local") implementation of TimestampOracle -- as opposed to RemoteOracle,
+// which will talk to a real out-of-process Divy broker once one exists. It is
+// a plain type alias (not a wrapper), so every existing NewOracle/*Oracle
+// call site continues to compile unchanged; new code can spell either
+// divytime.Oracle or divytime.LocalOracle interchangeably.
+type LocalOracle = Oracle
+
+// NewLocalOracle is an alias for NewOracle, provided for symmetry with
+// NewRemoteOracle below.
+func NewLocalOracle(brokerID int64, simulatedDelay time.Duration) *LocalOracle {
+	return NewOracle(brokerID, simulatedDelay)
+}
+
+// RemoteOracle is a placeholder for a real Divy broker client. It implements
+// TimestampOracle so production code can already be written against the
+// interface, but it is not yet wired up to an actual network client --
+// GetTimestamp/GetCommitTimestamp panic today rather than silently returning
+// meaningless timestamps. Replacing the panics with a real gRPC/HTTP client
+// to a running Divy broker is tracked as follow-up work; see the DuckDB
+// project open-items list ("production Divy oracle integration").
+type RemoteOracle struct {
+	// Addr is the address of the remote Divy broker (e.g. "divy-broker:9090").
+	// Stored for when a real client is implemented; unused today.
+	Addr string
+}
+
+// NewRemoteOracle constructs a RemoteOracle pointed at addr. The returned
+// value satisfies TimestampOracle but every call currently panics -- see the
+// RemoteOracle doc comment.
+func NewRemoteOracle(addr string) *RemoteOracle {
+	return &RemoteOracle{Addr: addr}
+}
+
+// GetTimestamp is not yet implemented; see the RemoteOracle doc comment.
+func (r *RemoteOracle) GetTimestamp(_ int64) (Timestamp, time.Duration) {
+	panic("divytime: RemoteOracle is not yet connected to a real Divy broker (addr=" + r.Addr + ")")
+}
+
+// GetCommitTimestamp is not yet implemented; see the RemoteOracle doc comment.
+func (r *RemoteOracle) GetCommitTimestamp(_ func(Timestamp)) (Timestamp, time.Duration) {
+	panic("divytime: RemoteOracle is not yet connected to a real Divy broker (addr=" + r.Addr + ")")
+}
+
+// Compile-time assertions that both implementations satisfy TimestampOracle.
+var (
+	_ TimestampOracle = (*LocalOracle)(nil)
+	_ TimestampOracle = (*RemoteOracle)(nil)
+)

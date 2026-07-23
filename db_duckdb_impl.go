@@ -55,8 +55,13 @@ type duckDBStorageWrapper struct {
 }
 
 // newDuckDBBackend creates a DuckDB-backed storage implementation.
-func newDuckDBBackend(path string, parts int) (duckDBIface, error) {
-	s, err := duckdb.NewDuckDBStorage(path, parts)
+//
+// numVersionsToKeep is threaded through from Options.NumVersionsToKeep so
+// that DuckDBStorage.CompactPartitions() retains the same number of versions
+// per key that badger's own SST compaction would, instead of always
+// hard-coding "keep only the latest version."
+func newDuckDBBackend(path string, parts int, numVersionsToKeep int) (duckDBIface, error) {
+	s, err := duckdb.NewDuckDBStorageWithOptions(path, parts, numVersionsToKeep)
 	if err != nil {
 		return nil, err
 	}

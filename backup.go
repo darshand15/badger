@@ -80,6 +80,13 @@ func (stream *Stream) Backup(w io.Writer, since types.CustomTs) (types.CustomTs,
 				}
 			}
 
+			if !item.Version().CanRoundtripUint64() {
+				return nil, errors.Errorf(
+					"Backup: version %s has EpochID/BrokerID > 65535 and cannot be "+
+						"safely packed into a uint64 for the KV proto (key=%x)",
+					item.Version(), item.Key())
+			}
+
 			// clear txn bits
 			meta := item.meta &^ (bitTxn | bitFinTxn)
 			kv := y.NewKV(a)
@@ -96,10 +103,19 @@ func (stream *Stream) Backup(w io.Writer, since types.CustomTs) (types.CustomTs,
 			switch {
 			case item.DiscardEarlierVersions():
 				// If we need to discard earlier versions of this item, add a delete
-				// marker just below the current version.
+				// marker just below the current version. Decr() only touches
+				// AssignedTs (borrowing into BrokerID/EpochID on underflow), so if
+				// the check above passed for item.Version() this remains safe.
+				decrVersion := item.Version().Decr()
+				if !decrVersion.CanRoundtripUint64() {
+					return nil, errors.Errorf(
+						"Backup: decremented version %s has EpochID/BrokerID > 65535 "+
+							"and cannot be safely packed into a uint64 (key=%x)",
+						decrVersion, item.Key())
+				}
 				list.Kv = append(list.Kv, &pb.KV{
 					Key:     item.KeyCopy(nil),
-				Version: item.Version().Decr().ToUint64(),
+					Version: decrVersion.ToUint64(),
 					Meta:    []byte{bitDelete},
 				})
 				return list, nil
