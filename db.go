@@ -103,6 +103,11 @@ type duckDBIface interface {
 	// read-after-write correctness is preserved.
 	DirectFlush(entries []duckEntry) error
 
+	// FlushAllPending forces all partition Appender buffers to flush to DuckDB.
+	// This is used by durability-sensitive harnesses that need a stronger
+	// persistence signal than buffered appender writes.
+	FlushAllPending() error
+
 	// ReadBatch retrieves the latest value for multiple keys in a single SQL query
 	// per partition. More efficient than calling Read() N times when a transaction
 	// needs multiple keys, because it reduces CGo round-trips from N to 1.
@@ -614,11 +619,13 @@ func (db *DB) IndexCacheMetrics() *ristretto.Metrics {
 	return nil
 }
 
-// FlushToStorage is a no-op on the duckdb-integration branch because the write
-// path is fully synchronous — data is already on disk by the time txn.Commit()
-// returns. It exists so that BenchmarkDbGrowth can call the same interface on
-// both branches (on dd_exp it drains the async lock-free write list to disk).
+// FlushToStorage forces pending buffered writes to stable backend storage.
+// On DuckDB this flushes all partition Appender buffers. On classic Badger
+// paths it remains a no-op.
 func (db *DB) FlushToStorage() error {
+	if db.duckDBStorage != nil {
+		return db.duckDBStorage.FlushAllPending()
+	}
 	return nil
 }
 

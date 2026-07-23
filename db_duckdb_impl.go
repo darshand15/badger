@@ -50,7 +50,6 @@ type duckDBWriteTask struct {
 type duckDBStorageWrapper struct {
 	s       *duckdb.DuckDBStorage
 	writeCh chan duckDBWriteTask
-	closeCh chan struct{}
 	wg      sync.WaitGroup
 }
 
@@ -68,7 +67,6 @@ func newDuckDBBackend(path string, parts int, numVersionsToKeep int) (duckDBIfac
 	w := &duckDBStorageWrapper{
 		s:       s,
 		writeCh: make(chan duckDBWriteTask, 4096), // Robust buffer bounds for stress tests
-		closeCh: make(chan struct{}),
 	}
 	w.wg.Add(1)
 	go w.duckDBWriteWorker()
@@ -79,40 +77,36 @@ func newDuckDBBackend(path string, parts int, numVersionsToKeep int) (duckDBIfac
 // DuckDB's cross-goroutine transactional deadlocks.
 func (w *duckDBStorageWrapper) duckDBWriteWorker() {
 	defer w.wg.Done()
-	for {
-		select {
-		case task := <-w.writeCh:
-			var err error
-			if task.isDirect {
-				darshanEntries := make([]*duckdb.DarshanEntry, 0, len(task.entries))
-				for _, e := range task.entries {
-					darshanEntries = append(darshanEntries, &duckdb.DarshanEntry{
-						Key:       e.Key,
-						Value:     e.Value,
-						Deleted:   e.Deleted,
-						Timestamp: makeDivyTsFast(e.Version),
-						Version:   uint64(e.Version.EpochID),
-					})
-				}
-				err = w.s.DirectAppendEntries(darshanEntries)
-			} else {
-				darshanEntries := make([]*duckdb.DarshanEntry, len(task.entries))
-				for i, e := range task.entries {
-					darshanEntries[i] = &duckdb.DarshanEntry{
-						Key:       e.Key,
-						Value:     e.Value,
-						Version:   uint64(e.Version.EpochID),
-						Deleted:   e.Deleted,
-						Timestamp: makeDivyTs(e.Version),
-					}
-				}
-				err = w.s.FlushDarshanEntries(darshanEntries)
+	for task := range w.writeCh {
+		var err error
+		if task.isDirect {
+			darshanEntries := make([]*duckdb.DarshanEntry, 0, len(task.entries))
+			for _, e := range task.entries {
+				darshanEntries = append(darshanEntries, &duckdb.DarshanEntry{
+					Key:       e.Key,
+					Value:     e.Value,
+					Deleted:   e.Deleted,
+					Timestamp: makeDivyTsFast(e.Version),
+					Version:   uint64(e.Version.EpochID),
+				})
 			}
-			// Respond to block barrier ensuring strict durability/visibility
+			err = w.s.DirectAppendEntries(darshanEntries)
+		} else {
+			darshanEntries := make([]*duckdb.DarshanEntry, len(task.entries))
+			for i, e := range task.entries {
+				darshanEntries[i] = &duckdb.DarshanEntry{
+					Key:       e.Key,
+					Value:     e.Value,
+					Version:   uint64(e.Version.EpochID),
+					Deleted:   e.Deleted,
+					Timestamp: makeDivyTs(e.Version),
+				}
+			}
+			err = w.s.FlushDarshanEntries(darshanEntries)
+		}
+		// Respond to block barrier ensuring strict durability/visibility.
+		if task.done != nil {
 			task.done <- err
-
-		case <-w.closeCh:
-			return
 		}
 	}
 }
@@ -157,6 +151,10 @@ func (w *duckDBStorageWrapper) DirectFlush(entries []duckEntry) error {
 	done := make(chan error, 1)
 	w.writeCh <- duckDBWriteTask{entries: entries, isDirect: true, done: done}
 	return <-done
+}
+
+func (w *duckDBStorageWrapper) FlushAllPending() error {
+	return w.s.FlushAllPending()
 }
 
 func (w *duckDBStorageWrapper) ScanPrefix(prefix []byte, readTs types.CustomTs) ([]duckReadBatchResult, error) {
@@ -233,7 +231,7 @@ func (w *duckDBStorageWrapper) ReadBatch(requests []duckReadBatchReq) ([]duckRea
 }
 
 func (w *duckDBStorageWrapper) Close() error {
-	close(w.closeCh)
+	close(w.writeCh)
 	w.wg.Wait()
 	return w.s.Close()
 }

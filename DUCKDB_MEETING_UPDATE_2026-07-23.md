@@ -1,7 +1,7 @@
 # DuckDB Backend — Meeting Update
 
 Date: 2026-07-23
-Branch: duckdb-integration (base commit fdedaf3)
+Branch: duckdb-integration (base commit fdedaf3, hardening commit 8ecbebf)
 
 ## What shipped since the last meeting brief
 
@@ -92,15 +92,66 @@ pre-existing and unrelated to this change set (notably lock-copy warnings in
 `trie`/`publisher` paths and one non-test goroutine `Fatalf` warning in
 `db_test.go`). No new vet issue was introduced by these DuckDB/timestamp edits.
 
-## Remaining open item: crash-recovery / crash-injection suite (item 4)
+## Follow-up: crash-recovery / crash-injection suite scaffold (item 4)
 
-Scoped separately as the largest remaining piece of work — it needs a new
-subprocess test helper binary to `SIGKILL` mid-write and reopen from the
-parent process (clean-restart, mid-write-kill, and torn-write tiers). Not
-started; will be picked up as its own task.
+Built out as a follow-up on top of `8ecbebf`, not yet committed/pushed —
+see the caveat below. Three tiers, all shelling out to a new standalone
+helper process (`integration/duckdbcrash`, build-tagged `duckdb`) since you
+cannot `SIGKILL` your own test binary and keep asserting afterward:
+
+1. **`TestDuckDBCrashRestartClean`** — the writer helper opens a DuckDB-backed
+   managed DB, writes 500 checksum-verifiable keys, and closes cleanly; the
+   test process then reopens the same on-disk directory and verifies every
+   key and value byte-for-byte. This is the most basic gap that existed
+   before today: no prior test in this repo opened a DuckDB-backed DB,
+   closed it, and reopened the same directory.
+2. **`TestDuckDBCrashRestartMidWriteKill`** — the writer helper is launched
+   targeting 200,000 keys, its stdout is scanned for `WROTE <n>` progress
+   lines (committed + `FlushToStorage()`'d), then after 300ms it is sent
+   `SIGKILL`. The test process reopens the same directory and asserts (a)
+   `Open()` doesn't panic or hang — wrapped in `recover()` to turn a panic
+   into a clear test failure rather than a crashed test binary — and (b)
+   every key up to the last confirmed `WROTE` line is present with the exact
+   expected value. This is the core "does the backend actually persist
+   acknowledged writes across a crash" check.
+3. **`TestDuckDBCrashTornWrite`** — same kill, plus truncating the last 5% of
+   the on-disk `duckdb_data` file afterward to simulate a torn tail write
+   (e.g. power loss mid-fsync). Reopening must either recover cleanly or fail
+   with an explicit error — never panic or hang. This is a blunt
+   approximation (it doesn't target DuckDB's WAL/checkpoint structure
+   precisely), enough to catch the worst failure modes, not a substitute for
+   a real fault-injection framework.
+
+Every value the helper writes is `key || deterministic-fill-pattern` so a
+torn/corrupted value is detected by recomputing and comparing rather than
+trusting whatever bytes are on disk; the encoding lives in
+`integration/duckdbcrash/main.go`'s `ValueForKey` and is duplicated (by
+necessity — the helper is `package main`, not importable) in
+`db_duckdb_crash_test.go`'s `valueForKeyCrashTest`. Both are commented
+pointing at each other so they don't silently drift apart.
+
+**Execution status (run in this environment):**
+
+```bash
+go build -tags duckdb ./...                               # PASS
+go test -tags duckdb -run '^TestDuckDBCrashRestartClean$' -v -timeout 180s .   # PASS
+go test -tags duckdb -run '^TestDuckDBCrashRestartMidWriteKill$' -v -timeout 240s . # PASS
+go test -tags duckdb -run '^TestDuckDBCrashTornWrite$' -v -timeout 180s .       # PASS
+go test -tags duckdb -run 'TestDuckDBCrash' -v -timeout 300s .                   # PASS
+```
+
+Root causes found and fixed during validation:
+
+- **Partition routing used process-seeded hash (`z.MemHash`)** in `partitionCalculator.getPartition`, which is unstable across processes and broke helper-process writes vs test-process reads after restart. Fixed by switching to deterministic FNV-1a hashing.
+- **`FlushToStorage()` was a no-op for DuckDB**, so `WROTE` lines in the crash helper did not imply durable flush. Fixed by extending `duckDBIface` with `FlushAllPending()` and wiring `DB.FlushToStorage()` to flush all partition Appender buffers.
+- **DuckDB write worker shutdown could exit before draining queued writes**. Fixed by closing `writeCh` and ranging until drained in `duckDBWriteWorker`, then closing storage.
+- **Helper post-reopen self-check used non-managed reads** (`db.View`) and could observe low bootstrap readTs. Fixed helper post-reopen checks to use managed snapshots at `types.MaxTs`.
+
+Result: all three crash tiers now pass locally, and the helper self-check passes both pre-close and post-reopen.
 
 ## Files touched today
 
+**In commit `8ecbebf`:**
 - `types/custom_ts.go`, `types/custom_ts_test.go` (new)
 - `stream.go`, `backup.go`
 - `duckdb/storage.go` (`initializeTables`, `NewDuckDBStorage`/
@@ -109,3 +160,10 @@ started; will be picked up as its own task.
 - `db_duckdb_impl.go`, `db_duckdb_stub.go`, `db.go` (threading
   `NumVersionsToKeep` through to the DuckDB backend)
 - `divytime/divytime.go` (`TimestampOracle`, `LocalOracle`, `RemoteOracle`)
+
+**Crash-suite follow-up files (validated):**
+- `integration/duckdbcrash/main.go` (new)
+- `db_duckdb_crash_test.go` (new)
+- `db.go` (`duckDBIface` + `FlushToStorage` DuckDB wiring)
+- `db_duckdb_impl.go` (write-worker drain on close + `FlushAllPending` forwarding)
+- `duckdb/storage.go` (deterministic partition hash + close/flush hardening)

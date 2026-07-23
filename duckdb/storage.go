@@ -1199,28 +1199,43 @@ func (s *DuckDBStorage) CompactPartitions() error {
 
 // Close releases all DuckDB resources.
 func (s *DuckDBStorage) Close() error {
+	var firstErr error
+	setErr := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
 	// Flush + close persistent appenders before closing the underlying DB;
 	// appender.Close() flushes any remaining buffered rows.
 	for i, pa := range s.partAppenders {
 		pa.mu.Lock()
+		if err := pa.flush(); err != nil {
+			setErr(fmt.Errorf("close flush partition %d: %w", i, err))
+		}
 		if pa.appender != nil {
 			if err := pa.appender.Close(); err != nil {
-				// Log but continue — we still want to close everything.
-				_ = fmt.Errorf("close appender for partition %d: %w", i, err)
+				setErr(fmt.Errorf("close appender for partition %d: %w", i, err))
 			}
 			pa.appender = nil
 		}
 		if pa.sqlConn != nil {
-			_ = pa.sqlConn.Close()
+			if err := pa.sqlConn.Close(); err != nil {
+				setErr(fmt.Errorf("close sql conn partition %d: %w", i, err))
+			}
 			pa.sqlConn = nil
 		}
 		// Close this partition's dedicated read-connection pool.
 		for j, stmt := range pa.readStmts {
 			if stmt != nil {
-				_ = stmt.Close()
+				if err := stmt.Close(); err != nil {
+					setErr(fmt.Errorf("close read stmt partition %d idx %d: %w", i, j, err))
+				}
 			}
 			if pa.readConns[j] != nil {
-				_ = pa.readConns[j].Close()
+				if err := pa.readConns[j].Close(); err != nil {
+					setErr(fmt.Errorf("close read conn partition %d idx %d: %w", i, j, err))
+				}
 			}
 		}
 		pa.readStmts = nil
@@ -1230,7 +1245,10 @@ func (s *DuckDBStorage) Close() error {
 		pa.pendingKeys = nil
 		pa.mu.Unlock()
 	}
-	return s.db.Close()
+	if err := s.db.Close(); err != nil {
+		setErr(fmt.Errorf("close duckdb sql.DB: %w", err))
+	}
+	return firstErr
 }
 
 // ---------------------------------------------------------------------------
@@ -1239,6 +1257,22 @@ func (s *DuckDBStorage) Close() error {
 
 type partitionCalculator struct {
 	numPartitions int
+}
+
+// stableHash64 computes a deterministic 64-bit FNV-1a hash. Unlike runtime
+// memhash-based helpers, this is stable across processes and restarts, which
+// is required for persistent on-disk partition routing.
+func stableHash64(b []byte) uint64 {
+	const (
+		offset64 = 1469598103934665603
+		prime64  = 1099511628211
+	)
+	h := uint64(offset64)
+	for _, c := range b {
+		h ^= uint64(c)
+		h *= prime64
+	}
+	return h
 }
 
 func newPartitionCalculator(numPartitions int) *partitionCalculator {
@@ -1260,5 +1294,5 @@ func (pc *partitionCalculator) getPartition(key []byte) int {
 	if idx := bytes.IndexByte(key, ':'); idx >= 0 {
 		partKey = key[:idx]
 	}
-	return int(z.MemHash(partKey) % uint64(pc.numPartitions))
+	return int(stableHash64(partKey) % uint64(pc.numPartitions))
 }
