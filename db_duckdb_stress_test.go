@@ -473,6 +473,7 @@ type saturationRow struct {
 	workers                           int
 	ops                               float64
 	avg, p90                          time.Duration
+	runWall                           time.Duration
 	goroutinesBefore, goroutinesAfter int
 	heapMBBefore, heapMBAfter         float64
 	openConns, inUse, idle            int
@@ -480,34 +481,137 @@ type saturationRow struct {
 	waitDuration                      time.Duration
 }
 
+func parseStressBoolEnv(name string, def bool) bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if raw == "" {
+		return def
+	}
+	switch raw {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	case "0", "false", "f", "no", "n", "off":
+		return false
+	default:
+		return def
+	}
+}
+
+func sampleSaturationKeyReadTimings(
+	t *testing.T,
+	db *DB,
+	readTs types.CustomTs,
+	numCustomers int64,
+	samples int,
+	includeFullKeys bool,
+) {
+	t.Helper()
+	if db.duckDBStorage == nil || samples <= 0 || numCustomers <= 0 {
+		return
+	}
+
+	var (
+		chkSum, savSum, accSum     time.Duration
+		chkErr, savErr, accErr     int
+		chkFound, savFound, accFound int
+	)
+
+	for i := 0; i < samples; i++ {
+		id := int64(i) % numCustomers
+
+		t0 := time.Now()
+		vChk, _, errChk := db.duckDBStorage.Read(sbCheckingKey(id), readTs)
+		chkSum += time.Since(t0)
+		if errChk != nil {
+			chkErr++
+		} else if len(vChk) > 0 {
+			chkFound++
+		}
+
+		if includeFullKeys {
+			t1 := time.Now()
+			vSav, _, errSav := db.duckDBStorage.Read(sbSavingsKey(id), readTs)
+			savSum += time.Since(t1)
+			if errSav != nil {
+				savErr++
+			} else if len(vSav) > 0 {
+				savFound++
+			}
+
+			t2 := time.Now()
+			vAcc, _, errAcc := db.duckDBStorage.Read(sbAccountKey(id), readTs)
+			accSum += time.Since(t2)
+			if errAcc != nil {
+				accErr++
+			} else if len(vAcc) > 0 {
+				accFound++
+			}
+		}
+	}
+
+	t.Logf("  [diag] per-key read timing over %d samples @fixed-ts", samples)
+	t.Logf("  [diag] checking_bal avg=%v found=%d/%d err=%d",
+		(chkSum / time.Duration(samples)).Round(time.Microsecond), chkFound, samples, chkErr)
+	if includeFullKeys {
+		t.Logf("  [diag] savings_bal  avg=%v found=%d/%d err=%d",
+			(savSum / time.Duration(samples)).Round(time.Microsecond), savFound, samples, savErr)
+		t.Logf("  [diag] accounts_id  avg=%v found=%d/%d err=%d",
+			(accSum / time.Duration(samples)).Round(time.Microsecond), accFound, samples, accErr)
+	}
+}
+
 func TestDuckDBSaturationProbe(t *testing.T) {
 	cardinality := parseInt64Env("BADGER_DUCKDB_SATURATION_CARDINALITY", 200_000)
 	workers := parseIntListEnv("BADGER_DUCKDB_SATURATION_WORKERS",
 		[]int{16, 32, 64, 128, 256, 512})
 	dur := parseDurationEnv("BADGER_DUCKDB_SATURATION_DURATION", 2*time.Second)
+	warmupDur := parseDurationEnv("BADGER_DUCKDB_SATURATION_WARMUP", 0)
+	if warmupDur <= 0 && cardinality >= 40_000_000 {
+		warmupDur = 2 * time.Second
+	}
+	phaseDiag := parseStressBoolEnv("BADGER_DUCKDB_SATURATION_PHASE_DIAG", false)
+	keyTimingSamples := parseIntEnv("BADGER_DUCKDB_SATURATION_KEYTIMING_SAMPLES", 200)
+	readMode := strings.ToLower(strings.TrimSpace(os.Getenv("BADGER_DUCKDB_READ_HEAVY_KEY_MODE")))
+	checkingOnly := readMode == "checking-only" || readMode == "checking"
 
 	t.Logf("")
 	t.Logf("=== DuckDB Saturation Probe (cardinality=%d) ===", cardinality)
+	t.Logf("  measurement duration=%v, warmup duration=%v", dur, warmupDur)
 	t.Logf("  %-8s  %-14s  %-16s  %-16s  %-10s  %-10s  %-10s",
 		"Workers", "DuckDB Ops/s", "Goroutines b->a", "HeapMB b->a", "OpenConns", "InUse/Idle", "WaitCount")
 	t.Logf("  %s", strings.Repeat("-", 100))
 
 	var rows []saturationRow
+	var seedElapsed time.Duration
 
 	withDuckDB(t, true, func(db *DB) {
 		oracle := divytime.NewOracle(1, 0)
+		seedStart := time.Now()
 		seedSmallBankN(t, db, oracle, cardinality)
+		seedElapsed = time.Since(seedStart)
+
+		if phaseDiag {
+			t.Logf("  [diag] seed phase: elapsed=%v (%.0f customers/sec)",
+				seedElapsed.Round(time.Millisecond), float64(cardinality)/seedElapsed.Seconds())
+			readTs := sbTs(oracle)
+			sampleSaturationKeyReadTimings(t, db, readTs, cardinality, keyTimingSamples, !checkingOnly)
+		}
 
 		runtime.GC()
 		debug.FreeOSMemory()
 
 		for _, w := range workers {
+			if warmupDur > 0 {
+				_ = runBalanceReadHeavy(t, "DuckDB-warmup", db, oracle, cardinality, warmupDur, w)
+			}
+
 			runtime.GC()
 			var msBefore runtime.MemStats
 			runtime.ReadMemStats(&msBefore)
 			goroutinesBefore := runtime.NumGoroutine()
 
+			runStart := time.Now()
 			result := runBalanceReadHeavy(t, "DuckDB", db, oracle, cardinality, dur, w)
+			runWall := time.Since(runStart)
 
 			var msAfter runtime.MemStats
 			runtime.ReadMemStats(&msAfter)
@@ -518,6 +622,7 @@ func TestDuckDBSaturationProbe(t *testing.T) {
 				ops:              result.ops,
 				avg:              result.avg,
 				p90:              result.p90,
+				runWall:          runWall,
 				goroutinesBefore: goroutinesBefore,
 				goroutinesAfter:  goroutinesAfter,
 				heapMBBefore:     float64(msBefore.HeapAlloc) / (1 << 20),
@@ -538,8 +643,22 @@ func TestDuckDBSaturationProbe(t *testing.T) {
 				fmt.Sprintf("%d->%d", r.goroutinesBefore, r.goroutinesAfter),
 				fmt.Sprintf("%.1f->%.1f", r.heapMBBefore, r.heapMBAfter),
 				r.openConns, r.inUse, r.idle, r.waitCount)
+			if phaseDiag {
+				t.Logf("    [diag] workers=%d run-phase elapsed=%v", w, r.runWall.Round(time.Millisecond))
+			}
 		}
 	})
+
+	if phaseDiag && len(rows) > 0 {
+		var totalRunPhase time.Duration
+		for _, r := range rows {
+			totalRunPhase += r.runWall
+		}
+		t.Logf("  [diag] phase totals: seed=%v read-phase-total=%v overall=%v",
+			seedElapsed.Round(time.Millisecond),
+			totalRunPhase.Round(time.Millisecond),
+			(seedElapsed + totalRunPhase).Round(time.Millisecond))
+	}
 
 	ceilingAt := -1
 	for i := 1; i < len(rows); i++ {
@@ -573,13 +692,13 @@ func TestDuckDBSaturationProbe(t *testing.T) {
 
 	if outPath := os.Getenv("BADGER_DUCKDB_SATURATION_CSV"); outPath != "" {
 		csv := "workers,duckdb_ops_per_sec,avg_ns,p90_ns,goroutines_before,goroutines_after," +
-			"heap_mb_before,heap_mb_after,open_conns,in_use,idle,wait_count,wait_duration_ns\n"
+			"heap_mb_before,heap_mb_after,open_conns,in_use,idle,wait_count,wait_duration_ns,run_wall_ns\n"
 		for _, r := range rows {
-			csv += fmt.Sprintf("%d,%.3f,%d,%d,%d,%d,%.2f,%.2f,%d,%d,%d,%d,%d\n",
+			csv += fmt.Sprintf("%d,%.3f,%d,%d,%d,%d,%.2f,%.2f,%d,%d,%d,%d,%d,%d\n",
 				r.workers, r.ops, r.avg.Nanoseconds(), r.p90.Nanoseconds(),
 				r.goroutinesBefore, r.goroutinesAfter,
 				r.heapMBBefore, r.heapMBAfter,
-				r.openConns, r.inUse, r.idle, r.waitCount, r.waitDuration.Nanoseconds())
+				r.openConns, r.inUse, r.idle, r.waitCount, r.waitDuration.Nanoseconds(), r.runWall.Nanoseconds())
 		}
 		if err := os.WriteFile(outPath, []byte(csv), 0644); err != nil {
 			t.Fatalf("write saturation csv: %v", err)

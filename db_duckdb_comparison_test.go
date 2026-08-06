@@ -533,7 +533,9 @@ func seedSmallBankN(tb testing.TB, db *DB, oracle *divytime.Oracle, n int64) {
 	compactAccountValue := accountValueMode == "compact" || (accountValueMode == "" && n >= 10_000_000)
 	batchSize := parsePositiveIntEnv("BADGER_DUCKDB_SEED_BATCH_SIZE", 0)
 	if batchSize <= 0 {
-		if n >= 1_000_000 {
+		if n >= 40_000_000 {
+			batchSize = 2000
+		} else if n >= 1_000_000 {
 			batchSize = 1000
 		} else {
 			batchSize = 1
