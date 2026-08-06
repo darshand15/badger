@@ -181,15 +181,29 @@ run_benchbase_smallbank() {
   popd >/dev/null
 }
 
-run_100m() {
+run_large_probe() {
+  local cardinality="$1"
+
   pushd "${ROOT_DIR}" >/dev/null
-  JULY30_DUCKDB_LARGE_CARDINALITY=100000000 \
+  JULY30_DUCKDB_LARGE_CARDINALITY="${cardinality}" \
   JULY30_DUCKDB_LARGE_TIMEOUT="${JULY30_DUCKDB_LARGE_TIMEOUT:-21600s}" \
   JULY30_DUCKDB_SEED_KEY_MODE="${JULY30_DUCKDB_SEED_KEY_MODE:-full}" \
   JULY30_DUCKDB_READ_HEAVY_KEY_MODE="${JULY30_DUCKDB_READ_HEAVY_KEY_MODE:-full}" \
   bash scripts/july30_duckdb_campaign.sh large-data-probe
   bash scripts/july30_collect_summary.sh
   popd >/dev/null
+}
+
+run_10m() {
+  run_large_probe 10000000
+}
+
+run_40m() {
+  run_large_probe 40000000
+}
+
+run_100m() {
+  run_large_probe 100000000
 }
 
 usage() {
@@ -201,6 +215,9 @@ Commands:
   probe            SSH probe all configured nodes
   start-cluster    Install monitoring and start directory/broker/server processes
   run-benchbase    Run BenchBase SmallBank workload
+  run-10m          Run 10M DuckDB large-data probe in darshan-badger
+  run-40m          Run 40M DuckDB large-data probe in darshan-badger
+  run-10m-40m      Run 10M then 40M probes back-to-back
   run-100m         Run 100M DuckDB large-data probe in darshan-badger
   full             prepare + probe + start-cluster + run-benchbase
 
@@ -224,6 +241,16 @@ main() {
       ;;
     run-benchbase)
       run_benchbase_smallbank
+      ;;
+    run-10m)
+      run_10m
+      ;;
+    run-40m)
+      run_40m
+      ;;
+    run-10m-40m)
+      run_10m
+      run_40m
       ;;
     run-100m)
       run_100m

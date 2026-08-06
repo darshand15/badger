@@ -14,14 +14,20 @@ package badger
 
 import (
 	"fmt"
+	"os"
+	"runtime"
+	"runtime/debug"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"math/rand"
+
 	"github.com/dgraph-io/badger/v4/divytime"
 	"github.com/dgraph-io/badger/v4/types"
-	"math/rand"
 )
 
 const stressDuration = 2 * time.Second
@@ -425,4 +431,265 @@ func TestDuckDBBankEpochStressNoDelay(t *testing.T) {
 		tps, p90 := runEpochBankWorkload(t, bOracle, runDur, workers)
 		t.Logf("  %-12d  %-14.0f  %v", bs, tps, p90.Round(time.Microsecond))
 	}
+}
+
+func parseDurationEnv(name string, def time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
+}
+
+func parseInt64Env(name string, def int64) int64 {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+
+func parseIntEnv(name string, def int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+
+type saturationRow struct {
+	workers                           int
+	ops                               float64
+	avg, p90                          time.Duration
+	goroutinesBefore, goroutinesAfter int
+	heapMBBefore, heapMBAfter         float64
+	openConns, inUse, idle            int
+	waitCount                         int64
+	waitDuration                      time.Duration
+}
+
+func TestDuckDBSaturationProbe(t *testing.T) {
+	cardinality := parseInt64Env("BADGER_DUCKDB_SATURATION_CARDINALITY", 200_000)
+	workers := parseIntListEnv("BADGER_DUCKDB_SATURATION_WORKERS",
+		[]int{16, 32, 64, 128, 256, 512})
+	dur := parseDurationEnv("BADGER_DUCKDB_SATURATION_DURATION", 2*time.Second)
+
+	t.Logf("")
+	t.Logf("=== DuckDB Saturation Probe (cardinality=%d) ===", cardinality)
+	t.Logf("  %-8s  %-14s  %-16s  %-16s  %-10s  %-10s  %-10s",
+		"Workers", "DuckDB Ops/s", "Goroutines b->a", "HeapMB b->a", "OpenConns", "InUse/Idle", "WaitCount")
+	t.Logf("  %s", strings.Repeat("-", 100))
+
+	var rows []saturationRow
+
+	withDuckDB(t, true, func(db *DB) {
+		oracle := divytime.NewOracle(1, 0)
+		seedSmallBankN(t, db, oracle, cardinality)
+
+		runtime.GC()
+		debug.FreeOSMemory()
+
+		for _, w := range workers {
+			runtime.GC()
+			var msBefore runtime.MemStats
+			runtime.ReadMemStats(&msBefore)
+			goroutinesBefore := runtime.NumGoroutine()
+
+			result := runBalanceReadHeavy(t, "DuckDB", db, oracle, cardinality, dur, w)
+
+			var msAfter runtime.MemStats
+			runtime.ReadMemStats(&msAfter)
+			goroutinesAfter := runtime.NumGoroutine()
+
+			r := saturationRow{
+				workers:          w,
+				ops:              result.ops,
+				avg:              result.avg,
+				p90:              result.p90,
+				goroutinesBefore: goroutinesBefore,
+				goroutinesAfter:  goroutinesAfter,
+				heapMBBefore:     float64(msBefore.HeapAlloc) / (1 << 20),
+				heapMBAfter:      float64(msAfter.HeapAlloc) / (1 << 20),
+			}
+			if db.duckDBStorage != nil {
+				ps := db.duckDBStorage.PoolStats()
+				r.openConns = ps.OpenConnections
+				r.inUse = ps.InUse
+				r.idle = ps.Idle
+				r.waitCount = ps.WaitCount
+				r.waitDuration = ps.WaitDuration
+			}
+			rows = append(rows, r)
+
+			t.Logf("  %-8d  %-14.1f  %-16s  %-16s  %-10d  %d/%-8d  %-10d",
+				w, r.ops,
+				fmt.Sprintf("%d->%d", r.goroutinesBefore, r.goroutinesAfter),
+				fmt.Sprintf("%.1f->%.1f", r.heapMBBefore, r.heapMBAfter),
+				r.openConns, r.inUse, r.idle, r.waitCount)
+		}
+	})
+
+	ceilingAt := -1
+	for i := 1; i < len(rows); i++ {
+		if rows[i].ops < rows[i-1].ops*1.05 {
+			ceilingAt = rows[i-1].workers
+			break
+		}
+	}
+	if ceilingAt > 0 {
+		t.Logf("  Throughput plateau observed at/after %d workers "+
+			"(less than 5%% gain per level beyond this point)", ceilingAt)
+	} else if len(rows) > 0 {
+		t.Logf("  Throughput was still scaling at the highest tested level (%d workers) -- "+
+			"true ceiling not reached; rerun with a higher BADGER_DUCKDB_SATURATION_WORKERS value",
+			rows[len(rows)-1].workers)
+	}
+
+	sawWait := false
+	for _, r := range rows {
+		if r.waitCount > 0 {
+			sawWait = true
+			t.Logf("  NOTE: at %d workers, %d connection-pool waits were observed "+
+				"(total wait %v) -- this points at BADGER_DUCKDB_READ_POOL_SIZE as "+
+				"the bottleneck, not CPU/hardware", r.workers, r.waitCount, r.waitDuration)
+		}
+	}
+	if !sawWait && len(rows) > 0 {
+		t.Logf("  No connection-pool waits observed at any tested worker level -- " +
+			"any plateau found above is CPU/scheduler-bound, not pool-exhaustion-bound")
+	}
+
+	if outPath := os.Getenv("BADGER_DUCKDB_SATURATION_CSV"); outPath != "" {
+		csv := "workers,duckdb_ops_per_sec,avg_ns,p90_ns,goroutines_before,goroutines_after," +
+			"heap_mb_before,heap_mb_after,open_conns,in_use,idle,wait_count,wait_duration_ns\n"
+		for _, r := range rows {
+			csv += fmt.Sprintf("%d,%.3f,%d,%d,%d,%d,%.2f,%.2f,%d,%d,%d,%d,%d\n",
+				r.workers, r.ops, r.avg.Nanoseconds(), r.p90.Nanoseconds(),
+				r.goroutinesBefore, r.goroutinesAfter,
+				r.heapMBBefore, r.heapMBAfter,
+				r.openConns, r.inUse, r.idle, r.waitCount, r.waitDuration.Nanoseconds())
+		}
+		if err := os.WriteFile(outPath, []byte(csv), 0644); err != nil {
+			t.Fatalf("write saturation csv: %v", err)
+		}
+		t.Logf("  Wrote saturation CSV: %s", outPath)
+	}
+}
+
+func TestDuckDBBankSoak(t *testing.T) {
+	dur := parseDurationEnv("BADGER_DUCKDB_SOAK_DURATION", 5*time.Minute)
+	checkInterval := parseDurationEnv("BADGER_DUCKDB_SOAK_CHECK_INTERVAL", 10*time.Second)
+	workers := parseIntEnv("BADGER_DUCKDB_SOAK_WORKERS", 16)
+
+	t.Logf("")
+	t.Logf("=== DuckDB Bank Soak Test ===")
+	t.Logf("  duration=%v check_interval=%v workers=%d", dur, checkInterval, workers)
+
+	withDuckDB(t, true, func(db *DB) {
+		oracle := divytime.NewOracle(1, 0)
+		seedDuckDBAccounts(t, db, oracle)
+
+		var (
+			transferOps       atomic.Int64
+			invariantChecks   atomic.Int64
+			invariantFailures atomic.Int64
+			stop              int32
+			wg                sync.WaitGroup
+		)
+
+		startGoroutines := runtime.NumGoroutine()
+
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+				rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
+				for atomic.LoadInt32(&stop) == 0 {
+					execTransfer(t, db, oracle, rng)
+					transferOps.Add(1)
+				}
+			}(w)
+		}
+
+		runStart := time.Now()
+		checkerDone := make(chan struct{})
+		go func() {
+			defer close(checkerDone)
+			ticker := time.NewTicker(checkInterval)
+			defer ticker.Stop()
+			for range ticker.C {
+				invariantChecks.Add(1)
+				elapsed := time.Since(runStart).Round(time.Second)
+				tsRaw, _ := oracle.GetTimestamp(int64(time.Now().UnixNano()))
+				if bankInvariantHoldsAt(t, db, divyToTs(tsRaw)) {
+					t.Logf("  [soak] invariant holds at t=%v (ops so far=%d, goroutines=%d)",
+						elapsed, transferOps.Load(), runtime.NumGoroutine())
+				} else {
+					invariantFailures.Add(1)
+					t.Logf("  [soak] invariant check FAILED at t=%v (ops so far=%d)",
+						elapsed, transferOps.Load())
+				}
+				if time.Since(runStart) >= dur {
+					return
+				}
+			}
+		}()
+
+		time.Sleep(dur)
+		atomic.StoreInt32(&stop, 1)
+		wg.Wait()
+		<-checkerDone
+
+		endGoroutines := runtime.NumGoroutine()
+
+		t.Logf("=== Soak Summary ===")
+		t.Logf("  total transfer ops: %d (%.0f TPS avg)",
+			transferOps.Load(), float64(transferOps.Load())/dur.Seconds())
+		t.Logf("  invariant checks during run: %d, failures: %d",
+			invariantChecks.Load(), invariantFailures.Load())
+		t.Logf("  goroutines before=%d after=%d (delta=%d)",
+			startGoroutines, endGoroutines, endGoroutines-startGoroutines)
+
+		if invariantFailures.Load() > 0 {
+			t.Errorf("balance invariant failed %d/%d live checks during the soak run -- "+
+				"see the [soak] log lines above for timing", invariantFailures.Load(), invariantChecks.Load())
+		}
+
+		if delta := endGoroutines - startGoroutines; delta > workers {
+			t.Errorf("goroutine count grew by %d (before=%d after=%d) after all workers stopped -- "+
+				"possible goroutine leak", delta, startGoroutines, endGoroutines)
+		}
+
+		verifyBankTotal(t, db)
+	})
+}
+
+func bankInvariantHoldsAt(t *testing.T, db *DB, readTs types.CustomTs) bool {
+	t.Helper()
+	txn := db.NewTransactionAt(readTs, false)
+	defer txn.Discard()
+	results, err := db.duckDBStorage.ScanPrefix([]byte(bankKeyPrefix), txn.readTs)
+	if err != nil {
+		t.Logf("  [soak] scan error during live check: %v", err)
+		return false
+	}
+	var total uint64
+	for _, r := range results {
+		if r.Found {
+			total += bankDecodeUint64(r.Value)
+		}
+	}
+	return total == uint64(numBankAccounts)*initialBankBal
 }

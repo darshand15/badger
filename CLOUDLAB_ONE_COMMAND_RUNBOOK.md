@@ -32,7 +32,33 @@ What `full` does:
 4. Starts monitoring + directory + brokers + servers.
 5. Runs BenchBase SmallBank.
 
-## 3) One-command 100M run
+## 3) One-command 10M / 40M / 100M runs
+
+10M full-key mode:
+
+```bash
+cd /Users/AshleyLuo1/GolandProjects/darshan-badger
+JULY30_DUCKDB_SEED_KEY_MODE=full JULY30_DUCKDB_READ_HEAVY_KEY_MODE=full \
+scripts/cloudlab_orchestrate.sh run-10m
+```
+
+40M full-key mode:
+
+```bash
+cd /Users/AshleyLuo1/GolandProjects/darshan-badger
+JULY30_DUCKDB_SEED_KEY_MODE=full JULY30_DUCKDB_READ_HEAVY_KEY_MODE=full \
+scripts/cloudlab_orchestrate.sh run-40m
+```
+
+10M + 40M back-to-back:
+
+```bash
+cd /Users/AshleyLuo1/GolandProjects/darshan-badger
+JULY30_DUCKDB_SEED_KEY_MODE=full JULY30_DUCKDB_READ_HEAVY_KEY_MODE=full \
+scripts/cloudlab_orchestrate.sh run-10m-40m
+```
+
+100M full-key mode:
 
 Full-key mode:
 

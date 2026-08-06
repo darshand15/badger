@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4/divytime"
+	"github.com/dgraph-io/badger/v4/types"
 )
 
 // ---------------------------------------------------------------------------
@@ -528,6 +529,8 @@ func seedSmallBankN(tb testing.TB, db *DB, oracle *divytime.Oracle, n int64) {
 	const custPrefix = "cust_"
 	seedMode := strings.ToLower(strings.TrimSpace(os.Getenv("BADGER_DUCKDB_SEED_KEY_MODE")))
 	fullSeed := seedMode != "checking-only" && seedMode != "checking"
+	accountValueMode := strings.ToLower(strings.TrimSpace(os.Getenv("BADGER_DUCKDB_ACCOUNT_VALUE_MODE")))
+	compactAccountValue := accountValueMode == "compact" || (accountValueMode == "" && n >= 10_000_000)
 	batchSize := parsePositiveIntEnv("BADGER_DUCKDB_SEED_BATCH_SIZE", 0)
 	if batchSize <= 0 {
 		if n >= 1_000_000 {
@@ -536,6 +539,9 @@ func seedSmallBankN(tb testing.TB, db *DB, oracle *divytime.Oracle, n int64) {
 			batchSize = 1
 		}
 	}
+	checkingValue := sbEncode(sbInitBal)
+	savingsValue := sbEncode(sbInitBal)
+	compactAccountValueBytes := []byte("cust")
 
 	for start := int64(0); start < n; start += int64(batchSize) {
 		end := start + int64(batchSize)
@@ -546,21 +552,25 @@ func seedSmallBankN(tb testing.TB, db *DB, oracle *divytime.Oracle, n int64) {
 		ts := sbTs(oracle)
 		txn := db.NewTransactionAt(ts, true)
 		nameBuf := make([]byte, 0, len(custPrefix)+20)
+		accountValue := compactAccountValueBytes
 		for i := start; i < end; i++ {
 			if fullSeed {
-				name := nameBuf[:0]
-				name = append(name, custPrefix...)
-				name = strconv.AppendInt(name, i, 10)
-				if err := txn.Set(sbAccountKey(i), name); err != nil {
+				if !compactAccountValue {
+					name := nameBuf[:0]
+					name = append(name, custPrefix...)
+					name = strconv.AppendInt(name, i, 10)
+					accountValue = append([]byte(nil), name...)
+				}
+				if err := txn.Set(sbAccountKey(i), accountValue); err != nil {
 					txn.Discard()
 					tb.Fatalf("seed set account i=%d: %v", i, err)
 				}
-				if err := txn.Set(sbSavingsKey(i), sbEncode(sbInitBal)); err != nil {
+				if err := txn.Set(sbSavingsKey(i), savingsValue); err != nil {
 					txn.Discard()
 					tb.Fatalf("seed set savings i=%d: %v", i, err)
 				}
 			}
-			if err := txn.Set(sbCheckingKey(i), sbEncode(sbInitBal)); err != nil {
+			if err := txn.Set(sbCheckingKey(i), checkingValue); err != nil {
 				txn.Discard()
 				tb.Fatalf("seed set checking i=%d: %v", i, err)
 			}
@@ -644,6 +654,21 @@ func parseIntListEnv(name string, defaults []int) []int {
 	return out
 }
 
+func parseBoolEnv(name string, def bool) bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if raw == "" {
+		return def
+	}
+	switch raw {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	case "0", "false", "f", "no", "n", "off":
+		return false
+	default:
+		return def
+	}
+}
+
 type readHeavyResult struct {
 	backend string
 	ops     float64
@@ -675,6 +700,11 @@ func runBalanceReadHeavy(
 	var wg sync.WaitGroup
 	readMode := strings.ToLower(strings.TrimSpace(os.Getenv("BADGER_DUCKDB_READ_HEAVY_KEY_MODE")))
 	checkingOnly := readMode == "checking-only" || readMode == "checking"
+	useFixedSnapshot := parseBoolEnv("BADGER_DUCKDB_READ_HEAVY_FIXED_SNAPSHOT", true)
+	var fixedReadTs types.CustomTs
+	if useFixedSnapshot {
+		fixedReadTs = sbTs(oracle)
+	}
 
 	start := time.Now()
 	for w := 0; w < workers; w++ {
@@ -697,7 +727,10 @@ func runBalanceReadHeavy(
 				}
 				prefetch = append(prefetch, chkKey)
 
-				ts := sbTs(oracle)
+				ts := fixedReadTs
+				if !useFixedSnapshot {
+					ts = sbTs(oracle)
+				}
 				t0 := time.Now()
 
 				txn := db.NewTransactionAt(ts, false)
@@ -709,7 +742,6 @@ func runBalanceReadHeavy(
 					_, errA = txn.Get(acctKey)
 					_, errS = txn.Get(savKey)
 				}
-				_ = txn.CommitAt(ts, nil)
 				txn.Discard()
 
 				if errA == nil && errS == nil && errC == nil {
