@@ -36,6 +36,8 @@ write_env() {
     echo "BADGER_DUCKDB_SEED_BATCH_SIZE=${BADGER_DUCKDB_SEED_BATCH_SIZE:-}"
     echo "BADGER_DUCKDB_SEED_KEY_MODE=${BADGER_DUCKDB_SEED_KEY_MODE:-}"
     echo "BADGER_DUCKDB_READ_HEAVY_KEY_MODE=${BADGER_DUCKDB_READ_HEAVY_KEY_MODE:-}"
+    echo "BADGER_DUCKDB_PARTITION_FANOUT=${BADGER_DUCKDB_PARTITION_FANOUT:-}"
+    echo "BADGER_DUCKDB_READ_POOL_SIZE=${BADGER_DUCKDB_READ_POOL_SIZE:-}"
   } >"${OUT_DIR}/env.txt"
 }
 
@@ -78,6 +80,8 @@ large_data_probe() {
   local seed_batch="${JULY30_DUCKDB_SEED_BATCH_SIZE:-}"
   local seed_mode="${JULY30_DUCKDB_SEED_KEY_MODE:-}"
   local read_mode="${JULY30_DUCKDB_READ_HEAVY_KEY_MODE:-}"
+  local partition_fanout="${JULY30_DUCKDB_PARTITION_FANOUT:-}"
+  local read_pool_size="${JULY30_DUCKDB_READ_POOL_SIZE:-}"
   if [[ -z "${card}" ]]; then
     log "Skipping large-data probe (set JULY30_DUCKDB_LARGE_CARDINALITY=10000000 or 100000000 to enable)"
     return 0
@@ -98,10 +102,26 @@ large_data_probe() {
     read_mode="checking-only"
   fi
 
+  # Full-key 100M runs can exceed local memory due to many per-partition
+  # dedicated read connections. Reduce fan-out and read-pool size for this
+  # stress tier unless explicitly overridden by env.
+  if [[ ${card} -ge 100000000 ]]; then
+    if [[ "${seed_mode}" == "full" || "${read_mode}" == "full" ]]; then
+      if [[ -z "${partition_fanout}" ]]; then
+        partition_fanout=4
+      fi
+      if [[ -z "${read_pool_size}" ]]; then
+        read_pool_size=1
+      fi
+    fi
+  fi
+
   run_cmd large_data_saturation env BADGER_DUCKDB_SATURATION_CARDINALITY="${card}" \
     BADGER_DUCKDB_SEED_BATCH_SIZE="${seed_batch}" \
     BADGER_DUCKDB_SEED_KEY_MODE="${seed_mode}" \
     BADGER_DUCKDB_READ_HEAVY_KEY_MODE="${read_mode}" \
+    BADGER_DUCKDB_PARTITION_FANOUT="${partition_fanout}" \
+    BADGER_DUCKDB_READ_POOL_SIZE="${read_pool_size}" \
     BADGER_DUCKDB_SATURATION_WORKERS="32 64 128 256" \
     BADGER_DUCKDB_SATURATION_DURATION=3s \
     BADGER_DUCKDB_SATURATION_CSV="${OUT_DIR}/saturation_${card}.csv" \

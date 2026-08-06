@@ -526,19 +526,72 @@ func TestReadHeavyBalanceBadgerVsDuckDB(t *testing.T) {
 func seedSmallBankN(tb testing.TB, db *DB, oracle *divytime.Oracle, n int64) {
 	tb.Helper()
 	const custPrefix = "cust_"
-	for i := int64(0); i < n; i++ {
-		ts := sbTs(oracle)
-		txn := db.NewTransactionAt(ts, true)
-		name := make([]byte, len(custPrefix), len(custPrefix)+20)
-		copy(name, custPrefix)
-		name = strconv.AppendInt(name, i, 10)
-		_ = txn.Set(sbAccountKey(i), name)
-		_ = txn.Set(sbSavingsKey(i), sbEncode(sbInitBal))
-		_ = txn.Set(sbCheckingKey(i), sbEncode(sbInitBal))
-		if err := txn.CommitAt(ts, nil); err != nil {
-			tb.Fatalf("seed commit i=%d: %v", i, err)
+	seedMode := strings.ToLower(strings.TrimSpace(os.Getenv("BADGER_DUCKDB_SEED_KEY_MODE")))
+	fullSeed := seedMode != "checking-only" && seedMode != "checking"
+	batchSize := parsePositiveIntEnv("BADGER_DUCKDB_SEED_BATCH_SIZE", 0)
+	if batchSize <= 0 {
+		if n >= 1_000_000 {
+			batchSize = 1000
+		} else {
+			batchSize = 1
 		}
 	}
+
+	for start := int64(0); start < n; start += int64(batchSize) {
+		end := start + int64(batchSize)
+		if end > n {
+			end = n
+		}
+
+		ts := sbTs(oracle)
+		txn := db.NewTransactionAt(ts, true)
+		nameBuf := make([]byte, 0, len(custPrefix)+20)
+		for i := start; i < end; i++ {
+			if fullSeed {
+				name := nameBuf[:0]
+				name = append(name, custPrefix...)
+				name = strconv.AppendInt(name, i, 10)
+				if err := txn.Set(sbAccountKey(i), name); err != nil {
+					txn.Discard()
+					tb.Fatalf("seed set account i=%d: %v", i, err)
+				}
+				if err := txn.Set(sbSavingsKey(i), sbEncode(sbInitBal)); err != nil {
+					txn.Discard()
+					tb.Fatalf("seed set savings i=%d: %v", i, err)
+				}
+			}
+			if err := txn.Set(sbCheckingKey(i), sbEncode(sbInitBal)); err != nil {
+				txn.Discard()
+				tb.Fatalf("seed set checking i=%d: %v", i, err)
+			}
+		}
+
+		if err := txn.CommitAt(ts, nil); err != nil {
+			txn.Discard()
+			tb.Fatalf("seed commit customers [%d,%d): %v", start, end, err)
+		}
+		txn.Discard()
+
+		if n >= 10_000_000 && (end == n || end%5_000_000 == 0) {
+			if fullSeed {
+				tb.Logf("  seeded %d/%d customers (batch_size=%d, keys=full)", end, n, batchSize)
+			} else {
+				tb.Logf("  seeded %d/%d customers (batch_size=%d, keys=checking-only)", end, n, batchSize)
+			}
+		}
+	}
+}
+
+func parsePositiveIntEnv(name string, def int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
 }
 
 func parseInt64ListEnv(name string, defaults []int64) []int64 {
@@ -620,6 +673,8 @@ func runBalanceReadHeavy(
 	var totalOps atomic.Int64
 	var stop int32
 	var wg sync.WaitGroup
+	readMode := strings.ToLower(strings.TrimSpace(os.Getenv("BADGER_DUCKDB_READ_HEAVY_KEY_MODE")))
+	checkingOnly := readMode == "checking-only" || readMode == "checking"
 
 	start := time.Now()
 	for w := 0; w < workers; w++ {
@@ -627,27 +682,33 @@ func runBalanceReadHeavy(
 		go func(workerID int) {
 			defer wg.Done()
 			rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
+			chkKey := make([]byte, 0, 32)
 			acctKey := make([]byte, 0, 32)
 			savKey := make([]byte, 0, 32)
-			chkKey := make([]byte, 0, 32)
-			prefetch := make([][]byte, 3)
+			prefetch := make([][]byte, 0, 3)
 			for atomic.LoadInt32(&stop) == 0 {
 				id := rng.Int63n(numCustomers)
-				acctKey = sbKeyInto(acctKey, id, "accounts_id")
-				savKey = sbKeyInto(savKey, id, "savings_bal")
 				chkKey = sbKeyInto(chkKey, id, "checking_bal")
-				prefetch[0] = acctKey
-				prefetch[1] = savKey
-				prefetch[2] = chkKey
+				prefetch = prefetch[:0]
+				if !checkingOnly {
+					acctKey = sbKeyInto(acctKey, id, "accounts_id")
+					savKey = sbKeyInto(savKey, id, "savings_bal")
+					prefetch = append(prefetch, acctKey, savKey)
+				}
+				prefetch = append(prefetch, chkKey)
 
 				ts := sbTs(oracle)
 				t0 := time.Now()
 
 				txn := db.NewTransactionAt(ts, false)
 				_ = txn.PrefetchKeys(prefetch)
-				_, errA := txn.Get(acctKey)
-				_, errS := txn.Get(savKey)
 				_, errC := txn.Get(chkKey)
+				errA := error(nil)
+				errS := error(nil)
+				if !checkingOnly {
+					_, errA = txn.Get(acctKey)
+					_, errS = txn.Get(savKey)
+				}
 				_ = txn.CommitAt(ts, nil)
 				txn.Discard()
 

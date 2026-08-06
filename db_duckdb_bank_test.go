@@ -5,7 +5,10 @@ package badger
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,9 +23,16 @@ import (
 func withDuckDB(tb testing.TB, managed bool, fn func(db *DB)) {
 	tb.Helper()
 
+	partitionFanOut := 8
+	if raw := strings.TrimSpace(os.Getenv("BADGER_DUCKDB_PARTITION_FANOUT")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			partitionFanOut = n
+		}
+	}
+
 	opts := DefaultOptions(tb.TempDir())
 	opts.UseDuckDB = true
-	opts.PartitionFanOut = 8
+	opts.PartitionFanOut = partitionFanOut
 	opts.NumCompactors = 0
 	opts.CompactL0OnClose = false
 	opts.Logger = nil
