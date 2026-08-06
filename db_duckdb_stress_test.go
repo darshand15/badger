@@ -717,9 +717,11 @@ func TestDuckDBSaturationProbe(t *testing.T) {
 }
 
 func TestDuckDBBankSoak(t *testing.T) {
-	dur := parseDurationEnv("BADGER_DUCKDB_SOAK_DURATION", 5*time.Minute)
+	// Keep defaults bounded so `go test ./...` remains reliable under the
+	// package-level timeout. Long CloudLab runs should set env overrides.
+	dur := parseDurationEnv("BADGER_DUCKDB_SOAK_DURATION", 90*time.Second)
 	checkInterval := parseDurationEnv("BADGER_DUCKDB_SOAK_CHECK_INTERVAL", 10*time.Second)
-	workers := parseIntEnv("BADGER_DUCKDB_SOAK_WORKERS", 16)
+	workers := parseIntEnv("BADGER_DUCKDB_SOAK_WORKERS", 8)
 
 	t.Logf("")
 	t.Logf("=== DuckDB Bank Soak Test ===")

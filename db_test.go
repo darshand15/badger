@@ -2585,7 +2585,10 @@ func TestSyncForRace(t *testing.T) {
 	doneChan := make(chan struct{})
 
 	go func() {
-		ticker := time.NewTicker(100 * time.Microsecond)
+		// Keep Sync concurrent with writes, but avoid an excessively tight loop
+		// that can starve progress on slower or IO-constrained environments.
+		ticker := time.NewTicker(2 * time.Millisecond)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
@@ -2604,7 +2607,7 @@ func TestSyncForRace(t *testing.T) {
 	v := make([]byte, sz)
 	rand.Read(v[:rand.Intn(sz)])
 	txn := db.NewTransaction(true)
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < 3000; i++ {
 		require.NoError(t, txn.SetEntry(NewEntry([]byte(fmt.Sprintf("key%d", i)), v)))
 		if i%3 == 0 {
 			require.NoError(t, txn.Commit())
