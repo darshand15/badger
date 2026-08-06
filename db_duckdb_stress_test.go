@@ -588,6 +588,15 @@ func TestDuckDBSaturationProbe(t *testing.T) {
 		seedStart := time.Now()
 		seedSmallBankN(t, db, oracle, cardinality)
 		seedElapsed = time.Since(seedStart)
+		if db.duckDBStorage != nil {
+			flushStart := time.Now()
+			if err := db.duckDBStorage.FlushAllPending(); err != nil {
+				t.Fatalf("flush all pending after seed: %v", err)
+			}
+			if phaseDiag {
+				t.Logf("  [diag] post-seed flush elapsed=%v", time.Since(flushStart).Round(time.Millisecond))
+			}
+		}
 
 		if phaseDiag {
 			t.Logf("  [diag] seed phase: elapsed=%v (%.0f customers/sec)",

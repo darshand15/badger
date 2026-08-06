@@ -718,12 +718,10 @@ func runBalanceReadHeavy(
 			acctKey := make([]byte, 0, 32)
 			savKey := make([]byte, 0, 32)
 			prefetch := make([][]byte, 0, 3)
-			reqs := make([]duckReadBatchReq, 0, 3)
 			for atomic.LoadInt32(&stop) == 0 {
 				id := rng.Int63n(numCustomers)
 				chkKey = sbKeyInto(chkKey, id, "checking_bal")
 				prefetch = prefetch[:0]
-				reqs = reqs[:0]
 				if !checkingOnly {
 					acctKey = sbKeyInto(acctKey, id, "accounts_id")
 					savKey = sbKeyInto(savKey, id, "savings_bal")
@@ -739,21 +737,14 @@ func runBalanceReadHeavy(
 
 				ok := false
 				if db.duckDBStorage != nil && useFixedSnapshot {
-					if !checkingOnly {
-						reqs = append(reqs,
-							duckReadBatchReq{Key: acctKey, ReadTs: ts},
-							duckReadBatchReq{Key: savKey, ReadTs: ts},
-						)
-					}
-					reqs = append(reqs, duckReadBatchReq{Key: chkKey, ReadTs: ts})
-					results, err := db.duckDBStorage.ReadBatch(reqs)
-					if err == nil && len(results) == len(reqs) {
-						ok = true
-						for _, r := range results {
-							if !r.Found {
-								ok = false
-								break
-							}
+					vChk, _, errChk := db.duckDBStorage.Read(chkKey, ts)
+					if errChk == nil && vChk != nil {
+						if checkingOnly {
+							ok = true
+						} else {
+							vAcc, _, errAcc := db.duckDBStorage.Read(acctKey, ts)
+							vSav, _, errSav := db.duckDBStorage.Read(savKey, ts)
+							ok = errAcc == nil && errSav == nil && vAcc != nil && vSav != nil
 						}
 					}
 				} else {
