@@ -24,3 +24,6 @@ artifacts/
 DUCKDB 6.25 Report.pdf
 duckdb_weekly_report.pdf
 
+# Internal scratch/meeting archive (not for published repo)
+NOTES.md
+

@@ -24,6 +24,37 @@ run_cmd() {
   ) 2>&1 | tee "${logfile}"
 }
 
+verify_large_probe_mode_claims() {
+  local logfile="${OUT_DIR}/large_data_saturation.log"
+  if [[ ! -f "${logfile}" ]]; then
+    echo "large_data_saturation.log missing at ${logfile}" >&2
+    return 1
+  fi
+
+  local observed="unknown"
+  if grep -q 'keys=checking-only' "${logfile}"; then
+    observed="checking-only"
+  elif grep -q 'keys=full' "${logfile}"; then
+    observed="full"
+  elif grep -q 'SEED_METRIC .*key_mode=checking-only' "${logfile}"; then
+    observed="checking-only"
+  elif grep -q 'SEED_METRIC .*key_mode=full' "${logfile}"; then
+    observed="full"
+  fi
+
+  echo "observed_seed_key_mode_from_log=${observed}" >>"${OUT_DIR}/env.txt"
+
+  if [[ "${observed}" == "unknown" ]]; then
+    echo "Could not determine seed key mode from log; expected explicit keys=... line." >&2
+    return 1
+  fi
+
+  if [[ -n "${BADGER_DUCKDB_SEED_KEY_MODE:-}" && "${observed}" != "${BADGER_DUCKDB_SEED_KEY_MODE}" ]]; then
+    echo "Mode mismatch: env says BADGER_DUCKDB_SEED_KEY_MODE=${BADGER_DUCKDB_SEED_KEY_MODE}, log says ${observed}" >&2
+    return 1
+  fi
+}
+
 write_env() {
   {
     echo "run_id=${RUN_ID}"
@@ -39,7 +70,29 @@ write_env() {
     echo "BADGER_DUCKDB_PARTITION_FANOUT=${BADGER_DUCKDB_PARTITION_FANOUT:-}"
     echo "BADGER_DUCKDB_READ_POOL_SIZE=${BADGER_DUCKDB_READ_POOL_SIZE:-}"
     echo "BADGER_DUCKDB_ACCOUNT_VALUE_MODE=${BADGER_DUCKDB_ACCOUNT_VALUE_MODE:-}"
+    echo "BADGER_DUCKDB_READ_HEAVY_FIXED_SNAPSHOT=${BADGER_DUCKDB_READ_HEAVY_FIXED_SNAPSHOT:-}"
   } >"${OUT_DIR}/env.txt"
+}
+
+write_large_probe_effective_env() {
+  local card="$1"
+  local seed_batch="$2"
+  local seed_mode="$3"
+  local read_mode="$4"
+  local fixed_snapshot="$5"
+  local partition_fanout="$6"
+  local read_pool_size="$7"
+  local account_value_mode="$8"
+
+  export BADGER_DUCKDB_SATURATION_CARDINALITY="${card}"
+  export BADGER_DUCKDB_SEED_BATCH_SIZE="${seed_batch}"
+  export BADGER_DUCKDB_SEED_KEY_MODE="${seed_mode}"
+  export BADGER_DUCKDB_READ_HEAVY_KEY_MODE="${read_mode}"
+  export BADGER_DUCKDB_READ_HEAVY_FIXED_SNAPSHOT="${fixed_snapshot}"
+  export BADGER_DUCKDB_PARTITION_FANOUT="${partition_fanout}"
+  export BADGER_DUCKDB_READ_POOL_SIZE="${read_pool_size}"
+  export BADGER_DUCKDB_ACCOUNT_VALUE_MODE="${account_value_mode}"
+  write_env
 }
 
 gate() {
@@ -81,6 +134,7 @@ large_data_probe() {
   local seed_batch="${JULY30_DUCKDB_SEED_BATCH_SIZE:-}"
   local seed_mode="${JULY30_DUCKDB_SEED_KEY_MODE:-}"
   local read_mode="${JULY30_DUCKDB_READ_HEAVY_KEY_MODE:-}"
+  local fixed_snapshot="${JULY30_DUCKDB_READ_HEAVY_FIXED_SNAPSHOT:-${BADGER_DUCKDB_READ_HEAVY_FIXED_SNAPSHOT:-true}}"
   local partition_fanout="${JULY30_DUCKDB_PARTITION_FANOUT:-}"
   local read_pool_size="${JULY30_DUCKDB_READ_POOL_SIZE:-}"
   local account_value_mode="${JULY30_DUCKDB_ACCOUNT_VALUE_MODE:-}"
@@ -121,10 +175,14 @@ large_data_probe() {
     fi
   fi
 
+  write_large_probe_effective_env "${card}" "${seed_batch}" "${seed_mode}" "${read_mode}" "${fixed_snapshot}" "${partition_fanout}" "${read_pool_size}" "${account_value_mode}"
+  log "Large probe effective settings: card=${card} seed_batch=${seed_batch} seed_mode=${seed_mode} read_mode=${read_mode} fixed_snapshot=${fixed_snapshot} partition_fanout=${partition_fanout:-default} read_pool_size=${read_pool_size:-default} account_value_mode=${account_value_mode:-default}"
+
   run_cmd large_data_saturation env BADGER_DUCKDB_SATURATION_CARDINALITY="${card}" \
     BADGER_DUCKDB_SEED_BATCH_SIZE="${seed_batch}" \
     BADGER_DUCKDB_SEED_KEY_MODE="${seed_mode}" \
     BADGER_DUCKDB_READ_HEAVY_KEY_MODE="${read_mode}" \
+    BADGER_DUCKDB_READ_HEAVY_FIXED_SNAPSHOT="${fixed_snapshot}" \
     BADGER_DUCKDB_PARTITION_FANOUT="${partition_fanout}" \
     BADGER_DUCKDB_READ_POOL_SIZE="${read_pool_size}" \
     BADGER_DUCKDB_ACCOUNT_VALUE_MODE="${account_value_mode}" \
@@ -132,6 +190,8 @@ large_data_probe() {
     BADGER_DUCKDB_SATURATION_DURATION=3s \
     BADGER_DUCKDB_SATURATION_CSV="${OUT_DIR}/saturation_${card}.csv" \
     go test -v -tags duckdb -run '^TestDuckDBSaturationProbe$' -timeout "${probe_timeout}" .
+
+  verify_large_probe_mode_claims
 }
 
 write_matrix_stub() {
@@ -184,6 +244,7 @@ Environment:
   ARTIFACT_ROOT                         Output root (default artifacts/duckdb/july30)
   JULY30_DUCKDB_LARGE_CARDINALITY       Optional: 10000000 or 100000000
   JULY30_DUCKDB_LARGE_TIMEOUT           Optional: Go test timeout for large probe (default 21600s)
+  JULY30_DUCKDB_READ_HEAVY_FIXED_SNAPSHOT Optional: true/false (default true)
 
 Example:
   bash scripts/july30_duckdb_campaign.sh full

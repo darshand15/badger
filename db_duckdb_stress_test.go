@@ -572,6 +572,12 @@ func TestDuckDBSaturationProbe(t *testing.T) {
 	keyTimingSamples := parseIntEnv("BADGER_DUCKDB_SATURATION_KEYTIMING_SAMPLES", 200)
 	readMode := strings.ToLower(strings.TrimSpace(os.Getenv("BADGER_DUCKDB_READ_HEAVY_KEY_MODE")))
 	checkingOnly := readMode == "checking-only" || readMode == "checking"
+	seedMode := strings.ToLower(strings.TrimSpace(os.Getenv("BADGER_DUCKDB_SEED_KEY_MODE")))
+	seedCheckingOnly := seedMode == "checking-only" || seedMode == "checking"
+	seedKeyMode := "full"
+	if seedCheckingOnly {
+		seedKeyMode = "checking-only"
+	}
 
 	t.Logf("")
 	t.Logf("=== DuckDB Saturation Probe (cardinality=%d) ===", cardinality)
@@ -588,6 +594,20 @@ func TestDuckDBSaturationProbe(t *testing.T) {
 		seedStart := time.Now()
 		seedSmallBankN(t, db, oracle, cardinality)
 		seedElapsed = time.Since(seedStart)
+		seedRows := cardinality
+		if !seedCheckingOnly {
+			seedRows = 3 * cardinality
+		}
+		seedRowsPerSec := float64(seedRows) / seedElapsed.Seconds()
+		seedCustomersPerSec := float64(cardinality) / seedElapsed.Seconds()
+		t.Logf("  SEED_METRIC cardinality=%d key_mode=%s rows=%d elapsed=%v rows_per_sec=%.3f customers_per_sec=%.3f",
+			cardinality,
+			seedKeyMode,
+			seedRows,
+			seedElapsed.Round(time.Millisecond),
+			seedRowsPerSec,
+			seedCustomersPerSec,
+		)
 		if db.duckDBStorage != nil {
 			flushStart := time.Now()
 			if err := db.duckDBStorage.FlushAllPending(); err != nil {
@@ -600,7 +620,7 @@ func TestDuckDBSaturationProbe(t *testing.T) {
 
 		if phaseDiag {
 			t.Logf("  [diag] seed phase: elapsed=%v (%.0f customers/sec)",
-				seedElapsed.Round(time.Millisecond), float64(cardinality)/seedElapsed.Seconds())
+				seedElapsed.Round(time.Millisecond), seedCustomersPerSec)
 			readTs := sbTs(oracle)
 			sampleSaturationKeyReadTimings(t, db, readTs, cardinality, keyTimingSamples, !checkingOnly)
 		}
@@ -621,6 +641,10 @@ func TestDuckDBSaturationProbe(t *testing.T) {
 			runStart := time.Now()
 			result := runBalanceReadHeavy(t, "DuckDB", db, oracle, cardinality, dur, w)
 			runWall := time.Since(runStart)
+
+			if result.ops == 0 {
+				t.Fatalf("zero ops measured at workers=%d cardinality=%d; benchmark likely no-op or mode/key mismatch", w, cardinality)
+			}
 
 			var msAfter runtime.MemStats
 			runtime.ReadMemStats(&msAfter)
