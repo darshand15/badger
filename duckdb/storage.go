@@ -189,8 +189,8 @@ type partitionAppender struct {
 	// (Read/ReadBatch). It avoids []byte->string allocations on every read.
 	// Hash collisions are safe: false positives only cause an extra flush.
 	pendingKeyHash map[uint64]struct{}
-	// pendingKeys stores exact keys for prefix detection in ScanPrefix.
-	pendingKeys map[string]struct{} // keys with unflushed AppendRow'd rows
+	// pendingRows tracks how many rows are buffered in the Appender and not yet
+	// visible to SQL reads.
 
 	// readConns/readStmts are a small dedicated pool of connections used only
 	// for reads (Read, ReadBatch, ScanPrefix). A single DuckDB connection can
@@ -225,7 +225,7 @@ func (pa *partitionAppender) releaseRead(idx int) {
 	pa.readFree <- idx
 }
 
-// flush pushes buffered rows to DuckDB and clears pendingKeys.
+// flush pushes buffered rows to DuckDB and clears pending-key tracking.
 // Must be called with mu held for writing.
 func (pa *partitionAppender) flush() error {
 	if pa.pendingRows == 0 {
@@ -236,7 +236,6 @@ func (pa *partitionAppender) flush() error {
 	}
 	pa.pendingRows = 0
 	pa.pendingKeyHash = make(map[uint64]struct{})
-	pa.pendingKeys = make(map[string]struct{})
 	return nil
 }
 
@@ -244,7 +243,6 @@ func (pa *partitionAppender) flush() error {
 // Must be called with mu held for writing, immediately after a successful AppendRow.
 func (pa *partitionAppender) markPending(key []byte) {
 	pa.pendingKeyHash[z.MemHash(key)] = struct{}{}
-	pa.pendingKeys[string(key)] = struct{}{}
 }
 
 // hasPending reports whether key has any unflushed rows in the Appender buffer.
@@ -443,7 +441,6 @@ func (s *DuckDBStorage) initPersistentAppenders() error {
 			sqlConn:        sqlConn,
 			pendingKeyHash: make(map[uint64]struct{}),
 			appender:       appender,
-			pendingKeys:    make(map[string]struct{}),
 		}
 
 		// Open a small dedicated pool of read connections for this partition,
@@ -508,6 +505,14 @@ func (s *DuckDBStorage) FlushAllPending() error {
 		}
 	}
 	return nil
+}
+
+// PoolStats returns the underlying database/sql connection pool's stats for
+// the shared write/setup pool (s.db). It does not include the per-partition
+// dedicated read-connection pools (partitionAppender.readConns), which are
+// managed outside of database/sql and don't expose sql.DBStats.
+func (s *DuckDBStorage) PoolStats() sql.DBStats {
+	return s.db.Stats()
 }
 
 // SetFlushBatchSize overrides the per-partition row threshold that triggers an
@@ -953,38 +958,29 @@ func prefixUpperBound(prefix []byte) []byte {
 // test. ScanPrefix replaces that with ONE query per partition.
 //
 // Locking matches Read/ReadBatch: per partition, hold RLock through the query;
-// if any pending (unflushed) key matches the prefix, upgrade to the write lock,
-// flush, and query under the write lock. Callers needing snapshot consistency
-// across partitions must first pass the NewTransactionAt read barrier
-// (duckDBTracker.waitUntil) with the same readTs, exactly as for Read.
+// if there are any pending (unflushed) rows in that partition, upgrade to the
+// write lock, flush, and query under the write lock. This intentionally trades
+// a slightly coarser flush decision for lower write-path overhead by avoiding
+// per-write key-string bookkeeping solely for prefix matching.
+//
+// Callers needing snapshot consistency across partitions must first pass the
+// NewTransactionAt read barrier (duckDBTracker.waitUntil) with the same readTs,
+// exactly as for Read.
 func (s *DuckDBStorage) ScanPrefix(prefix []byte, readTs CustomTs) ([]ReadBatchResult, error) {
 	ub := prefixUpperBound(prefix)
-	prefixStr := string(prefix)
 	var out []ReadBatchResult
 
 	for pid := 0; pid < s.numParts; pid++ {
 		pa := s.partAppenders[pid]
 
 		pa.mu.RLock()
-		needFlush := false
-		for k := range pa.pendingKeys {
-			if strings.HasPrefix(k, prefixStr) {
-				needFlush = true
-				break
-			}
-		}
+		needFlush := pa.pendingRows > 0
 
 		if needFlush {
 			// Upgrade to write lock (no atomic upgrade in Go).
 			pa.mu.RUnlock()
 			pa.mu.Lock()
-			still := false
-			for k := range pa.pendingKeys {
-				if strings.HasPrefix(k, prefixStr) {
-					still = true
-					break
-				}
-			}
+			still := pa.pendingRows > 0
 			if still {
 				if err := pa.flush(); err != nil {
 					pa.mu.Unlock()
@@ -1242,7 +1238,6 @@ func (s *DuckDBStorage) Close() error {
 		pa.readConns = nil
 		pa.pendingRows = 0
 		pa.pendingKeyHash = nil
-		pa.pendingKeys = nil
 		pa.mu.Unlock()
 	}
 	if err := s.db.Close(); err != nil {

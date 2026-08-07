@@ -376,7 +376,7 @@ standard Badger MVCC path.
 ## Test Matrix (with and without locks)
 
 | Test suite | Build tag | Locking model | Purpose |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `TestLatestWins`, `TestWritersAreNonBlocking` | *(none)* | Badger OCC (lock-free writes) | Baseline MVCC correctness |
 | `TestTimestampScenarios` | *(none)* | Badger OCC | Snapshot-read correctness |
 | `TestDuckDBTimestampScenarios` | `duckdb` | DuckDB + pending-write buffer | Same scenarios via DuckDB path |
@@ -415,7 +415,7 @@ standard Badger MVCC path.
 ## File Map
 
 | File | Description |
-|------|-------------|
+| ------ | ------------- |
 | `db_duckdb_serial_correctness_test.go` | **Serial correctness tests** (Darshan) |
 | `db_duckdb_stress_test.go` | **Stress + epoch batching stress tests** (Ashley) |
 | `db_duckdb_comparison_test.go` | **Badger vs DuckDB comparison** (All) |

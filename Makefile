@@ -8,7 +8,7 @@ HAS_JEMALLOC = $(shell test -f /usr/local/lib/libjemalloc.a && echo "jemalloc")
 JEMALLOC_URL = "https://github.com/jemalloc/jemalloc/releases/download/5.2.1/jemalloc-5.2.1.tar.bz2"
 
 
-.PHONY: all badger test jemalloc dependency duckdb-smoke duckdb-compare duckdb-compare-extended duckdb-epoch duckdb-profile duckdb-microbench duckdb-lockfree-compare duckdb-ashley duckdb-ashley-readpool-sweep duckdb-ashley-flushbatch-sweep duckdb-report-latest duckdb-full
+.PHONY: all badger test jemalloc dependency duckdb-smoke duckdb-compare duckdb-compare-extended duckdb-epoch duckdb-profile duckdb-microbench duckdb-lockfree-compare duckdb-ashley duckdb-ashley-readpool-sweep duckdb-ashley-flushbatch-sweep duckdb-report-latest duckdb-full july30-duckdb-gate july30-duckdb-smallbank july30-duckdb-bank-compare july30-duckdb-readheavy july30-duckdb-summary july30-duckdb-full july30-duckdb-overnight-100m july30-duckdb-overnight-40m
 
 badger: jemalloc
 	@echo "Compiling Badger binary..."
@@ -84,3 +84,27 @@ duckdb-report-latest:
 
 duckdb-full:
 	@bash ./scripts/duckdb_experiments.sh full
+
+july30-duckdb-gate:
+	@bash ./scripts/july30_duckdb_campaign.sh gate
+
+july30-duckdb-smallbank:
+	@bash ./scripts/july30_duckdb_campaign.sh smallbank
+
+july30-duckdb-bank-compare:
+	@bash ./scripts/july30_duckdb_campaign.sh bank-compare
+
+july30-duckdb-readheavy:
+	@bash ./scripts/july30_duckdb_campaign.sh readheavy-matrix
+
+july30-duckdb-summary:
+	@bash ./scripts/july30_collect_summary.sh
+
+july30-duckdb-full:
+	@bash ./scripts/july30_duckdb_campaign.sh full
+
+july30-duckdb-overnight-100m:
+	@bash ./scripts/july30_overnight_100m.sh
+
+july30-duckdb-overnight-40m:
+	@JULY30_DUCKDB_LARGE_CARDINALITY=40000000 bash ./scripts/july30_overnight_100m.sh

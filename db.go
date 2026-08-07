@@ -8,6 +8,7 @@ package badger
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/binary"
 	stderrors "errors"
 	"expvar"
@@ -107,6 +108,14 @@ type duckDBIface interface {
 	// This is used by durability-sensitive harnesses that need a stronger
 	// persistence signal than buffered appender writes.
 	FlushAllPending() error
+
+	// PoolStats reports the underlying database/sql connection pool's stats
+	// (open/in-use/idle connections, wait count and total wait duration).
+	// Used by saturation/concurrency-probing harnesses to tell a CPU-bound
+	// throughput plateau apart from one caused by connection-pool exhaustion
+	// (visible as a growing WaitCount), which points at
+	// BADGER_DUCKDB_READ_POOL_SIZE as the fix instead of a hardware limit.
+	PoolStats() sql.DBStats
 
 	// ReadBatch retrieves the latest value for multiple keys in a single SQL query
 	// per partition. More efficient than calling Read() N times when a transaction

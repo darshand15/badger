@@ -8,6 +8,7 @@
 package badger
 
 import (
+	"database/sql"
 	"fmt"
 	"math"
 	"sync"
@@ -155,6 +156,10 @@ func (w *duckDBStorageWrapper) DirectFlush(entries []duckEntry) error {
 
 func (w *duckDBStorageWrapper) FlushAllPending() error {
 	return w.s.FlushAllPending()
+}
+
+func (w *duckDBStorageWrapper) PoolStats() sql.DBStats {
+	return w.s.PoolStats()
 }
 
 func (w *duckDBStorageWrapper) ScanPrefix(prefix []byte, readTs types.CustomTs) ([]duckReadBatchResult, error) {
