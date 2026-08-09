@@ -88,19 +88,15 @@ type DarshanEntry struct {
 // immediately, which is correct for the infrequent, large-batch memtable path.
 const defaultFlushBatchSize int64 = 1
 
-// directFlushBatchSize is the per-partition row threshold for the
-// per-commit DirectAppendEntries path.  Each transaction commit appends
-// its rows to the Appender buffer; a CGo Appender.Flush() is issued only
-// once this many rows have accumulated, amortising the fixed CGo cost across
-// many commits.
+// defaultDirectFlushBatchSize is the per-partition row threshold for the
+// DirectAppendEntries hot path. Unlike the memtable path, direct appends can
+// run for long periods (e.g. 100M seed) without point reads touching most
+// keys, so buffering unbounded rows in one Appender can make the eventual
+// FlushAllPending call extremely expensive.
 //
-// Correctness note: the race between logical commit registration and physical
-// DuckDB write is handled at the DB level by holding writeChLock for the
-// full oracle→DirectFlush window, and by having NewTransactionAt (DuckDB
-// mode) acquire+release writeChLock as a read barrier before any reads.
-// The pendingKeys mechanism then ensures keys buffered in the Appender are
-// flushed before the SQL query that needs them.
-const directFlushBatchSize int64 = 512
+// We keep the threshold large enough to amortize CGo flush overhead, but
+// bounded so long ingest phases periodically drain appender state.
+const defaultDirectFlushBatchSize int64 = 50_000
 
 // defaultReadPoolSize is the default number of dedicated read connections kept per
 // partition (see partitionAppender.readConns). A single DuckDB connection
@@ -156,6 +152,27 @@ func flushBatchSizeFromEnv() int64 {
 	}
 	if n > 1_000_000 {
 		return 1_000_000
+	}
+	return n
+}
+
+// directFlushBatchSizeFromEnv reads BADGER_DUCKDB_DIRECT_FLUSH_BATCH_SIZE and
+// clamps invalid values. This controls periodic flushing on the direct-append
+// commit path.
+func directFlushBatchSizeFromEnv() int64 {
+	raw := strings.TrimSpace(os.Getenv("BADGER_DUCKDB_DIRECT_FLUSH_BATCH_SIZE"))
+	if raw == "" {
+		return defaultDirectFlushBatchSize
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return defaultDirectFlushBatchSize
+	}
+	if n < 1 {
+		return 1
+	}
+	if n > 10_000_000 {
+		return 10_000_000
 	}
 	return n
 }
@@ -267,6 +284,9 @@ type DuckDBStorage struct {
 	// flushBatchSize is the per-partition row count that triggers an automatic
 	// Appender flush.  Configurable; defaults to defaultFlushBatchSize.
 	flushBatchSize int64
+	// directFlushBatchSize is the per-partition row threshold for periodic
+	// flushing on the direct append path.
+	directFlushBatchSize int64
 	// readPoolSize controls how many dedicated read connections are created per
 	// partition. Tunable via BADGER_DUCKDB_READ_POOL_SIZE.
 	readPoolSize int
@@ -305,10 +325,16 @@ func NewDuckDBStorageWithOptions(dbPath string, numPartitions int, numVersionsTo
 	}
 	readPoolSize := readPoolSizeFromEnv()
 	flushBatchSize := flushBatchSizeFromEnv()
+	directFlushBatchSize := directFlushBatchSizeFromEnv()
 
 	db, err := sql.Open("duckdb", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open DuckDB: %w", err)
+	}
+
+	if err := applyDuckDBRuntimePragmas(db, context.Background()); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to apply duckdb runtime pragmas: %w", err)
 	}
 
 	// Keep enough room for one write conn + read pool per partition plus some
@@ -322,6 +348,7 @@ func NewDuckDBStorageWithOptions(dbPath string, numPartitions int, numVersionsTo
 		partCalc:          newPartitionCalculator(numPartitions),
 		numParts:          numPartitions,
 		flushBatchSize:    flushBatchSize,
+		directFlushBatchSize: directFlushBatchSize,
 		readPoolSize:      readPoolSize,
 		numVersionsToKeep: numVersionsToKeep,
 	}
@@ -342,6 +369,31 @@ func NewDuckDBStorageWithOptions(dbPath string, numPartitions int, numVersionsTo
 	}
 
 	return s, nil
+}
+
+// applyDuckDBRuntimePragmas applies optional runtime tuning knobs controlled by
+// environment variables.
+//
+// Supported env vars:
+//   - BADGER_DUCKDB_MEMORY_LIMIT      e.g. 14GB, 12000MB
+//   - BADGER_DUCKDB_TEMP_DIRECTORY    absolute/relative path for spill files
+func applyDuckDBRuntimePragmas(db *sql.DB, ctx context.Context) error {
+	if db == nil {
+		return nil
+	}
+	if memLimit := strings.TrimSpace(os.Getenv("BADGER_DUCKDB_MEMORY_LIMIT")); memLimit != "" {
+		q := fmt.Sprintf("PRAGMA memory_limit='%s'", strings.ReplaceAll(memLimit, "'", "''"))
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("set memory_limit=%q: %w", memLimit, err)
+		}
+	}
+	if tempDir := strings.TrimSpace(os.Getenv("BADGER_DUCKDB_TEMP_DIRECTORY")); tempDir != "" {
+		q := fmt.Sprintf("PRAGMA temp_directory='%s'", strings.ReplaceAll(tempDir, "'", "''"))
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("set temp_directory=%q: %w", tempDir, err)
+		}
+	}
+	return nil
 }
 
 // verifyOrRecordFanOut records numPartitions in a one-row metadata table the
@@ -570,18 +622,14 @@ func (s *DuckDBStorage) DirectAppendEntries(entries []*DarshanEntry) error {
 }
 
 // appendPartitionDirect appends rows to the persistent Appender for the given
-// partition.  No automatic flush is triggered here — all rows stay in the
-// Appender (tracked by pendingKeys) until a Read() flushes them on demand.
+// partition and performs periodic flushes once the partition-local pending row
+// count reaches s.directFlushBatchSize.
 //
-// Why no auto-flush: DirectAppendEntries fans out one goroutine per partition.
-// If partition P1 auto-flushed mid-fan-out, its rows would become visible in
-// DuckDB SQL while partition P2's rows for the same transaction are still
-// buffered.  A concurrent reader could then observe from=new (P1) and to=old
-// (P2) for the same committed transaction — an inconsistent snapshot that
-// bypasses conflict detection when commitTs ≤ readTs.  Keeping all rows in
-// pendingKeys until a read explicitly flushes them preserves the invariant
-// that every key written by a transaction is equally visible or invisible to
-// any snapshot query.
+// Snapshot correctness is preserved by timestamp filtering + commit tracker:
+// rows are written with their commit timestamp, and NewTransactionAt waits for
+// all commits with ts <= readTs to complete before reads start. So making rows
+// physically visible earlier than FlushAllPending does not allow a snapshot to
+// observe future versions.
 func (s *DuckDBStorage) appendPartitionDirect(partition int, entries []*DarshanEntry) error {
 	pa := s.partAppenders[partition]
 	pa.mu.Lock()
@@ -600,6 +648,11 @@ func (s *DuckDBStorage) appendPartitionDirect(partition int, entries []*DarshanE
 		}
 		pa.markPending(e.Key)
 		pa.pendingRows++
+		if pa.pendingRows >= s.directFlushBatchSize {
+			if err := pa.flush(); err != nil {
+				return fmt.Errorf("partition %d: periodic direct flush: %w", partition, err)
+			}
+		}
 	}
 	return nil
 }
