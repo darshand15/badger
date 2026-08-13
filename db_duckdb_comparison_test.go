@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -606,6 +608,18 @@ func parsePositiveIntEnv(name string, def int) int {
 	return n
 }
 
+func parseDurationEnvCmp(name string, def time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
+}
+
 func parseInt64ListEnv(name string, defaults []int64) []int64 {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
@@ -674,6 +688,8 @@ func parseBoolEnv(name string, def bool) bool {
 type readHeavyResult struct {
 	backend string
 	ops     float64
+	opsCount int64
+	elapsed  time.Duration
 	avg     time.Duration
 	p90     time.Duration
 }
@@ -776,11 +792,78 @@ func runBalanceReadHeavy(
 	elapsed := time.Since(start)
 
 	s := stats.summarize(txReadOnly)
+	total := totalOps.Load()
 	return readHeavyResult{
 		backend: backend,
-		ops:     float64(totalOps.Load()) / elapsed.Seconds(),
+		ops:     float64(total) / elapsed.Seconds(),
+		opsCount: total,
+		elapsed: elapsed,
 		avg:     s.avg,
 		p90:     s.p90,
+	}
+}
+
+func runBalanceReadHeavyMinOps(
+	t *testing.T,
+	backend string,
+	db *DB,
+	oracle *divytime.Oracle,
+	numCustomers int64,
+	chunkDur time.Duration,
+	maxDuration time.Duration,
+	workers int,
+	minOps int64,
+) readHeavyResult {
+	t.Helper()
+	if chunkDur <= 0 {
+		chunkDur = 2 * time.Second
+	}
+	if maxDuration < chunkDur {
+		maxDuration = chunkDur
+	}
+
+	var (
+		totalOps     int64
+		totalElapsed time.Duration
+		weightedAvg  float64
+		maxP90       time.Duration
+	)
+
+	for totalElapsed < maxDuration && totalOps < minOps {
+		roundDur := chunkDur
+		if remain := maxDuration - totalElapsed; roundDur > remain {
+			roundDur = remain
+		}
+		r := runBalanceReadHeavy(t, backend, db, oracle, numCustomers, roundDur, workers)
+		totalOps += r.opsCount
+		totalElapsed += r.elapsed
+		if r.opsCount > 0 {
+			weightedAvg += float64(r.avg.Nanoseconds()) * float64(r.opsCount)
+		}
+		if r.p90 > maxP90 {
+			maxP90 = r.p90
+		}
+		if r.opsCount == 0 && roundDur == (maxDuration-totalElapsed+r.elapsed) {
+			break
+		}
+	}
+
+	avg := time.Duration(0)
+	if totalOps > 0 {
+		avg = time.Duration(weightedAvg / float64(totalOps))
+	}
+	opsPerSec := 0.0
+	if totalElapsed > 0 {
+		opsPerSec = float64(totalOps) / totalElapsed.Seconds()
+	}
+
+	return readHeavyResult{
+		backend: backend,
+		ops:     opsPerSec,
+		opsCount: totalOps,
+		elapsed: totalElapsed,
+		avg:     avg,
+		p90:     maxP90,
 	}
 }
 
@@ -788,64 +871,123 @@ func runBalanceReadHeavy(
 // data by sweeping customer-cardinality for a read-heavy Balance workload.
 func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
 	const (
-		cmpDuration = 2 * time.Second
-		cmpWorkers  = 8
+		cmpWorkers = 8
 	)
+	cmpDuration := parseDurationEnvCmp("BADGER_DUCKDB_READHEAVY_DURATION", 2*time.Second)
+	maxDuration := parseDurationEnvCmp("BADGER_DUCKDB_READHEAVY_MAX_DURATION", 10*time.Minute)
+	minOps := int64(parsePositiveIntEnv("BADGER_DUCKDB_READHEAVY_MIN_OPS", 30))
+	postSeedFlattenWorkers := parsePositiveIntEnv("BADGER_DUCKDB_POST_SEED_FLATTEN_WORKERS", 0)
 
 	cardinalities := parseInt64ListEnv("BADGER_DUCKDB_SWEEP_CARDINALITIES", []int64{1_000, 5_000, 20_000, 100_000})
+	backendMode := strings.ToLower(strings.TrimSpace(os.Getenv("BADGER_DUCKDB_SWEEP_BACKEND")))
+	if backendMode == "" {
+		backendMode = "both"
+	}
+	if backendMode != "both" && backendMode != "badger" && backendMode != "duckdb" {
+		t.Fatalf("invalid BADGER_DUCKDB_SWEEP_BACKEND=%q (expected both|badger|duckdb)", backendMode)
+	}
 	type csvRow struct {
-		customers int64
-		badgerOps float64
-		duckdbOps float64
-		ratio     float64
-		badgerAvg time.Duration
-		badgerP90 time.Duration
-		duckdbAvg time.Duration
-		duckdbP90 time.Duration
+		customers      int64
+		badgerOps      float64
+		duckdbOps      float64
+		badgerOpsCount int64
+		duckdbOpsCount int64
+		badgerElapsed  time.Duration
+		duckdbElapsed  time.Duration
+		ratio          float64
+		badgerAvg      time.Duration
+		badgerP90      time.Duration
+		duckdbAvg      time.Duration
+		duckdbP90      time.Duration
 	}
 	var csvRows []csvRow
 
 	t.Logf("")
 	t.Logf("=== Read-Heavy Balance Cardinality Sweep (Badger vs DuckDB) ===")
+	t.Logf("  config: chunk_duration=%v max_duration=%v min_ops_per_backend=%d workers=%d backend_mode=%s post_seed_flatten_workers=%d", cmpDuration, maxDuration, minOps, cmpWorkers, backendMode, postSeedFlattenWorkers)
 	t.Logf("  %-10s  %-14s  %-14s  %-18s", "Customers", "Badger Ops/s", "DuckDB Ops/s", "DuckDB/Badger")
 	t.Logf("  %s", "----------------------------------------------------------------")
 
 	firstDuckdbWin := int64(-1)
 
 	for _, n := range cardinalities {
-		var badger readHeavyResult
-		withDB(t, true, func(db *DB) {
-			oracle := divytime.NewOracle(1, 0)
-			seedSmallBankN(t, db, oracle, n)
-			badger = runBalanceReadHeavy(t, "Badger", db, oracle, n, cmpDuration, cmpWorkers)
-		})
+		badger := readHeavyResult{backend: "Badger"}
+		if backendMode == "both" || backendMode == "badger" {
+			withDB(t, true, func(db *DB) {
+				oracle := divytime.NewOracle(1, 0)
+				seedSmallBankN(t, db, oracle, n)
+				if postSeedFlattenWorkers > 0 {
+					startFlatten := time.Now()
+					if err := db.Flatten(postSeedFlattenWorkers); err != nil {
+						t.Fatalf("post-seed flatten (workers=%d): %v", postSeedFlattenWorkers, err)
+					}
+					t.Logf("  post-seed flatten complete for badger customers=%d workers=%d elapsed=%v", n, postSeedFlattenWorkers, time.Since(startFlatten).Round(time.Millisecond))
+				}
+				badger = runBalanceReadHeavyMinOps(t, "Badger", db, oracle, n, cmpDuration, maxDuration, cmpWorkers, minOps)
+			})
+		}
+		runtime.GC()
+		debug.FreeOSMemory()
 
-		var duckdb readHeavyResult
-		withDuckDB(t, true, func(db *DB) {
-			oracle := divytime.NewOracle(1, 0)
-			seedSmallBankN(t, db, oracle, n)
-			duckdb = runBalanceReadHeavy(t, "DuckDB", db, oracle, n, cmpDuration, cmpWorkers)
-		})
+		duckdb := readHeavyResult{backend: "DuckDB"}
+		if backendMode == "both" || backendMode == "duckdb" {
+			withDuckDB(t, true, func(db *DB) {
+				oracle := divytime.NewOracle(1, 0)
+				seedSmallBankN(t, db, oracle, n)
+				duckdb = runBalanceReadHeavyMinOps(t, "DuckDB", db, oracle, n, cmpDuration, maxDuration, cmpWorkers, minOps)
+			})
+		}
+		runtime.GC()
+		debug.FreeOSMemory()
+
+		if (backendMode == "both" || backendMode == "badger") && badger.opsCount < minOps {
+			t.Fatalf("insufficient samples for badger at customers=%d: ops=%d min_ops=%d elapsed=%v. Increase BADGER_DUCKDB_READHEAVY_MAX_DURATION or reduce cardinality.",
+				n,
+				badger.opsCount,
+				minOps,
+				badger.elapsed.Round(time.Millisecond),
+			)
+		}
+		if (backendMode == "both" || backendMode == "duckdb") && duckdb.opsCount < minOps {
+			t.Fatalf("insufficient samples at customers=%d: badger_ops=%d duckdb_ops=%d min_ops=%d (badger_elapsed=%v duckdb_elapsed=%v). Increase BADGER_DUCKDB_READHEAVY_MAX_DURATION or reduce cardinality.",
+				n,
+				badger.opsCount,
+				duckdb.opsCount,
+				minOps,
+				badger.elapsed.Round(time.Millisecond),
+				duckdb.elapsed.Round(time.Millisecond),
+			)
+		}
 
 		ratio := 0.0
-		if badger.ops > 0 {
+		if backendMode == "both" && badger.ops > 0 {
 			ratio = duckdb.ops / badger.ops
 		}
-		if firstDuckdbWin < 0 && ratio >= 1.0 {
+		if backendMode == "both" && firstDuckdbWin < 0 && ratio >= 1.0 {
 			firstDuckdbWin = n
 		}
 		csvRows = append(csvRows, csvRow{
-			customers: n,
-			badgerOps: badger.ops,
-			duckdbOps: duckdb.ops,
-			ratio:     ratio,
-			badgerAvg: badger.avg,
-			badgerP90: badger.p90,
-			duckdbAvg: duckdb.avg,
-			duckdbP90: duckdb.p90,
+			customers:      n,
+			badgerOps:      badger.ops,
+			duckdbOps:      duckdb.ops,
+			badgerOpsCount: badger.opsCount,
+			duckdbOpsCount: duckdb.opsCount,
+			badgerElapsed:  badger.elapsed,
+			duckdbElapsed:  duckdb.elapsed,
+			ratio:          ratio,
+			badgerAvg:      badger.avg,
+			badgerP90:      badger.p90,
+			duckdbAvg:      duckdb.avg,
+			duckdbP90:      duckdb.p90,
 		})
 
 		t.Logf("  %-10d  %-14.1f  %-14.1f  %-18.2fx", n, badger.ops, duckdb.ops, ratio)
+		t.Logf("    sample_ops: badger=%d duckdb=%d (badger_elapsed=%v duckdb_elapsed=%v)",
+			badger.opsCount,
+			duckdb.opsCount,
+			badger.elapsed.Round(time.Millisecond),
+			duckdb.elapsed.Round(time.Millisecond),
+		)
 		t.Logf("    badger avg=%v p90=%v | duckdb avg=%v p90=%v",
 			badger.avg.Round(time.Microsecond),
 			badger.p90.Round(time.Microsecond),
@@ -854,20 +996,26 @@ func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
 		)
 	}
 
-	if firstDuckdbWin > 0 {
+	if backendMode == "both" && firstDuckdbWin > 0 {
 		t.Logf("  Crossover observed: DuckDB first wins at %d customers", firstDuckdbWin)
-	} else {
+	} else if backendMode == "both" {
 		t.Logf("  No crossover in this sweep: Badger remains ahead at tested cardinalities")
+	} else {
+		t.Logf("  Backend-isolated mode (%s): ratio/crossover intentionally not computed in-process", backendMode)
 	}
 
 	if outPath := os.Getenv("BADGER_DUCKDB_SWEEP_CSV"); outPath != "" {
-		csv := "customers,badger_ops_per_sec,duckdb_ops_per_sec,duckdb_over_badger,badger_avg_ns,badger_p90_ns,duckdb_avg_ns,duckdb_p90_ns\n"
+		csv := "customers,badger_ops_per_sec,duckdb_ops_per_sec,duckdb_over_badger,badger_total_ops,duckdb_total_ops,badger_elapsed_ns,duckdb_elapsed_ns,badger_avg_ns,badger_p90_ns,duckdb_avg_ns,duckdb_p90_ns\n"
 		for _, r := range csvRows {
-			csv += fmt.Sprintf("%d,%.3f,%.3f,%.6f,%d,%d,%d,%d\n",
+			csv += fmt.Sprintf("%d,%.3f,%.3f,%.6f,%d,%d,%d,%d,%d,%d,%d,%d\n",
 				r.customers,
 				r.badgerOps,
 				r.duckdbOps,
 				r.ratio,
+				r.badgerOpsCount,
+				r.duckdbOpsCount,
+				r.badgerElapsed.Nanoseconds(),
+				r.duckdbElapsed.Nanoseconds(),
 				r.badgerAvg.Nanoseconds(),
 				r.badgerP90.Nanoseconds(),
 				r.duckdbAvg.Nanoseconds(),
@@ -878,6 +1026,36 @@ func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
 			t.Fatalf("write sweep csv: %v", err)
 		}
 		t.Logf("  Wrote sweep CSV: %s", outPath)
+	}
+
+	if outPath := os.Getenv("BADGER_DUCKDB_SWEEP_PARTIAL_CSV"); outPath != "" {
+		csv := "customers,backend,ops_per_sec,total_ops,elapsed_ns,avg_ns,p90_ns\n"
+		for _, r := range csvRows {
+			if backendMode == "both" || backendMode == "badger" {
+				csv += fmt.Sprintf("%d,badger,%.3f,%d,%d,%d,%d\n",
+					r.customers,
+					r.badgerOps,
+					r.badgerOpsCount,
+					r.badgerElapsed.Nanoseconds(),
+					r.badgerAvg.Nanoseconds(),
+					r.badgerP90.Nanoseconds(),
+				)
+			}
+			if backendMode == "both" || backendMode == "duckdb" {
+				csv += fmt.Sprintf("%d,duckdb,%.3f,%d,%d,%d,%d\n",
+					r.customers,
+					r.duckdbOps,
+					r.duckdbOpsCount,
+					r.duckdbElapsed.Nanoseconds(),
+					r.duckdbAvg.Nanoseconds(),
+					r.duckdbP90.Nanoseconds(),
+				)
+			}
+		}
+		if err := os.WriteFile(outPath, []byte(csv), 0644); err != nil {
+			t.Fatalf("write sweep partial csv: %v", err)
+		}
+		t.Logf("  Wrote sweep partial CSV: %s", outPath)
 	}
 }
 

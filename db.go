@@ -1294,35 +1294,77 @@ func (db *DB) handleMemTableFlushClassic(mt *memTable, dropPrefixes [][]byte) er
 	// collect the root entries into a fresh temporary skiplist sized exactly for
 	// them, then merge the two sorted streams when building the L0 table.
 	var itr y.Iterator
+	var tmpSls []*skl.Skiplist
+	defer func() {
+		for _, sl := range tmpSls {
+			sl.DecrRef()
+		}
+	}()
 	if !db.opt.UseDuckDB && db.opt.NumCompactors == 0 {
 		if head := db.root.Swap(nil); head != nil {
-			// First pass: compute total byte budget for the temp arena.
-			var arenaBytes int64
-			for n := head; n != nil; n = n.next {
-				for _, e := range n.kvs {
-					arenaBytes += int64(len(e.Key)) + int64(len(e.Value)) + int64(skl.MaxNodeSize)
+			const (
+				minArenaBytes      int64 = 4 << 10   // 4 KiB floor
+				targetArenaBytes   int64 = 256 << 20 // 256 MiB keeps temp memory bounded.
+				maxArenaBytes      int64 = int64(math.MaxUint32 - (1 << 20))
+				entryOverheadBytes int64 = int64(skl.MaxNodeSize + 64)
+			)
+			newTmpSl := func(sz int64) *skl.Skiplist {
+				if sz < minArenaBytes {
+					sz = minArenaBytes
 				}
+				if sz > maxArenaBytes {
+					sz = maxArenaBytes
+				}
+				sl := skl.NewSkiplist(sz)
+				tmpSls = append(tmpSls, sl)
+				return sl
 			}
-			const minArena = 4 << 10 // 4 KiB floor
-			if arenaBytes < minArena {
-				arenaBytes = minArena
-			}
-			tmpSl := skl.NewSkiplist(arenaBytes * 2) // 2× headroom for skl overhead
-			defer tmpSl.DecrRef()
+
+			curCap := targetArenaBytes
+			curSl := newTmpSl(curCap)
+			curUsed := int64(1) // Arena reserves offset=0.
+
 			for n := head; n != nil; n = n.next {
 				for _, e := range n.kvs {
-					tmpSl.Put(e.Key, y.ValueStruct{
+					need := int64(len(e.Key)) + int64(len(e.Value)) + entryOverheadBytes
+					if need < 256 {
+						need = 256
+					}
+
+					if need >= maxArenaBytes {
+						db.opt.Errorf("root spill entry too large for temp skiplist arena: key=%d value=%d need=%d", len(e.Key), len(e.Value), need)
+						continue
+					}
+
+					if need > curCap {
+						curCap = need * 2
+						if curCap > maxArenaBytes {
+							curCap = maxArenaBytes
+						}
+						curSl = newTmpSl(curCap)
+						curUsed = 1
+					} else if curUsed+need > curCap {
+						curCap = targetArenaBytes
+						curSl = newTmpSl(curCap)
+						curUsed = 1
+					}
+
+					curSl.Put(e.Key, y.ValueStruct{
 						Value:     e.Value,
 						Meta:      e.meta,
 						UserMeta:  e.UserMeta,
 						ExpiresAt: e.ExpiresAt,
 					})
+					curUsed += need
 				}
 			}
-			itr = table.NewMergeIterator([]y.Iterator{
-				mt.sl.NewUniIterator(false),
-				tmpSl.NewUniIterator(false),
-			}, false)
+
+			iters := make([]y.Iterator, 0, 1+len(tmpSls))
+			iters = append(iters, mt.sl.NewUniIterator(false))
+			for _, sl := range tmpSls {
+				iters = append(iters, sl.NewUniIterator(false))
+			}
+			itr = table.NewMergeIterator(iters, false)
 		}
 	}
 	if itr == nil {

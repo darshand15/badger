@@ -6,6 +6,7 @@
 package skl
 
 import (
+	"math"
 	"sync/atomic"
 	"unsafe"
 
@@ -41,6 +42,23 @@ func (s *Arena) size() int64 {
 	return int64(s.n.Load())
 }
 
+// alloc reserves l bytes and returns the starting offset.
+// It guards against uint32 wraparound, which can otherwise produce bogus
+// offsets and slice panics under very large allocations.
+func (s *Arena) alloc(l uint32) uint32 {
+	for {
+		cur := s.n.Load()
+		if cur > math.MaxUint32-l {
+			y.AssertTrue(false)
+		}
+		next := cur + l
+		y.AssertTrue(int(next) <= len(s.buf))
+		if s.n.CompareAndSwap(cur, next) {
+			return cur
+		}
+	}
+}
+
 // putNode allocates a node in the arena. The node is aligned on a pointer-sized
 // boundary. The arena offset of the node is returned.
 func (s *Arena) putNode(height int) uint32 {
@@ -50,12 +68,10 @@ func (s *Arena) putNode(height int) uint32 {
 
 	// Pad the allocation with enough bytes to ensure pointer alignment.
 	l := uint32(MaxNodeSize - unusedSize + nodeAlign)
-	n := s.n.Add(l)
-	// Use AssertTrue (no variadic) to avoid Go 1.25 heap-escape of ...interface{} args.
-	y.AssertTrue(int(n) <= len(s.buf))
+	base := s.alloc(l)
 
 	// Return the aligned offset.
-	m := (n - l + uint32(nodeAlign)) & ^uint32(nodeAlign)
+	m := (base + uint32(nodeAlign)) & ^uint32(nodeAlign)
 	return m
 }
 
@@ -65,24 +81,16 @@ func (s *Arena) putNode(height int) uint32 {
 // decoding will incur some overhead.
 func (s *Arena) putVal(v y.ValueStruct) uint32 {
 	l := v.EncodedSize()
-	n := s.n.Add(l)
-	// Use AssertTrue (no variadic) to avoid Go 1.25 heap-escape of ...interface{} args.
-	y.AssertTrue(int(n) <= len(s.buf))
-	m := n - l
+	m := s.alloc(l)
 	v.Encode(s.buf[m:])
 	return m
 }
 
 func (s *Arena) putKey(key []byte) uint32 {
 	l := uint32(len(key))
-	n := s.n.Add(l)
-	// Use AssertTrue (no variadic) to avoid Go 1.25 heap-escape of ...interface{} args.
-	y.AssertTrue(int(n) <= len(s.buf))
-	// m is the offset where you should write.
-	// n = new len - key len give you the offset at which you should write.
-	m := n - l
+	m := s.alloc(l)
 	// Copy to buffer from m:n
-	y.AssertTrue(len(key) == copy(s.buf[m:n], key))
+	y.AssertTrue(len(key) == copy(s.buf[m:m+l], key))
 	return m
 }
 
