@@ -5,7 +5,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/rand"
+	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -39,7 +41,18 @@ func withDB(tb testing.TB, managed bool, fn func(db *DB)) {
 	if err != nil {
 		tb.Fatalf("open DB: %v", err)
 	}
-	tb.Cleanup(func() { _ = db.Close() })
+	// For very large-cardinality sweep runs, the process can be killed during
+	// db.Close() cleanup after results are already written. This escape hatch
+	// allows isolating that cleanup-path behavior from measurement-path behavior.
+	skipClose := strings.EqualFold(strings.TrimSpace(os.Getenv("BADGER_DUCKDB_SKIP_DB_CLOSE")), "1") ||
+		strings.EqualFold(strings.TrimSpace(os.Getenv("BADGER_DUCKDB_SKIP_DB_CLOSE")), "true")
+	if skipClose {
+		tb.Cleanup(func() {
+			tb.Logf("Skipping db.Close due to BADGER_DUCKDB_SKIP_DB_CLOSE=%q", os.Getenv("BADGER_DUCKDB_SKIP_DB_CLOSE"))
+		})
+	} else {
+		tb.Cleanup(func() { _ = db.Close() })
+	}
 	fn(db)
 }
 func logLatest(t *testing.T, db *DB, key []byte) {
