@@ -686,12 +686,18 @@ func parseBoolEnv(name string, def bool) bool {
 }
 
 type readHeavyResult struct {
-	backend string
-	ops     float64
-	opsCount int64
-	elapsed  time.Duration
-	avg     time.Duration
-	p90     time.Duration
+	backend      string
+	ops          float64
+	opsCount     int64
+	elapsed      time.Duration
+	attempts     int64
+	failTotal    int64
+	failChecking int64
+	failAccount  int64
+	failSavings  int64
+	failOther    int64
+	avg          time.Duration
+	p90          time.Duration
 }
 
 func sbKeyInto(buf []byte, id int64, suffix string) []byte {
@@ -714,6 +720,11 @@ func runBalanceReadHeavy(
 	t.Helper()
 	stats := newBankStats()
 	var totalOps atomic.Int64
+	var totalAttempts atomic.Int64
+	var failTotal atomic.Int64
+	var failChecking atomic.Int64
+	var failAccount atomic.Int64
+	var failSavings atomic.Int64
 	var stop int32
 	var wg sync.WaitGroup
 	readMode := strings.ToLower(strings.TrimSpace(os.Getenv("BADGER_DUCKDB_READ_HEAVY_KEY_MODE")))
@@ -735,6 +746,7 @@ func runBalanceReadHeavy(
 			savKey := make([]byte, 0, 32)
 			prefetch := make([][]byte, 0, 3)
 			for atomic.LoadInt32(&stop) == 0 {
+				totalAttempts.Add(1)
 				id := rng.Int63n(numCustomers)
 				chkKey = sbKeyInto(chkKey, id, "checking_bal")
 				prefetch = prefetch[:0]
@@ -752,16 +764,26 @@ func runBalanceReadHeavy(
 				t0 := time.Now()
 
 				ok := false
+				failed := false
 				if db.duckDBStorage != nil && useFixedSnapshot {
 					vChk, _, errChk := db.duckDBStorage.Read(chkKey, ts)
-					if errChk == nil && vChk != nil {
-						if checkingOnly {
-							ok = true
-						} else {
-							vAcc, _, errAcc := db.duckDBStorage.Read(acctKey, ts)
-							vSav, _, errSav := db.duckDBStorage.Read(savKey, ts)
-							ok = errAcc == nil && errSav == nil && vAcc != nil && vSav != nil
+					if errChk != nil || vChk == nil {
+						failChecking.Add(1)
+						failed = true
+					} else if checkingOnly {
+						ok = true
+					} else {
+						vAcc, _, errAcc := db.duckDBStorage.Read(acctKey, ts)
+						vSav, _, errSav := db.duckDBStorage.Read(savKey, ts)
+						if errAcc != nil || vAcc == nil {
+							failAccount.Add(1)
+							failed = true
 						}
+						if errSav != nil || vSav == nil {
+							failSavings.Add(1)
+							failed = true
+						}
+						ok = !failed
 					}
 				} else {
 					txn := db.NewTransactionAt(ts, false)
@@ -774,13 +796,27 @@ func runBalanceReadHeavy(
 						_, errS = txn.Get(savKey)
 					}
 					txn.Discard()
-					ok = errA == nil && errS == nil && errC == nil
+					if errC != nil {
+						failChecking.Add(1)
+						failed = true
+					}
+					if !checkingOnly && errA != nil {
+						failAccount.Add(1)
+						failed = true
+					}
+					if !checkingOnly && errS != nil {
+						failSavings.Add(1)
+						failed = true
+					}
+					ok = !failed
 				}
 
 				if ok {
 					d := time.Since(t0)
 					stats.record(txReadOnly, d)
 					totalOps.Add(1)
+				} else {
+					failTotal.Add(1)
 				}
 			}
 		}(w)
@@ -793,13 +829,28 @@ func runBalanceReadHeavy(
 
 	s := stats.summarize(txReadOnly)
 	total := totalOps.Load()
+	attempts := totalAttempts.Load()
+	failed := failTotal.Load()
+	chkFailed := failChecking.Load()
+	accFailed := failAccount.Load()
+	savFailed := failSavings.Load()
+	otherFailed := attempts - total - failed
+	if otherFailed < 0 {
+		otherFailed = 0
+	}
 	return readHeavyResult{
-		backend: backend,
-		ops:     float64(total) / elapsed.Seconds(),
-		opsCount: total,
-		elapsed: elapsed,
-		avg:     s.avg,
-		p90:     s.p90,
+		backend:      backend,
+		ops:          float64(total) / elapsed.Seconds(),
+		opsCount:     total,
+		elapsed:      elapsed,
+		attempts:     attempts,
+		failTotal:    failed,
+		failChecking: chkFailed,
+		failAccount:  accFailed,
+		failSavings:  savFailed,
+		failOther:    otherFailed,
+		avg:          s.avg,
+		p90:          s.p90,
 	}
 }
 
@@ -823,10 +874,16 @@ func runBalanceReadHeavyMinOps(
 	}
 
 	var (
-		totalOps     int64
-		totalElapsed time.Duration
-		weightedAvg  float64
-		maxP90       time.Duration
+		totalOps          int64
+		totalElapsed      time.Duration
+		totalAttempts     int64
+		totalFail         int64
+		totalFailChecking int64
+		totalFailAccount  int64
+		totalFailSavings  int64
+		totalFailOther    int64
+		weightedAvg       float64
+		maxP90            time.Duration
 	)
 
 	for totalElapsed < maxDuration && totalOps < minOps {
@@ -837,6 +894,12 @@ func runBalanceReadHeavyMinOps(
 		r := runBalanceReadHeavy(t, backend, db, oracle, numCustomers, roundDur, workers)
 		totalOps += r.opsCount
 		totalElapsed += r.elapsed
+		totalAttempts += r.attempts
+		totalFail += r.failTotal
+		totalFailChecking += r.failChecking
+		totalFailAccount += r.failAccount
+		totalFailSavings += r.failSavings
+		totalFailOther += r.failOther
 		if r.opsCount > 0 {
 			weightedAvg += float64(r.avg.Nanoseconds()) * float64(r.opsCount)
 		}
@@ -858,12 +921,18 @@ func runBalanceReadHeavyMinOps(
 	}
 
 	return readHeavyResult{
-		backend: backend,
-		ops:     opsPerSec,
-		opsCount: totalOps,
-		elapsed: totalElapsed,
-		avg:     avg,
-		p90:     maxP90,
+		backend:      backend,
+		ops:          opsPerSec,
+		opsCount:     totalOps,
+		elapsed:      totalElapsed,
+		attempts:     totalAttempts,
+		failTotal:    totalFail,
+		failChecking: totalFailChecking,
+		failAccount:  totalFailAccount,
+		failSavings:  totalFailSavings,
+		failOther:    totalFailOther,
+		avg:          avg,
+		p90:          maxP90,
 	}
 }
 
@@ -887,18 +956,30 @@ func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
 		t.Fatalf("invalid BADGER_DUCKDB_SWEEP_BACKEND=%q (expected both|badger|duckdb)", backendMode)
 	}
 	type csvRow struct {
-		customers      int64
-		badgerOps      float64
-		duckdbOps      float64
-		badgerOpsCount int64
-		duckdbOpsCount int64
-		badgerElapsed  time.Duration
-		duckdbElapsed  time.Duration
-		ratio          float64
-		badgerAvg      time.Duration
-		badgerP90      time.Duration
-		duckdbAvg      time.Duration
-		duckdbP90      time.Duration
+		customers          int64
+		badgerOps          float64
+		duckdbOps          float64
+		badgerOpsCount     int64
+		duckdbOpsCount     int64
+		badgerElapsed      time.Duration
+		duckdbElapsed      time.Duration
+		badgerAttempts     int64
+		duckdbAttempts     int64
+		badgerFailTotal    int64
+		duckdbFailTotal    int64
+		badgerFailChecking int64
+		duckdbFailChecking int64
+		badgerFailAccount  int64
+		duckdbFailAccount  int64
+		badgerFailSavings  int64
+		duckdbFailSavings  int64
+		badgerFailOther    int64
+		duckdbFailOther    int64
+		ratio              float64
+		badgerAvg          time.Duration
+		badgerP90          time.Duration
+		duckdbAvg          time.Duration
+		duckdbP90          time.Duration
 	}
 	var csvRows []csvRow
 
@@ -967,18 +1048,30 @@ func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
 			firstDuckdbWin = n
 		}
 		csvRows = append(csvRows, csvRow{
-			customers:      n,
-			badgerOps:      badger.ops,
-			duckdbOps:      duckdb.ops,
-			badgerOpsCount: badger.opsCount,
-			duckdbOpsCount: duckdb.opsCount,
-			badgerElapsed:  badger.elapsed,
-			duckdbElapsed:  duckdb.elapsed,
-			ratio:          ratio,
-			badgerAvg:      badger.avg,
-			badgerP90:      badger.p90,
-			duckdbAvg:      duckdb.avg,
-			duckdbP90:      duckdb.p90,
+			customers:          n,
+			badgerOps:          badger.ops,
+			duckdbOps:          duckdb.ops,
+			badgerOpsCount:     badger.opsCount,
+			duckdbOpsCount:     duckdb.opsCount,
+			badgerElapsed:      badger.elapsed,
+			duckdbElapsed:      duckdb.elapsed,
+			badgerAttempts:     badger.attempts,
+			duckdbAttempts:     duckdb.attempts,
+			badgerFailTotal:    badger.failTotal,
+			duckdbFailTotal:    duckdb.failTotal,
+			badgerFailChecking: badger.failChecking,
+			duckdbFailChecking: duckdb.failChecking,
+			badgerFailAccount:  badger.failAccount,
+			duckdbFailAccount:  duckdb.failAccount,
+			badgerFailSavings:  badger.failSavings,
+			duckdbFailSavings:  duckdb.failSavings,
+			badgerFailOther:    badger.failOther,
+			duckdbFailOther:    duckdb.failOther,
+			ratio:              ratio,
+			badgerAvg:          badger.avg,
+			badgerP90:          badger.p90,
+			duckdbAvg:          duckdb.avg,
+			duckdbP90:          duckdb.p90,
 		})
 
 		t.Logf("  %-10d  %-14.1f  %-14.1f  %-18.2fx", n, badger.ops, duckdb.ops, ratio)
@@ -987,6 +1080,20 @@ func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
 			duckdb.opsCount,
 			badger.elapsed.Round(time.Millisecond),
 			duckdb.elapsed.Round(time.Millisecond),
+		)
+		t.Logf("    txn_failures: badger total=%d checking=%d account=%d savings=%d other=%d (attempts=%d) | duckdb total=%d checking=%d account=%d savings=%d other=%d (attempts=%d)",
+			badger.failTotal,
+			badger.failChecking,
+			badger.failAccount,
+			badger.failSavings,
+			badger.failOther,
+			badger.attempts,
+			duckdb.failTotal,
+			duckdb.failChecking,
+			duckdb.failAccount,
+			duckdb.failSavings,
+			duckdb.failOther,
+			duckdb.attempts,
 		)
 		t.Logf("    badger avg=%v p90=%v | duckdb avg=%v p90=%v",
 			badger.avg.Round(time.Microsecond),
@@ -1005,15 +1112,27 @@ func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
 	}
 
 	if outPath := os.Getenv("BADGER_DUCKDB_SWEEP_CSV"); outPath != "" {
-		csv := "customers,badger_ops_per_sec,duckdb_ops_per_sec,duckdb_over_badger,badger_total_ops,duckdb_total_ops,badger_elapsed_ns,duckdb_elapsed_ns,badger_avg_ns,badger_p90_ns,duckdb_avg_ns,duckdb_p90_ns\n"
+		csv := "customers,badger_ops_per_sec,duckdb_ops_per_sec,duckdb_over_badger,badger_total_ops,duckdb_total_ops,badger_attempts,duckdb_attempts,badger_fail_total,duckdb_fail_total,badger_fail_checking,duckdb_fail_checking,badger_fail_account,duckdb_fail_account,badger_fail_savings,duckdb_fail_savings,badger_fail_other,duckdb_fail_other,badger_elapsed_ns,duckdb_elapsed_ns,badger_avg_ns,badger_p90_ns,duckdb_avg_ns,duckdb_p90_ns\n"
 		for _, r := range csvRows {
-			csv += fmt.Sprintf("%d,%.3f,%.3f,%.6f,%d,%d,%d,%d,%d,%d,%d,%d\n",
+			csv += fmt.Sprintf("%d,%.3f,%.3f,%.6f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
 				r.customers,
 				r.badgerOps,
 				r.duckdbOps,
 				r.ratio,
 				r.badgerOpsCount,
 				r.duckdbOpsCount,
+				r.badgerAttempts,
+				r.duckdbAttempts,
+				r.badgerFailTotal,
+				r.duckdbFailTotal,
+				r.badgerFailChecking,
+				r.duckdbFailChecking,
+				r.badgerFailAccount,
+				r.duckdbFailAccount,
+				r.badgerFailSavings,
+				r.duckdbFailSavings,
+				r.badgerFailOther,
+				r.duckdbFailOther,
 				r.badgerElapsed.Nanoseconds(),
 				r.duckdbElapsed.Nanoseconds(),
 				r.badgerAvg.Nanoseconds(),
@@ -1029,23 +1148,35 @@ func TestReadHeavyBalanceCardinalitySweepBadgerVsDuckDB(t *testing.T) {
 	}
 
 	if outPath := os.Getenv("BADGER_DUCKDB_SWEEP_PARTIAL_CSV"); outPath != "" {
-		csv := "customers,backend,ops_per_sec,total_ops,elapsed_ns,avg_ns,p90_ns\n"
+		csv := "customers,backend,ops_per_sec,total_ops,attempts,fail_total,fail_checking,fail_account,fail_savings,fail_other,elapsed_ns,avg_ns,p90_ns\n"
 		for _, r := range csvRows {
 			if backendMode == "both" || backendMode == "badger" {
-				csv += fmt.Sprintf("%d,badger,%.3f,%d,%d,%d,%d\n",
+				csv += fmt.Sprintf("%d,badger,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
 					r.customers,
 					r.badgerOps,
 					r.badgerOpsCount,
+					r.badgerAttempts,
+					r.badgerFailTotal,
+					r.badgerFailChecking,
+					r.badgerFailAccount,
+					r.badgerFailSavings,
+					r.badgerFailOther,
 					r.badgerElapsed.Nanoseconds(),
 					r.badgerAvg.Nanoseconds(),
 					r.badgerP90.Nanoseconds(),
 				)
 			}
 			if backendMode == "both" || backendMode == "duckdb" {
-				csv += fmt.Sprintf("%d,duckdb,%.3f,%d,%d,%d,%d\n",
+				csv += fmt.Sprintf("%d,duckdb,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
 					r.customers,
 					r.duckdbOps,
 					r.duckdbOpsCount,
+					r.duckdbAttempts,
+					r.duckdbFailTotal,
+					r.duckdbFailChecking,
+					r.duckdbFailAccount,
+					r.duckdbFailSavings,
+					r.duckdbFailOther,
 					r.duckdbElapsed.Nanoseconds(),
 					r.duckdbAvg.Nanoseconds(),
 					r.duckdbP90.Nanoseconds(),
