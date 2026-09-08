@@ -79,6 +79,9 @@ numTxns=${NUM_TXNS:-200}
 numPackages=${NUM_PACKAGES:-20000}
 totalPackages=\$((numBroker * numPackages))
 maxEpochs=${MAX_EPOCHS:-20000}
+smallBankCustomers=${SMALLBANK_CUSTOMERS:-1000}
+traceReadsFrom=${TRACE_READS_FROM:-false}
+traceFinalState=${TRACE_FINAL_STATE:-false}
 
 if [ "\$clusterType" == "emulab" ]; then
     export suffix="net"

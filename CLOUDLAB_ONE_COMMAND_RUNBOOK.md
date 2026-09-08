@@ -93,3 +93,24 @@ INTERVAL_SEC=15 DURATION_SEC=300 scripts/cloudlab_monitor_loop.sh
 ```
 
 Outputs are under `artifacts/cloudlab/...` as CSV + Markdown.
+
+## 5) Distributed reads-from trace and replay
+
+For a correctness run, enable tracing before starting the cluster:
+
+```bash
+cd /Users/AshleyLuo1/GolandProjects/darshan-badger
+TRACE_READS_FROM=true TRACE_FINAL_STATE=true \
+scripts/cloudlab_orchestrate.sh prepare
+```
+
+The server writes transaction traces under `logs/reads_from/` and a final-state
+snapshot at shutdown. After collecting the logs into a result directory, run:
+
+```bash
+python3 /Users/AshleyLuo1/GolandProjects/lock-free-machine/scripts/check_reads_from.py \
+  /Users/AshleyLuo1/GolandProjects/lock-free-machine/scripts/results/<run>
+```
+
+The checker replays committed transactions in `CustomTs` order and reports
+read/version mismatches, duplicate records, and final-state mismatches.

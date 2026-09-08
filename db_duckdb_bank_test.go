@@ -284,7 +284,9 @@ func TestDuckDBBankDivytimeSimulatedDelay(t *testing.T) {
 func BenchmarkDuckDBBankTPS(b *testing.B) {
 	oracle := divytime.NewOracle(1, 0)
 	withDuckDB(b, true, func(db *DB) {
-		seedDuckDBAccounts(b, db, oracle)
+		// nil recorder: this benchmark measures raw TPS, and per-read
+		// recording allocations would perturb the number it reports.
+		seedDuckDBAccountsRec(b, db, oracle, nil)
 		b.ResetTimer()
 
 		var ops atomic.Int64
@@ -302,7 +304,7 @@ func BenchmarkDuckDBBankTPS(b *testing.B) {
 						return
 					default:
 					}
-					execTransfer(b, db, oracle, rng)
+					execTransferRec(b, db, oracle, rng, nil)
 					ops.Add(1)
 				}
 			}()
@@ -347,23 +349,53 @@ func BenchmarkLockFreeIngest_DuckDB(b *testing.B) {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+// seedDuckDBAccounts keeps the original three-argument shape so it can still be
+// passed as a function value to runBankOnBackend in the comparison tests.
 func seedDuckDBAccounts(tb testing.TB, db *DB, oracle *divytime.Oracle) {
+	tb.Helper()
+	seedDuckDBAccountsRec(tb, db, oracle, nil)
+}
+
+// seedDuckDBAccountsRec writes the initial balance for every account.
+//
+// When rec is non-nil each seed write is recorded as a committed, read-free
+// transaction. The initial state MUST be part of the recorded history: without
+// it the sequential replay starts from an empty map and every subsequent read
+// is reported as a found-mismatch against nothing.
+//
+// Note these seed transactions deliberately reuse one timestamp for both readTs
+// and commitTs. That is fine here because they read nothing — Verify only
+// requires commitTs > readTs for transactions that actually took a snapshot.
+func seedDuckDBAccountsRec(tb testing.TB, db *DB, oracle *divytime.Oracle, rec *RFRecorder) {
 	tb.Helper()
 	for i := 0; i < numBankAccounts; i++ {
 		ts, _ := oracle.GetTimestamp(int64(i) + 1)
-		txn := db.NewTransactionAt(divyToTs(ts), true)
-		if err := txn.Set(bankKey(i), bankEncodeUint64(initialBankBal)); err != nil {
+		cts := divyToTs(ts)
+		txn := db.NewTransactionAt(cts, true)
+		val := bankEncodeUint64(initialBankBal)
+		if err := txn.Set(bankKey(i), val); err != nil {
 			tb.Fatalf("seed account %d: %v", i, err)
 		}
-		if err := txn.CommitAt(divyToTs(ts), nil); err != nil {
+		if err := txn.CommitAt(cts, nil); err != nil {
 			tb.Fatalf("seed commit account %d: %v", i, err)
+		}
+		if rec != nil {
+			rec.Add(&RFTxn{
+				ID:        rec.NextID(),
+				Label:     "SEED",
+				CommitTs:  cts,
+				Committed: true,
+				Writes:    []RFWrite{{Key: bankKey(i), Value: val}},
+			})
 		}
 	}
 }
 
-// execTransfer moves transferAmount from a random source to a random
+// Transfer correctness design (applies to execTransferRec below)
+// ==============================================================
+// execTransferRec moves transferAmount from a random source to a random
 // destination using an atomic read-modify-write via Badger optimistic
-// concurrency control. Returns the elapsed time.
+// concurrency control.
 //
 // Correctness design
 // ------------------
@@ -398,7 +430,65 @@ func seedDuckDBAccounts(tb testing.TB, db *DB, oracle *divytime.Oracle) {
 //
 // Conflict detection remains correct: any concurrent write that commits in the
 // window (readTs, commitTs] is caught by hasConflict and triggers a retry.
+//
+// IMPORTANT: this reasoning holds only because the bank tests open with
+// DefaultOptions (DetectConflicts=true). The deployed server opens with
+// WithDetectConflicts(false), where newCommitTs returns before hasConflict is
+// reached and none of the above applies. See abort_stats.go.
+
+// transferOutcome classifies how a transfer attempt ended. Before this, every
+// return path out of execTransfer looked identical to the caller — a successful
+// transfer, a transfer skipped for insufficient funds, and a transfer abandoned
+// because a read failed were all just "one transfer op". That made the op count
+// an upper bound on work actually done, and made read failures invisible.
+type transferOutcome int
+
+const (
+	transferCommitted transferOutcome = iota
+	transferInsufficientFunds
+	transferReadFailed
+	transferPrefetchFailed
+	transferSetFailed
+	transferCommitFailed
+	transferRetriesExhausted
+)
+
+func (o transferOutcome) String() string {
+	switch o {
+	case transferCommitted:
+		return "committed"
+	case transferInsufficientFunds:
+		return "insufficient-funds"
+	case transferReadFailed:
+		return "read-failed"
+	case transferPrefetchFailed:
+		return "prefetch-failed"
+	case transferSetFailed:
+		return "set-failed"
+	case transferCommitFailed:
+		return "commit-failed"
+	case transferRetriesExhausted:
+		return "retries-exhausted"
+	default:
+		return "unknown"
+	}
+}
+
+// execTransfer keeps the original signature (duration only) so it can still be
+// used as a function value by the comparison and stress tests.
 func execTransfer(tb testing.TB, db *DB, oracle *divytime.Oracle, rng *rand.Rand) time.Duration {
+	d, _ := execTransferRec(tb, db, oracle, rng, nil)
+	return d
+}
+
+// execTransferRec moves transferAmount between two random accounts and reports
+// how the attempt ended.
+//
+// rec may be nil. When non-nil, EVERY attempt is recorded — including attempts
+// that aborted on conflict — because the reads-from checker needs to exclude
+// aborted attempts from the reference execution rather than never learn they
+// happened.
+func execTransferRec(tb testing.TB, db *DB, oracle *divytime.Oracle, rng *rand.Rand, rec *RFRecorder) (time.Duration, transferOutcome) {
 	start := time.Now()
 	from := rng.Intn(numBankAccounts)
 	to := rng.Intn(numBankAccounts)
@@ -421,37 +511,61 @@ func execTransfer(tb testing.TB, db *DB, oracle *divytime.Oracle, rng *rand.Rand
 		fromKey, toKey := bankKey(from), bankKey(to)
 		if err := txn.PrefetchKeys([][]byte{fromKey, toKey}); err != nil {
 			txn.Discard()
-			return time.Since(start)
+			return time.Since(start), transferPrefetchFailed
 		}
 
 		fromItem, err := txn.Get(fromKey)
 		if err != nil {
 			txn.Discard()
-			return time.Since(start)
+			return time.Since(start), transferReadFailed
 		}
 		fromBal, _ := fromItem.ValueCopy(nil)
+		// Capture the reads-from edge: item.Version() is the commit timestamp
+		// of the transaction whose write this read landed on.
+		reads := []RFRead{{
+			Key: fromKey, Found: true, Value: fromBal,
+			ObservedVersion: fromItem.Version(),
+		}}
+
 		if bankDecodeUint64(fromBal) < transferAmount {
 			txn.Discard()
-			return time.Since(start)
+			// Read-only outcome, but the read still happened and must be
+			// checked — a stale read here is just as much a violation.
+			if rec != nil {
+				rec.Add(&RFTxn{
+					ID: rec.NextID(), Label: "TRANSFER-SKIPPED",
+					ReadTs: readTs, Committed: true, Reads: reads,
+				})
+			}
+			return time.Since(start), transferInsufficientFunds
 		}
 
 		toItem, err := txn.Get(toKey)
 		if err != nil {
 			txn.Discard()
-			return time.Since(start)
+			return time.Since(start), transferReadFailed
 		}
 		toBal, _ := toItem.ValueCopy(nil)
+		reads = append(reads, RFRead{
+			Key: toKey, Found: true, Value: toBal,
+			ObservedVersion: toItem.Version(),
+		})
 
 		newFrom := bankDecodeUint64(fromBal) - transferAmount
 		newTo := bankDecodeUint64(toBal) + transferAmount
 
-		if err := txn.Set(bankKey(from), bankEncodeUint64(newFrom)); err != nil {
+		fromVal, toVal := bankEncodeUint64(newFrom), bankEncodeUint64(newTo)
+		if err := txn.Set(bankKey(from), fromVal); err != nil {
 			txn.Discard()
-			return time.Since(start)
+			return time.Since(start), transferSetFailed
 		}
-		if err := txn.Set(bankKey(to), bankEncodeUint64(newTo)); err != nil {
+		if err := txn.Set(bankKey(to), toVal); err != nil {
 			txn.Discard()
-			return time.Since(start)
+			return time.Since(start), transferSetFailed
+		}
+		writes := []RFWrite{
+			{Key: fromKey, Value: fromVal},
+			{Key: toKey, Value: toVal},
 		}
 
 		// Oracle call 2: commit timestamp — obtained after all reads and writes
@@ -472,12 +586,28 @@ func execTransfer(tb testing.TB, db *DB, oracle *divytime.Oracle, rng *rand.Rand
 
 		commitErr := txn.CommitAt(commitTs, nil)
 		txn.Discard()
+
+		if rec != nil {
+			rec.Add(&RFTxn{
+				ID:        rec.NextID(),
+				Label:     "TRANSFER",
+				ReadTs:    readTs,
+				CommitTs:  commitTs,
+				Committed: commitErr == nil,
+				Reads:     reads,
+				Writes:    writes,
+			})
+		}
+
 		if commitErr == ErrConflict {
 			continue // retry with fresh timestamps
 		}
-		return time.Since(start)
+		if commitErr != nil {
+			return time.Since(start), transferCommitFailed
+		}
+		return time.Since(start), transferCommitted
 	}
-	return time.Since(start)
+	return time.Since(start), transferRetriesExhausted
 }
 
 // verifyBankTotal reads the latest balance of every account and asserts the
@@ -519,12 +649,39 @@ func verifyBankTotal(tb testing.TB, db *DB) {
 	}
 }
 
+// rfRecorderCap bounds the recorded history. At 1,000 accounts and a few
+// seconds of 16-worker traffic this is comfortably above the real transaction
+// count, so runs are verified end-to-end rather than on a prefix. It exists so
+// that pointing this driver at a longer run degrades to INCONCLUSIVE instead of
+// exhausting memory. Override with BADGER_RF_MAX_TXNS.
+const rfRecorderCap = 2_000_000
+
+// newBankRecorder returns a recorder unless reads-from checking is disabled.
+// Recording is on by default for the correctness tests (they are short) and can
+// be turned off with BADGER_RF_CHECK=0 when measuring throughput, since the
+// per-read allocations do perturb TPS.
+func newBankRecorder() *RFRecorder {
+	if os.Getenv("BADGER_RF_CHECK") == "0" {
+		return nil
+	}
+	limit := rfRecorderCap
+	if raw := strings.TrimSpace(os.Getenv("BADGER_RF_MAX_TXNS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			limit = n
+		}
+	}
+	return NewRFRecorder(limit)
+}
+
 // runBankWorkload is the shared driver used by all bank tests and benchmarks.
 func runBankWorkload(tb testing.TB, oracle *divytime.Oracle, dur time.Duration, workers int, quiet bool) {
+	ResetAbortStats()
+	rec := newBankRecorder()
+
 	withDuckDB(tb, true, func(db *DB) {
 		// Phase 1: seed accounts.
 		setupStart := time.Now()
-		seedDuckDBAccounts(tb, db, oracle)
+		seedDuckDBAccountsRec(tb, db, oracle, rec)
 		if !quiet {
 			switch t := tb.(type) {
 			case *testing.T:
@@ -539,6 +696,17 @@ func runBankWorkload(tb testing.TB, oracle *divytime.Oracle, dur time.Duration, 
 			sumChecks   atomic.Int64
 			stop        int32
 			wg          sync.WaitGroup
+
+			// Outcome breakdown for transfers. Without this, "N transfer ops"
+			// silently mixes committed transfers with attempts that returned
+			// early on a failed read or insufficient funds.
+			transferOutcomes [transferRetriesExhausted + 1]atomic.Int64
+
+			// Read-only failures were previously swallowed by `if err == nil`.
+			// In the deployed server this same shape (a Get that finds no
+			// visible version) is the dominant transaction failure, so it must
+			// be counted here too.
+			readOnlyNotFound atomic.Int64
 		)
 
 		// Phase 2: concurrent workload.
@@ -553,18 +721,43 @@ func runBankWorkload(tb testing.TB, oracle *divytime.Oracle, dur time.Duration, 
 					r := rng.Intn(100)
 					switch {
 					case r < 70: // 70% transfers
-						d := execTransfer(tb, db, oracle, rng)
+						d, outcome := execTransferRec(tb, db, oracle, rng, rec)
 						stats.record(txTransfer, d)
 						transferOps.Add(1)
+						transferOutcomes[outcome].Add(1)
 
 					case r < 95: // 25% read-only
 						start := time.Now()
 						ts, _ := oracle.GetTimestamp(int64(time.Now().UnixNano()))
-						txn := db.NewTransactionAt(divyToTs(ts), false)
+						readTs := divyToTs(ts)
+						txn := db.NewTransactionAt(readTs, false)
 						acc := rng.Intn(numBankAccounts)
-						item, err := txn.Get(bankKey(acc))
+						key := bankKey(acc)
+						item, err := txn.Get(key)
 						if err == nil {
-							_, _ = item.ValueCopy(nil)
+							val, _ := item.ValueCopy(nil)
+							if rec != nil {
+								rec.Add(&RFTxn{
+									ID: rec.NextID(), Label: "READ_ONLY",
+									ReadTs: readTs, Committed: true,
+									Reads: []RFRead{{
+										Key: key, Found: true, Value: val,
+										ObservedVersion: item.Version(),
+									}},
+								})
+							}
+						} else {
+							readOnlyNotFound.Add(1)
+							// A not-found on a seeded account is itself an
+							// anomaly; record it so the replay can say whether
+							// the key should have been visible at this readTs.
+							if rec != nil {
+								rec.Add(&RFTxn{
+									ID: rec.NextID(), Label: "READ_ONLY-NOTFOUND",
+									ReadTs: readTs, Committed: true,
+									Reads: []RFRead{{Key: key, Found: false}},
+								})
+							}
 						}
 						txn.Discard()
 						stats.record(txReadOnly, time.Since(start))
@@ -614,14 +807,79 @@ func runBankWorkload(tb testing.TB, oracle *divytime.Oracle, dur time.Duration, 
 				divStats.Count,
 				time.Duration(divStats.AvgNs).Round(time.Microsecond),
 				time.Duration(divStats.P90Ns).Round(time.Microsecond))
+
+			// Transfer outcome breakdown: distinguishes work done from work
+			// attempted. transferOps alone cannot.
+			t.Logf("")
+			t.Logf("  transfer outcomes:")
+			for o := transferCommitted; o <= transferRetriesExhausted; o++ {
+				t.Logf("    %-20s %d", o.String(), transferOutcomes[o].Load())
+			}
+			t.Logf("    %-20s %d", "read-only-not-found", readOnlyNotFound.Load())
+
+			// Abort breakdown from the storage layer itself.
+			t.Logf("")
+			t.Logf("%s", SnapshotAbortStats().Report())
 		}
 
-		// Phase 4: correctness check.
+		// Phase 4a: the weak invariant (sum of balances).
 		verifyBankTotal(tb, db)
+
+		// Phase 4b: the strong invariant — reads-from equivalence to the
+		// commit-timestamp-ordered sequential execution. This subsumes 4a: a
+		// lost update that happens to preserve the total passes 4a and fails
+		// here on the read-version comparison.
+		if rec != nil {
+			verifyReadsFrom(tb, db, rec)
+		}
 
 		switch t := tb.(type) {
 		case *testing.T:
 			t.Logf("PASS: balance invariant holds after %d transfer ops", transferOps.Load())
 		}
 	})
+}
+
+// verifyReadsFrom snapshots the final database state and runs the reads-from
+// equivalence check against the recorded history.
+func verifyReadsFrom(tb testing.TB, db *DB, rec *RFRecorder) {
+	tb.Helper()
+
+	// Final state via one ScanPrefix per partition at MaxTs, matching how
+	// verifyBankTotal reads it.
+	txn := db.NewTransactionAt(types.MaxTs, false)
+	defer txn.Discard()
+
+	results, err := db.duckDBStorage.ScanPrefix([]byte(bankKeyPrefix), txn.readTs)
+	if err != nil {
+		tb.Fatalf("reads-from: scan final state: %v", err)
+	}
+	final := make(map[string][]byte, len(results))
+	for _, r := range results {
+		if r.Found {
+			buf := make([]byte, len(r.Value))
+			copy(buf, r.Value)
+			final[string(r.Key)] = buf
+		}
+	}
+
+	res := rec.Verify(final)
+
+	switch t := tb.(type) {
+	case *testing.T:
+		t.Logf("%s", res.Report(20))
+	}
+
+	switch {
+	case res.Truncated:
+		// Not a pass and not a failure of the engine: the harness gave up
+		// recording. Say so loudly rather than letting a green test imply a
+		// verified execution.
+		tb.Errorf("reads-from check INCONCLUSIVE: history truncated (%d txns dropped). "+
+			"Raise BADGER_RF_MAX_TXNS or shorten the run.", res.DroppedTxns)
+	case len(res.Violations) > 0:
+		tb.Errorf("reads-from equivalence violated: %d counterexample(s); "+
+			"the concurrent execution is not equivalent to the commit-ts-ordered "+
+			"sequential execution", len(res.Violations))
+	}
 }

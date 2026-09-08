@@ -11,7 +11,9 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"os"
 	"sync"
+	"time"
 
 	"github.com/dgraph-io/badger/v4/duckdb"
 	"github.com/dgraph-io/badger/v4/types"
@@ -54,6 +56,31 @@ type duckDBStorageWrapper struct {
 	wg      sync.WaitGroup
 }
 
+const directWriteBatchWindow = 1 * time.Millisecond
+
+func directWriteBatchWindowFromEnv() time.Duration {
+	raw := os.Getenv("BADGER_DUCKDB_DIRECT_WRITE_BATCH_WINDOW")
+	if raw == "" {
+		return directWriteBatchWindow
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return directWriteBatchWindow
+	}
+	// Keep this a bounded throughput tuning knob. The worker still preserves
+	// channel order and completion barriers; a longer window only trades a
+	// small amount of queueing latency for fewer DuckDB crossings.
+	minWindow := 100 * time.Microsecond
+	maxWindow := 20 * time.Millisecond
+	if d < minWindow {
+		return minWindow
+	}
+	if d > maxWindow {
+		return maxWindow
+	}
+	return d
+}
+
 // newDuckDBBackend creates a DuckDB-backed storage implementation.
 //
 // numVersionsToKeep is threaded through from Options.NumVersionsToKeep so
@@ -78,37 +105,90 @@ func newDuckDBBackend(path string, parts int, numVersionsToKeep int) (duckDBIfac
 // DuckDB's cross-goroutine transactional deadlocks.
 func (w *duckDBStorageWrapper) duckDBWriteWorker() {
 	defer w.wg.Done()
+	batchWindow := directWriteBatchWindowFromEnv()
 	for task := range w.writeCh {
-		var err error
 		if task.isDirect {
-			darshanEntries := make([]*duckdb.DarshanEntry, 0, len(task.entries))
-			for _, e := range task.entries {
-				darshanEntries = append(darshanEntries, &duckdb.DarshanEntry{
-					Key:       e.Key,
-					Value:     e.Value,
-					Deleted:   e.Deleted,
-					Timestamp: makeDivyTsFast(e.Version),
-					Version:   uint64(e.Version.EpochID),
-				})
-			}
-			err = w.s.DirectAppendEntries(darshanEntries)
-		} else {
-			darshanEntries := make([]*duckdb.DarshanEntry, len(task.entries))
-			for i, e := range task.entries {
-				darshanEntries[i] = &duckdb.DarshanEntry{
-					Key:       e.Key,
-					Value:     e.Value,
-					Version:   uint64(e.Version.EpochID),
-					Deleted:   e.Deleted,
-					Timestamp: makeDivyTs(e.Version),
+			batch := []duckDBWriteTask{task}
+			// A commit still waits for its own completion signal, but the
+			// appender call is shared across a short burst of commits. This
+			// removes one CGo/DuckDB call per transaction without weakening
+			// duckDBTracker's visibility barrier.
+			timer := time.NewTimer(batchWindow)
+		collect:
+			for len(batch) < 128 {
+				select {
+				case next := <-w.writeCh:
+					if next.isDirect {
+						batch = append(batch, next)
+						continue
+					}
+					// Preserve channel order for the first non-direct task.
+					// It is processed after this direct batch below.
+					timer.Stop()
+					err := w.processDirectBatch(batch)
+					for _, direct := range batch {
+						direct.done <- err
+					}
+					w.processWriteTask(next)
+					continue collect
+				case <-timer.C:
+					break collect
 				}
 			}
-			err = w.s.FlushDarshanEntries(darshanEntries)
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			err := w.processDirectBatch(batch)
+			for _, direct := range batch {
+				direct.done <- err
+			}
+			continue
 		}
-		// Respond to block barrier ensuring strict durability/visibility.
-		if task.done != nil {
-			task.done <- err
+		w.processWriteTask(task)
+	}
+}
+
+func (w *duckDBStorageWrapper) processDirectBatch(tasks []duckDBWriteTask) error {
+	var entries []duckEntry
+	for _, task := range tasks {
+		entries = append(entries, task.entries...)
+	}
+	darshanEntries := make([]*duckdb.DarshanEntry, 0, len(entries))
+	for _, e := range entries {
+		darshanEntries = append(darshanEntries, &duckdb.DarshanEntry{
+			Key:       e.Key,
+			Value:     e.Value,
+			Deleted:   e.Deleted,
+			Timestamp: makeDivyTsFast(e.Version),
+			Version:   uint64(e.Version.EpochID),
+		})
+	}
+	return w.s.DirectAppendEntries(darshanEntries)
+}
+
+func (w *duckDBStorageWrapper) processWriteTask(task duckDBWriteTask) {
+	var err error
+	if task.isDirect {
+		err = w.processDirectBatch([]duckDBWriteTask{task})
+	} else {
+		darshanEntries := make([]*duckdb.DarshanEntry, len(task.entries))
+		for i, e := range task.entries {
+			darshanEntries[i] = &duckdb.DarshanEntry{
+				Key:       e.Key,
+				Value:     e.Value,
+				Version:   uint64(e.Version.EpochID),
+				Deleted:   e.Deleted,
+				Timestamp: makeDivyTs(e.Version),
+			}
 		}
+		err = w.s.FlushDarshanEntries(darshanEntries)
+	}
+	// Respond to block barrier ensuring strict durability/visibility.
+	if task.done != nil {
+		task.done <- err
 	}
 }
 
@@ -149,6 +229,10 @@ func (w *duckDBStorageWrapper) DirectFlush(entries []duckEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
+	// Keep the short batching window: it amortizes the CGo/appender boundary
+	// across a burst of commits and is materially faster than issuing one
+	// DuckDB call per transaction. The storage layer still handles partition
+	// locking and visibility barriers independently.
 	done := make(chan error, 1)
 	w.writeCh <- duckDBWriteTask{entries: entries, isDirect: true, done: done}
 	return <-done

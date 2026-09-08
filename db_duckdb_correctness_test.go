@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/dgraph-io/badger/v4/types"
 )
@@ -257,6 +258,37 @@ func TestDuckDBIntegration(t *testing.T) {
 			if !bytes.Equal(got, expected) {
 				t.Fatalf("key%03d: expected %q got %q", i, expected, got)
 			}
+		}
+	})
+}
+
+// TestDuckDBReadBatchReleasesSingleKeyConnections guards the hot path used by
+// SmallBank prefetch. A single-key lookup must return its dedicated read
+// connection whether it finds a row or not; otherwise two calls exhaust the
+// per-partition pool and the next transaction hangs in acquireRead.
+func TestDuckDBReadBatchReleasesSingleKeyConnections(t *testing.T) {
+	withDuckDB(t, true, func(db *DB) {
+		read := func() {
+			_, err := db.duckDBStorage.ReadBatch([]duckReadBatchReq{{
+				Key:    []byte("missing-read-batch-key"),
+				ReadTs: types.MaxTs,
+			}})
+			if err != nil {
+				t.Errorf("ReadBatch: %v", err)
+			}
+		}
+
+		done := make(chan struct{})
+		go func() {
+			for i := 0; i < 3; i++ {
+				read()
+			}
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("ReadBatch exhausted a per-partition read connection pool")
 		}
 	})
 }

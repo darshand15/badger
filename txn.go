@@ -207,9 +207,15 @@ func (o *oracle) discardAtOrBelow() types.CustomTs {
 }
 
 // hasConflict must be called while having a lock.
-func (o *oracle) hasConflict(txn *Txn) bool {
+//
+// Returns (conflict, conflictingReadFingerprint, commitTsOfConflictingTxn).
+// The two extra return values exist purely for abort attribution: txn.reads
+// holds key *fingerprints* (see addReadKey), so the original key bytes are not
+// recoverable at this point — the fingerprint plus the colliding committer's
+// commitTs is the most specific identification this data structure supports.
+func (o *oracle) hasConflict(txn *Txn) (bool, uint64, types.CustomTs) {
 	if len(txn.reads) == 0 {
-		return false
+		return false, 0, types.CustomTs{}
 	}
 	for _, committedTxn := range o.committedTxns {
 		// If the committedTxn.ts is less than txn.readTs that implies that the
@@ -224,12 +230,12 @@ func (o *oracle) hasConflict(txn *Txn) bool {
 
 		for _, ro := range txn.reads {
 			if _, has := committedTxn.conflictKeys[ro]; has {
-				return true
+				return true, ro, committedTxn.ts
 			}
 		}
 	}
 
-	return false
+	return false, 0, types.CustomTs{}
 }
 
 func (o *oracle) newCommitTs(txn *Txn) (types.CustomTs, bool) {
@@ -245,13 +251,28 @@ func (o *oracle) newCommitTs(txn *Txn) (types.CustomTs, bool) {
 	// this call is safe whether or not pre-registration already happened.
 	if o.isManaged && !o.detectConflicts {
 		o.duckDBTracker.begin(txn.commitTs)
+		// Attribution, not an abort: this commit never ran hasConflict, so a
+		// zero conflict-abort count for this run means "never looked", not
+		// "no conflicts". See abort_stats.go.
+		recordAbort(txn.db.opt.Logger, abortEvent{
+			reason:   ReasonConflictCheckSkipped,
+			readTs:   txn.readTs,
+			commitTs: txn.commitTs,
+		})
 		return txn.commitTs, false
 	}
 
 	o.Lock()
 	defer o.Unlock()
 
-	if o.hasConflict(txn) {
+	if conflict, fp, withTs := o.hasConflict(txn); conflict {
+		recordAbort(txn.db.opt.Logger, abortEvent{
+			reason:         ReasonConflictHasConflict,
+			readTs:         txn.readTs,
+			commitTs:       txn.commitTs,
+			conflictFP:     fp,
+			conflictWithTs: withTs,
+		})
 		// return 0, true
 		return types.CustomTs{}, true
 	}
@@ -921,6 +942,12 @@ func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 			writeChLocked = false
 		}
 		if err := txn.db.duckDBStorage.DirectFlush(ducks); err != nil {
+			recordAbort(txn.db.opt.Logger, abortEvent{
+				reason:   ReasonDuckDBFlushError,
+				readTs:   txn.readTs,
+				commitTs: commitTs,
+				err:      err,
+			})
 			orc.doneCommit(commitTs)
 			return nil, types.CustomTs{}, err
 		}
@@ -959,6 +986,12 @@ func (txn *Txn) commitAndSend() (*request, types.CustomTs, error) {
 	// Standard write-channel path (DuckDB or NumCompactors>0).
 	req, err := txn.db.sendToWriteCh(entries)
 	if err != nil {
+		recordAbort(txn.db.opt.Logger, abortEvent{
+			reason:   ReasonWriteChError,
+			readTs:   txn.readTs,
+			commitTs: commitTs,
+			err:      err,
+		})
 		orc.doneCommit(commitTs)
 		return nil, types.CustomTs{}, err
 	}
@@ -1022,6 +1055,11 @@ func (txn *Txn) Commit() error {
 	// txn.conflictKeys can be zero if conflict detection is turned off. So we
 	// should check txn.pendingWrites.
 	if len(txn.pendingWrites) == 0 {
+		recordAbort(txn.db.opt.Logger, abortEvent{
+			reason:   ReasonEmptyWriteSet,
+			readTs:   txn.readTs,
+			commitTs: txn.commitTs,
+		})
 		txn.deregisterPendingCommit()
 		// Discard the transaction so that the read is marked done.
 		txn.Discard()
@@ -1029,6 +1067,12 @@ func (txn *Txn) Commit() error {
 	}
 	// Precheck before discarding txn.
 	if err := txn.commitPrecheck(); err != nil {
+		recordAbort(txn.db.opt.Logger, abortEvent{
+			reason:   ReasonPrecheckFailure,
+			readTs:   txn.readTs,
+			commitTs: txn.commitTs,
+			err:      err,
+		})
 		txn.deregisterPendingCommit()
 		return err
 	}
@@ -1036,6 +1080,8 @@ func (txn *Txn) Commit() error {
 
 	// commitAndSend returns req+commitTs directly (no closure) to avoid 1 heap alloc.
 	// req is nil for the lock-free CAS path; doneCommit was already called there.
+	// Every failure mode inside commitAndSend already recorded its own reason
+	// (conflict / duckdb-flush / write-ch), so do not double-count here.
 	req, commitTs, err := txn.commitAndSend()
 	if err != nil {
 		return err
@@ -1050,6 +1096,14 @@ func (txn *Txn) Commit() error {
 	// Nothing gets updated to LSM, until a restart happens.
 	waitErr := req.Wait()
 	txn.db.orc.doneCommit(commitTs)
+	if waitErr != nil {
+		recordAbort(txn.db.opt.Logger, abortEvent{
+			reason:   ReasonCommitWaitError,
+			readTs:   txn.readTs,
+			commitTs: commitTs,
+			err:      waitErr,
+		})
+	}
 	return waitErr
 }
 
@@ -1085,6 +1139,11 @@ func (txn *Txn) CommitWith(cb func(error)) {
 	}
 
 	if len(txn.pendingWrites) == 0 {
+		recordAbort(txn.db.opt.Logger, abortEvent{
+			reason:   ReasonEmptyWriteSet,
+			readTs:   txn.readTs,
+			commitTs: txn.commitTs,
+		})
 		txn.deregisterPendingCommit()
 		// Do not run these callbacks from here, because the CommitWith and the
 		// callback might be acquiring the same locks. Instead run the callback
@@ -1097,6 +1156,12 @@ func (txn *Txn) CommitWith(cb func(error)) {
 
 	// Precheck before discarding txn.
 	if err := txn.commitPrecheck(); err != nil {
+		recordAbort(txn.db.opt.Logger, abortEvent{
+			reason:   ReasonPrecheckFailure,
+			readTs:   txn.readTs,
+			commitTs: txn.commitTs,
+			err:      err,
+		})
 		txn.deregisterPendingCommit()
 		cb(err)
 		return
@@ -1104,6 +1169,7 @@ func (txn *Txn) CommitWith(cb func(error)) {
 
 	defer txn.Discard()
 
+	// Failures inside commitAndSend already recorded their own reason.
 	req, commitTs, err := txn.commitAndSend()
 	if err != nil {
 		go runTxnCallback(&txnCb{user: cb, err: err})
@@ -1115,9 +1181,19 @@ func (txn *Txn) CommitWith(cb func(error)) {
 		return
 	}
 
+	readTs := txn.readTs
+	logger := txn.db.opt.Logger
 	go func() {
 		waitErr := req.Wait()
 		txn.db.orc.doneCommit(commitTs)
+		if waitErr != nil {
+			recordAbort(logger, abortEvent{
+				reason:   ReasonCommitWaitError,
+				readTs:   readTs,
+				commitTs: commitTs,
+				err:      waitErr,
+			})
+		}
 		cb(waitErr)
 	}()
 }
