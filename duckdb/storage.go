@@ -501,20 +501,18 @@ func readBatchSQL(tableName string, keyCount int) string {
 		placeholders[i] = "?"
 	}
 	return fmt.Sprintf(`
-		SELECT key, epoch_id, broker_id, assigned_ts, value, deleted
-		FROM (
-			SELECT key, epoch_id, broker_id, assigned_ts, value, deleted,
-			       ROW_NUMBER() OVER (
-			           PARTITION BY key
-			           ORDER BY epoch_id DESC, broker_id DESC, assigned_ts DESC
-			       ) AS rn
-			FROM %s
-			WHERE key IN (%s)
-			  AND (epoch_id < ? OR
-			       (epoch_id = ? AND broker_id < ?) OR
-			       (epoch_id = ? AND broker_id = ? AND assigned_ts <= ?))
-		) sub
-		WHERE rn = 1`, tableName, strings.Join(placeholders, ", "))
+		SELECT key,
+		       arg_max(epoch_id, struct_pack(epoch_id := epoch_id, broker_id := broker_id, assigned_ts := assigned_ts)) AS epoch_id,
+		       arg_max(broker_id, struct_pack(epoch_id := epoch_id, broker_id := broker_id, assigned_ts := assigned_ts)) AS broker_id,
+		       arg_max(assigned_ts, struct_pack(epoch_id := epoch_id, broker_id := broker_id, assigned_ts := assigned_ts)) AS assigned_ts,
+		       arg_max(value, struct_pack(epoch_id := epoch_id, broker_id := broker_id, assigned_ts := assigned_ts)) AS value,
+		       arg_max(deleted, struct_pack(epoch_id := epoch_id, broker_id := broker_id, assigned_ts := assigned_ts)) AS deleted
+		FROM %s
+		WHERE key IN (%s)
+		  AND (epoch_id < ? OR
+		       (epoch_id = ? AND broker_id < ?) OR
+		       (epoch_id = ? AND broker_id = ? AND assigned_ts <= ?))
+		GROUP BY key`, tableName, strings.Join(placeholders, ", "))
 }
 
 // initPersistentAppenders opens one SQL connection and one duckdb Appender per
