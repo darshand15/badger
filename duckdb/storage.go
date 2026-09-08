@@ -106,6 +106,12 @@ const defaultDirectFlushBatchSize int64 = 50_000
 // Tuned on Apple silicon using the Ashley sweep harness.
 const defaultReadPoolSize = 2
 
+// SmallBank transactions normally prefetch two or three keys. Preparing the
+// corresponding batch statements once per read connection avoids reparsing
+// the same ROW_NUMBER query for every transaction. Larger request sizes keep
+// using the dynamic fallback so memory use stays bounded.
+const maxPreparedReadBatchKeys = 8
+
 // defaultEnvFlushBatchSize is the fallback flush threshold for the memtable
 // flush path when BADGER_DUCKDB_FLUSH_BATCH_SIZE is unset/invalid.
 //
@@ -232,7 +238,11 @@ type partitionAppender struct {
 	// serializing every reader onto one connection.
 	readConns []*sql.Conn
 	readStmts []*sql.Stmt
-	readFree  chan int // free-list of indices into readConns/readStmts
+	// batchStmts is indexed by request count and then read-connection index.
+	// Each connection has its own prepared statements because DuckDB statements
+	// cannot be used concurrently on a connection.
+	batchStmts map[int][]*sql.Stmt
+	readFree   chan int // free-list of indices into readConns/readStmts
 }
 
 type pendingValue struct {
@@ -485,6 +495,28 @@ func (s *DuckDBStorage) verifyOrRecordFanOut(numPartitions int) error {
 	}
 }
 
+func readBatchSQL(tableName string, keyCount int) string {
+	placeholders := make([]string, keyCount)
+	for i := range placeholders {
+		placeholders[i] = "?"
+	}
+	return fmt.Sprintf(`
+		SELECT key, epoch_id, broker_id, assigned_ts, value, deleted
+		FROM (
+			SELECT key, epoch_id, broker_id, assigned_ts, value, deleted,
+			       ROW_NUMBER() OVER (
+			           PARTITION BY key
+			           ORDER BY epoch_id DESC, broker_id DESC, assigned_ts DESC
+			       ) AS rn
+			FROM %s
+			WHERE key IN (%s)
+			  AND (epoch_id < ? OR
+			       (epoch_id = ? AND broker_id < ?) OR
+			       (epoch_id = ? AND broker_id = ? AND assigned_ts <= ?))
+		) sub
+		WHERE rn = 1`, tableName, strings.Join(placeholders, ", "))
+}
+
 // initPersistentAppenders opens one SQL connection and one duckdb Appender per
 // partition and stores them in s.partAppenders.  These are kept alive for the
 // lifetime of the storage instance; re-using them across flushes eliminates
@@ -560,6 +592,7 @@ func (s *DuckDBStorage) initPersistentAppenders() error {
 		pa := s.partAppenders[i]
 		pa.readConns = make([]*sql.Conn, s.readPoolSize)
 		pa.readStmts = make([]*sql.Stmt, s.readPoolSize)
+		pa.batchStmts = make(map[int][]*sql.Stmt, maxPreparedReadBatchKeys-1)
 		pa.readFree = make(chan int, s.readPoolSize)
 		for j := 0; j < s.readPoolSize; j++ {
 			rc, err := s.db.Conn(s.ctx)
@@ -574,6 +607,13 @@ func (s *DuckDBStorage) initPersistentAppenders() error {
 			pa.readConns[j] = rc
 			pa.readStmts[j] = rstmt
 			pa.readFree <- j
+			for keyCount := 2; keyCount <= maxPreparedReadBatchKeys; keyCount++ {
+				stmt, err := rc.PrepareContext(s.ctx, readBatchSQL(tableName, keyCount))
+				if err != nil {
+					return fmt.Errorf("partition %d: prepare batch stmt %d on conn %d: %w", i, keyCount, j, err)
+				}
+				pa.batchStmts[keyCount] = append(pa.batchStmts[keyCount], stmt)
+			}
 		}
 	}
 	return nil
@@ -918,41 +958,33 @@ func (s *DuckDBStorage) ReadBatch(requests []ReadBatchRequest) ([]ReadBatchResul
 		// ROW_NUMBER() OVER (PARTITION BY key) fetches the latest visible row
 		// for every key in one SQL round-trip.
 		tableName := fmt.Sprintf("partition_%d", pid)
-		placeholders := make([]string, len(reqs))
 		args := make([]interface{}, 0, len(reqs)+6)
-		for i, r := range reqs {
-			placeholders[i] = "?"
+		for _, r := range reqs {
 			args = append(args, r.key)
 		}
-		inClause := strings.Join(placeholders, ", ")
 		args = append(args,
 			readTs.EpochID,
 			readTs.EpochID, readTs.BrokerID,
 			readTs.EpochID, readTs.BrokerID, readTs.AssignedTs,
 		)
-		querySQL := fmt.Sprintf(`
-			SELECT key, epoch_id, broker_id, assigned_ts, value, deleted
-			FROM (
-				SELECT key, epoch_id, broker_id, assigned_ts, value, deleted,
-				       ROW_NUMBER() OVER (
-				           PARTITION BY key
-				           ORDER BY epoch_id DESC, broker_id DESC, assigned_ts DESC
-				       ) AS rn
-				FROM %s
-				WHERE key IN (%s)
-				  AND (epoch_id < ? OR
-				       (epoch_id = ? AND broker_id < ?) OR
-				       (epoch_id = ? AND broker_id = ? AND assigned_ts <= ?))
-			) sub
-			WHERE rn = 1`, tableName, inClause)
+		var prepared *sql.Stmt
+		if stmts, ok := pa.batchStmts[len(reqs)]; ok && ridx < len(stmts) {
+			prepared = stmts[ridx]
+		}
 
-		// Ad hoc IN-clause SQL varies per call (placeholder count depends on
-		// len(reqs)), so it can't use a pre-prepared statement. Still, run it
-		// on one of this partition's dedicated read connections rather than
+		// Run the prepared common-size query when available. Larger requests use
+		// the dynamic fallback, still on one of this partition's dedicated
+		// read connections rather than
 		// s.db, to avoid database/sql's global pool-checkout lock. The
 		// connection stays checked out until rows.Close() below — a single
 		// DuckDB connection can only serve one open Rows at a time.
-		rows, err := pa.readConns[ridx].QueryContext(s.ctx, querySQL, args...)
+		var rows *sql.Rows
+		var err error
+		if prepared != nil {
+			rows, err = prepared.QueryContext(s.ctx, args...)
+		} else {
+			rows, err = pa.readConns[ridx].QueryContext(s.ctx, readBatchSQL(tableName, len(reqs)), args...)
+		}
 		if err != nil {
 			pa.mu.RUnlock()
 			pa.releaseRead(ridx)
@@ -1311,6 +1343,13 @@ func (s *DuckDBStorage) Close() error {
 			if stmt != nil {
 				if err := stmt.Close(); err != nil {
 					setErr(fmt.Errorf("close read stmt partition %d idx %d: %w", i, j, err))
+				}
+			}
+			for keyCount, stmts := range pa.batchStmts {
+				if j < len(stmts) && stmts[j] != nil {
+					if err := stmts[j].Close(); err != nil {
+						setErr(fmt.Errorf("close batch stmt partition %d keys %d idx %d: %w", i, keyCount, j, err))
+					}
 				}
 			}
 			if pa.readConns[j] != nil {
