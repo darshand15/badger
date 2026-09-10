@@ -152,19 +152,21 @@ func (w *duckDBStorageWrapper) duckDBWriteWorker() {
 }
 
 func (w *duckDBStorageWrapper) processDirectBatch(tasks []duckDBWriteTask) error {
-	var entries []duckEntry
+	totalEntries := 0
 	for _, task := range tasks {
-		entries = append(entries, task.entries...)
+		totalEntries += len(task.entries)
 	}
-	darshanEntries := make([]*duckdb.DarshanEntry, 0, len(entries))
-	for _, e := range entries {
-		darshanEntries = append(darshanEntries, &duckdb.DarshanEntry{
-			Key:       e.Key,
-			Value:     e.Value,
-			Deleted:   e.Deleted,
-			Timestamp: makeDivyTsFast(e.Version),
-			Version:   uint64(e.Version.EpochID),
-		})
+	darshanEntries := make([]*duckdb.DarshanEntry, 0, totalEntries)
+	for _, task := range tasks {
+		for _, e := range task.entries {
+			darshanEntries = append(darshanEntries, &duckdb.DarshanEntry{
+				Key:       e.Key,
+				Value:     e.Value,
+				Deleted:   e.Deleted,
+				Timestamp: makeDivyTsFast(e.Version),
+				Version:   uint64(e.Version.EpochID),
+			})
+		}
 	}
 	return w.s.DirectAppendEntries(darshanEntries)
 }
