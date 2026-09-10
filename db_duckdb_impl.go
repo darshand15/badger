@@ -58,6 +58,8 @@ type duckDBStorageWrapper struct {
 
 const directWriteBatchWindow = 1 * time.Millisecond
 
+const directWriteBatchMax = 128
+
 func directWriteBatchWindowFromEnv() time.Duration {
 	raw := os.Getenv("BADGER_DUCKDB_DIRECT_WRITE_BATCH_WINDOW")
 	if raw == "" {
@@ -79,6 +81,24 @@ func directWriteBatchWindowFromEnv() time.Duration {
 		return maxWindow
 	}
 	return d
+}
+
+func directWriteBatchMaxFromEnv() int {
+	raw := os.Getenv("BADGER_DUCKDB_DIRECT_WRITE_BATCH_MAX")
+	if raw == "" {
+		return directWriteBatchMax
+	}
+	var value int
+	if _, err := fmt.Sscanf(raw, "%d", &value); err != nil {
+		return directWriteBatchMax
+	}
+	if value < 1 {
+		return 1
+	}
+	if value > 2048 {
+		return 2048
+	}
+	return value
 }
 
 // newDuckDBBackend creates a DuckDB-backed storage implementation.
@@ -106,6 +126,7 @@ func newDuckDBBackend(path string, parts int, numVersionsToKeep int) (duckDBIfac
 func (w *duckDBStorageWrapper) duckDBWriteWorker() {
 	defer w.wg.Done()
 	batchWindow := directWriteBatchWindowFromEnv()
+	batchMax := directWriteBatchMaxFromEnv()
 	for task := range w.writeCh {
 		if task.isDirect {
 			batch := []duckDBWriteTask{task}
@@ -115,7 +136,7 @@ func (w *duckDBStorageWrapper) duckDBWriteWorker() {
 			// duckDBTracker's visibility barrier.
 			timer := time.NewTimer(batchWindow)
 		collect:
-			for len(batch) < 128 {
+			for len(batch) < batchMax {
 				select {
 				case next := <-w.writeCh:
 					if next.isDirect {
